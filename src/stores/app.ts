@@ -1,0 +1,283 @@
+import { defineStore } from "pinia";
+import { ref, computed } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+
+export interface SingboxStatus {
+  running: boolean;
+  uptime?: number;
+  pid?: number;
+  version?: string;
+}
+
+export interface Subscription {
+  id: string;
+  name: string;
+  url: string;
+  sub_type: "clash" | "v2ray" | "sip008" | "unknown";
+  node_count: number;
+  last_update?: string;
+  auto_update: boolean;
+  update_interval: number;
+}
+
+export interface ProxyNode {
+  id: string;
+  name: string;
+  group: string;
+  protocol: string;
+  server: string;
+  port: number;
+  latency?: number;        // ms
+  download_speed?: number; // KB/s
+  is_active: boolean;
+  subscription_id?: string;
+}
+
+export interface SpeedResult {
+  latency_ms?: number;
+  download_kbps?: number;
+}
+
+export interface AppConfig {
+  proxy_mode: "rule" | "global" | "direct" | "tun";
+  startup_with_system: boolean;
+  startup_minimized: boolean;
+  allow_lan: boolean;
+  http_port: number;
+  socks_port: number;
+  mixed_port: number;
+  api_port: number;
+  tun_enabled: boolean;
+  log_level: string;
+  theme: string;
+  language: string;
+  selected_subscription?: string;
+  active_nodes: Record<string, string>;
+  auto_update_interval: number;
+  auto_update_notify: boolean;
+  close_to_tray: boolean;
+}
+
+export interface TrafficPoint {
+  time: number;
+  upload: number;
+  download: number;
+}
+
+export const useAppStore = defineStore("app", () => {
+  const status = ref<SingboxStatus>({ running: false });
+  const subscriptions = ref<Subscription[]>([]);
+  const nodes = ref<ProxyNode[]>([]);
+  const config = ref<AppConfig>({
+    proxy_mode: "rule",
+    startup_with_system: false,
+    startup_minimized: false,
+    allow_lan: false,
+    http_port: 7890,
+    socks_port: 7891,
+    mixed_port: 7890,
+    api_port: 9090,
+    tun_enabled: false,
+    log_level: "info",
+    theme: "system",
+    language: "zh-CN",
+    active_nodes: {},
+    auto_update_interval: 24,
+    auto_update_notify: true,
+    close_to_tray: true,
+  });
+  const trafficHistory = ref<TrafficPoint[]>([]);
+  const loading = ref(false);
+  const error = ref<string | null>(null);
+
+  const activeNode = computed(() => {
+    // Prefer the node flagged as active; fall back to matching by saved tag name.
+    const byFlag = nodes.value.find((n) => n.is_active);
+    if (byFlag) return byFlag;
+    const activeTag = config.value.active_nodes["proxy"];
+    if (!activeTag) return undefined;
+    return nodes.value.find((n) => n.name === activeTag);
+  });
+
+  const nodesByGroup = computed(() => {
+    const groups: Record<string, ProxyNode[]> = {};
+    for (const node of nodes.value) {
+      if (!groups[node.group]) groups[node.group] = [];
+      groups[node.group].push(node);
+    }
+    return groups;
+  });
+
+  async function fetchStatus() {
+    try {
+      status.value = await invoke<SingboxStatus>("cmd_get_singbox_status");
+    } catch (e) {
+      console.error("fetchStatus error:", e);
+    }
+  }
+
+  async function startProxy() {
+    loading.value = true;
+    error.value = null;
+    try {
+      await invoke("cmd_start_singbox");
+      await fetchStatus();
+    } catch (e) {
+      error.value = String(e);
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  async function stopProxy() {
+    loading.value = true;
+    error.value = null;
+    try {
+      await invoke("cmd_stop_singbox");
+      await fetchStatus();
+    } catch (e) {
+      error.value = String(e);
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  async function fetchSubscriptions() {
+    subscriptions.value = await invoke<Subscription[]>("cmd_get_subscriptions");
+  }
+
+  async function addSubscription(name: string, url: string) {
+    const sub = await invoke<Subscription>("cmd_add_subscription", { name, url });
+    subscriptions.value.push(sub);
+    await fetchNodes();
+    return sub;
+  }
+
+  async function updateSubscription(id: string) {
+    const sub = await invoke<Subscription>("cmd_update_subscription", { id });
+    const idx = subscriptions.value.findIndex((s) => s.id === id);
+    if (idx !== -1) subscriptions.value[idx] = sub;
+    await fetchNodes();
+    return sub;
+  }
+
+  async function deleteSubscription(id: string) {
+    await invoke("cmd_delete_subscription", { id });
+    subscriptions.value = subscriptions.value.filter((s) => s.id !== id);
+    nodes.value = nodes.value.filter((n) => n.subscription_id !== id);
+  }
+
+  async function fetchNodes() {
+    nodes.value = await invoke<ProxyNode[]>("cmd_get_nodes");
+  }
+
+  async function setActiveNode(nodeId: string) {
+    await invoke("cmd_set_active_node", { nodeId });
+    await fetchNodes();
+  }
+
+  async function testNodeLatency(nodeId: string): Promise<number | null> {
+    try {
+      const ms = await invoke<number>("cmd_test_node_latency", { nodeId });
+      const idx = nodes.value.findIndex((n) => n.id === nodeId);
+      if (idx !== -1) nodes.value[idx] = { ...nodes.value[idx], latency: ms };
+      return ms;
+    } catch {
+      const idx = nodes.value.findIndex((n) => n.id === nodeId);
+      if (idx !== -1) nodes.value[idx] = { ...nodes.value[idx], latency: undefined };
+      return null;
+    }
+  }
+
+  async function testNodeSpeed(nodeId: string): Promise<SpeedResult | null> {
+    try {
+      const result = await invoke<SpeedResult>("cmd_test_node_speed", { nodeId });
+      const idx = nodes.value.findIndex((n) => n.id === nodeId);
+      if (idx !== -1) {
+        nodes.value[idx] = {
+          ...nodes.value[idx],
+          latency: result.latency_ms,
+          download_speed: result.download_kbps,
+        };
+      }
+      return result;
+    } catch {
+      const idx = nodes.value.findIndex((n) => n.id === nodeId);
+      if (idx !== -1) {
+        nodes.value[idx] = { ...nodes.value[idx], latency: undefined, download_speed: undefined };
+      }
+      return null;
+    }
+  }
+
+  async function autoSelectNode(): Promise<string | null> {
+    try {
+      const bestId = await invoke<string>("cmd_auto_select_node");
+      // Refresh nodes from backend to get updated latencies + active flag
+      await fetchNodes();
+      return bestId;
+    } catch (e) {
+      error.value = String(e);
+      return null;
+    }
+  }
+
+  async function fetchConfig() {
+    config.value = await invoke<AppConfig>("cmd_get_app_config");
+  }
+
+  async function saveConfig(newConfig: AppConfig) {
+    await invoke("cmd_save_app_config", { newConfig });
+    config.value = newConfig;
+  }
+
+  async function setProxyMode(mode: string) {
+    await invoke("cmd_set_proxy_mode", { mode });
+    config.value.proxy_mode = mode as AppConfig["proxy_mode"];
+  }
+
+  function addTrafficPoint(upload: number, download: number) {
+    trafficHistory.value.push({ time: Date.now(), upload, download });
+    if (trafficHistory.value.length > 60) {
+      trafficHistory.value.shift();
+    }
+  }
+
+  async function init() {
+    await Promise.all([
+      fetchStatus(),
+      fetchSubscriptions(),
+      fetchNodes(),
+      fetchConfig(),
+    ]);
+  }
+
+  return {
+    status,
+    subscriptions,
+    nodes,
+    config,
+    trafficHistory,
+    loading,
+    error,
+    activeNode,
+    nodesByGroup,
+    fetchStatus,
+    startProxy,
+    stopProxy,
+    fetchSubscriptions,
+    addSubscription,
+    updateSubscription,
+    deleteSubscription,
+    fetchNodes,
+    setActiveNode,
+    testNodeLatency,
+    testNodeSpeed,
+    autoSelectNode,
+    fetchConfig,
+    saveConfig,
+    setProxyMode,
+    addTrafficPoint,
+    init,
+  };
+});

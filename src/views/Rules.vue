@@ -1,0 +1,570 @@
+<script setup lang="ts">
+import { ref, onMounted } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  Plus, Trash2, ToggleLeft, ToggleRight, ChevronDown, ChevronUp,
+  Filter, Globe, Layers, BookMarked, Info, RotateCcw
+} from "@lucide/vue";
+
+// ─── Types ───────────────────────────────────────────────────────────
+
+type RuleAction = "proxy" | "direct" | "block" | "dns";
+
+interface RouteRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  action: RuleAction;
+  domain: string[];
+  domain_suffix: string[];
+  domain_keyword: string[];
+  geosite: string[];
+  geoip: string[];
+  ip_cidr: string[];
+  port: string[];
+  network: string | null;
+  process_name: string[];
+}
+
+const rules = ref<RouteRule[]>([]);
+const loading = ref(false);
+const expandedId = ref<string | null>(null);
+const showAddDialog = ref(false);
+const saving = ref(false);
+
+// ─── Add dialog state ────────────────────────────────────────────────
+
+const newRule = ref<RouteRule>({
+  id: "",
+  name: "",
+  enabled: true,
+  action: "proxy",
+  domain: [],
+  domain_suffix: [],
+  domain_keyword: [],
+  geosite: [],
+  geoip: [],
+  ip_cidr: [],
+  port: [],
+  network: null,
+  process_name: [],
+});
+
+// Temporary textarea values (comma/newline separated)
+const newDomain = ref("");
+const newDomainSuffix = ref("");
+const newDomainKeyword = ref("");
+const newGeosite = ref("");
+const newGeoip = ref("");
+const newIpCidr = ref("");
+const newPort = ref("");
+const newProcessName = ref("");
+
+function splitInput(s: string): string[] {
+  return s
+    .split(/[\s,，\n]+/)
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+// ─── Presets ─────────────────────────────────────────────────────────
+
+const presets = [
+  { label: "拦截广告",             action: "block"  as RuleAction, geosite: ["category-ads-all"] },
+  { label: "私有地址直连",          action: "direct" as RuleAction, geoip: ["private"] },
+  { label: "中国大陆直连",          action: "direct" as RuleAction, geosite: ["cn"], geoip: ["cn"] },
+  { label: "Telegram",            action: "proxy"  as RuleAction, geosite: ["telegram"], geoip: ["telegram"] },
+  { label: "Google",              action: "proxy"  as RuleAction, geosite: ["google"], geoip: ["google"] },
+  { label: "YouTube",             action: "proxy"  as RuleAction, geosite: ["youtube"] },
+  { label: "GitHub",              action: "proxy"  as RuleAction, geosite: ["github"] },
+  { label: "Twitter / X",         action: "proxy"  as RuleAction, geosite: ["twitter"], geoip: ["twitter"] },
+  { label: "Netflix",             action: "proxy"  as RuleAction, geosite: ["netflix"], domain_suffix: ["netflix.com", "nflxvideo.net", "nflximg.net"] },
+  { label: "AI 服务",              action: "proxy"  as RuleAction, domain_suffix: ["openai.com", "chatgpt.com", "anthropic.com", "claude.ai"] },
+  { label: "Steam 游戏",           action: "proxy"  as RuleAction, geosite: ["steam"] },
+  { label: "苹果服务直连",           action: "direct" as RuleAction, geosite: ["apple"] },
+  { label: "微软服务直连",           action: "direct" as RuleAction, geosite: ["microsoft"] },
+  { label: "哔哩哔哩直连",           action: "direct" as RuleAction, geosite: ["bilibili"] },
+];
+
+// ─── Computed ────────────────────────────────────────────────────────
+
+const actionColor: Record<RuleAction, string> = {
+  proxy: "badge-blue",
+  direct: "badge-green",
+  block: "badge-red",
+  dns: "badge-gray",
+};
+
+const actionLabel: Record<RuleAction, string> = {
+  proxy: "代理",
+  direct: "直连",
+  block: "拦截",
+  dns: "DNS",
+};
+
+function matchSummary(rule: RouteRule): string {
+  const parts: string[] = [];
+  if (rule.geosite.length) parts.push(`GeoSite: ${rule.geosite.join(", ")}`);
+  if (rule.geoip.length) parts.push(`GeoIP: ${rule.geoip.join(", ")}`);
+  if (rule.domain.length) parts.push(`域名: ${rule.domain.slice(0, 2).join(", ")}${rule.domain.length > 2 ? "…" : ""}`);
+  if (rule.domain_suffix.length) parts.push(`后缀: ${rule.domain_suffix.slice(0, 2).join(", ")}${rule.domain_suffix.length > 2 ? "…" : ""}`);
+  if (rule.domain_keyword.length) parts.push(`关键词: ${rule.domain_keyword.join(", ")}`);
+  if (rule.ip_cidr.length) parts.push(`IP: ${rule.ip_cidr.join(", ")}`);
+  if (rule.port.length) parts.push(`端口: ${rule.port.join(", ")}`);
+  if (rule.process_name.length) parts.push(`进程: ${rule.process_name.join(", ")}`);
+  return parts.join(" · ") || "（无匹配条件）";
+}
+
+// ─── Actions ─────────────────────────────────────────────────────────
+
+async function load() {
+  loading.value = true;
+  try {
+    rules.value = await invoke<RouteRule[]>("cmd_get_rules");
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function toggleRule(id: string) {
+  rules.value = await invoke<RouteRule[]>("cmd_toggle_rule", { id });
+}
+
+async function deleteRule(id: string) {
+  if (!confirm("确认删除此规则？")) return;
+  rules.value = await invoke<RouteRule[]>("cmd_delete_rule", { id });
+  if (expandedId.value === id) expandedId.value = null;
+}
+
+async function saveAll() {
+  saving.value = true;
+  try {
+    await invoke("cmd_save_rules", { rules: rules.value });
+  } finally {
+    saving.value = false;
+  }
+}
+
+async function resetToDefault() {
+  if (!confirm("将恢复所有默认分流规则，当前规则会被覆盖。确认继续？")) return;
+  rules.value = await invoke<RouteRule[]>("cmd_reset_rules");
+}
+
+async function applyPreset(preset: typeof presets[0]) {
+  const rule: RouteRule = {
+    id: crypto.randomUUID(),
+    name: preset.label,
+    enabled: true,
+    action: preset.action,
+    domain: [],
+    domain_suffix: (preset as any).domain_suffix ?? [],
+    domain_keyword: [],
+    geosite: (preset as any).geosite ?? [],
+    geoip: (preset as any).geoip ?? [],
+    ip_cidr: [],
+    port: [],
+    network: null,
+    process_name: [],
+  };
+  rules.value = await invoke<RouteRule[]>("cmd_add_rule", { rule });
+}
+
+function resetNewRule() {
+  newRule.value = {
+    id: "", name: "", enabled: true, action: "proxy",
+    domain: [], domain_suffix: [], domain_keyword: [],
+    geosite: [], geoip: [], ip_cidr: [], port: [], network: null, process_name: [],
+  };
+  newDomain.value = "";
+  newDomainSuffix.value = "";
+  newDomainKeyword.value = "";
+  newGeosite.value = "";
+  newGeoip.value = "";
+  newIpCidr.value = "";
+  newPort.value = "";
+  newProcessName.value = "";
+}
+
+async function addRule() {
+  const rule: RouteRule = {
+    ...newRule.value,
+    id: crypto.randomUUID(),
+    domain: splitInput(newDomain.value),
+    domain_suffix: splitInput(newDomainSuffix.value),
+    domain_keyword: splitInput(newDomainKeyword.value),
+    geosite: splitInput(newGeosite.value),
+    geoip: splitInput(newGeoip.value),
+    ip_cidr: splitInput(newIpCidr.value),
+    port: splitInput(newPort.value),
+    process_name: splitInput(newProcessName.value),
+  };
+  if (!rule.name.trim()) return;
+  rules.value = await invoke<RouteRule[]>("cmd_add_rule", { rule });
+  showAddDialog.value = false;
+  resetNewRule();
+}
+
+function moveUp(index: number) {
+  if (index <= 0) return;
+  [rules.value[index - 1], rules.value[index]] = [rules.value[index], rules.value[index - 1]];
+}
+function moveDown(index: number) {
+  if (index >= rules.value.length - 1) return;
+  [rules.value[index], rules.value[index + 1]] = [rules.value[index + 1], rules.value[index]];
+}
+
+onMounted(load);
+</script>
+
+<template>
+  <div class="page">
+    <div class="page-header">
+      <div>
+        <h1 class="page-title">分流规则</h1>
+        <p class="page-subtitle">规则按顺序匹配，第一条匹配的规则生效</p>
+      </div>
+      <div class="header-actions">
+        <button class="btn btn-ghost" @click="resetToDefault" title="恢复所有默认规则">
+          <RotateCcw :size="13" />
+          恢复默认
+        </button>
+        <button class="btn btn-ghost" @click="showAddDialog = true">
+          <Plus :size="14" />
+          添加规则
+        </button>
+        <button class="btn btn-primary" :disabled="saving" @click="saveAll">
+          {{ saving ? "保存中..." : "保存并应用" }}
+        </button>
+      </div>
+    </div>
+
+    <!-- Preset Quick Add -->
+    <div class="card preset-card">
+      <div class="preset-label">
+        <BookMarked :size="13" />
+        <span>快速添加预设</span>
+      </div>
+      <div class="preset-list">
+        <button
+          v-for="p in presets"
+          :key="p.label"
+          class="preset-btn"
+          :class="`preset-${p.action}`"
+          @click="applyPreset(p)"
+        >
+          <span class="preset-action">{{ actionLabel[p.action] }}</span>
+          {{ p.label }}
+        </button>
+      </div>
+    </div>
+
+    <!-- Rules List -->
+    <div v-if="rules.length === 0 && !loading" class="empty-state">
+      <Filter :size="36" class="empty-icon" />
+      <div class="empty-title">暂无规则</div>
+      <div class="empty-desc">添加规则或使用上方预设快速开始</div>
+    </div>
+
+    <div class="rules-list">
+      <div
+        v-for="(rule, index) in rules"
+        :key="rule.id"
+        class="card rule-item"
+        :class="{ disabled: !rule.enabled }"
+      >
+        <!-- Rule Header -->
+        <div class="rule-header" @click="expandedId = expandedId === rule.id ? null : rule.id">
+          <div class="rule-order">{{ index + 1 }}</div>
+          <button
+            class="toggle-btn"
+            :title="rule.enabled ? '点击禁用' : '点击启用'"
+            @click.stop="toggleRule(rule.id)"
+          >
+            <ToggleRight v-if="rule.enabled" :size="20" class="toggle-on" />
+            <ToggleLeft v-else :size="20" class="toggle-off" />
+          </button>
+          <div class="rule-info">
+            <div class="rule-name">{{ rule.name }}</div>
+            <div class="rule-summary">{{ matchSummary(rule) }}</div>
+          </div>
+          <span class="badge" :class="actionColor[rule.action]">
+            {{ actionLabel[rule.action] }}
+          </span>
+          <div class="rule-controls">
+            <button class="icon-btn" title="上移" @click.stop="moveUp(index)">
+              <ChevronUp :size="14" />
+            </button>
+            <button class="icon-btn" title="下移" @click.stop="moveDown(index)">
+              <ChevronDown :size="14" />
+            </button>
+            <button class="icon-btn danger" title="删除" @click.stop="deleteRule(rule.id)">
+              <Trash2 :size="13" />
+            </button>
+          </div>
+        </div>
+
+        <!-- Expanded Detail -->
+        <Transition name="expand">
+          <div v-if="expandedId === rule.id" class="rule-detail">
+            <div class="detail-grid">
+              <template v-if="rule.geosite.length">
+                <div class="detail-key"><Globe :size="12" /> GeoSite</div>
+                <div class="detail-val">{{ rule.geosite.join(", ") }}</div>
+              </template>
+              <template v-if="rule.geoip.length">
+                <div class="detail-key"><Layers :size="12" /> GeoIP</div>
+                <div class="detail-val">{{ rule.geoip.join(", ") }}</div>
+              </template>
+              <template v-if="rule.domain.length">
+                <div class="detail-key">域名（精确）</div>
+                <div class="detail-val">{{ rule.domain.join(", ") }}</div>
+              </template>
+              <template v-if="rule.domain_suffix.length">
+                <div class="detail-key">域名后缀</div>
+                <div class="detail-val">{{ rule.domain_suffix.join(", ") }}</div>
+              </template>
+              <template v-if="rule.domain_keyword.length">
+                <div class="detail-key">域名关键词</div>
+                <div class="detail-val">{{ rule.domain_keyword.join(", ") }}</div>
+              </template>
+              <template v-if="rule.ip_cidr.length">
+                <div class="detail-key">IP / CIDR</div>
+                <div class="detail-val">{{ rule.ip_cidr.join(", ") }}</div>
+              </template>
+              <template v-if="rule.port.length">
+                <div class="detail-key">端口</div>
+                <div class="detail-val">{{ rule.port.join(", ") }}</div>
+              </template>
+              <template v-if="rule.network">
+                <div class="detail-key">协议</div>
+                <div class="detail-val">{{ rule.network }}</div>
+              </template>
+              <template v-if="rule.process_name.length">
+                <div class="detail-key">进程名</div>
+                <div class="detail-val">{{ rule.process_name.join(", ") }}</div>
+              </template>
+            </div>
+          </div>
+        </Transition>
+      </div>
+    </div>
+
+    <!-- Add Rule Dialog -->
+    <div v-if="showAddDialog" class="dialog-overlay" @click.self="showAddDialog = false; resetNewRule()">
+      <div class="dialog card-strong">
+        <div class="dialog-title">
+          <Plus :size="16" />
+          添加分流规则
+        </div>
+
+        <div class="dialog-form">
+          <div class="form-row">
+            <div class="form-group half">
+              <label class="form-label">规则名称 *</label>
+              <input class="input" v-model="newRule.name" placeholder="例如：Netflix 代理" />
+            </div>
+            <div class="form-group half">
+              <label class="form-label">动作</label>
+              <select class="input" v-model="newRule.action">
+                <option value="proxy">代理</option>
+                <option value="direct">直连</option>
+                <option value="block">拦截</option>
+                <option value="dns">DNS 处理</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-section-title">
+            <Info :size="12" />
+            匹配条件（至少填写一个，多个值用逗号或换行分隔）
+          </div>
+
+          <div class="form-row">
+            <div class="form-group half">
+              <label class="form-label">GeoSite 标签</label>
+              <input class="input" v-model="newGeosite" placeholder="cn, google, telegram" />
+            </div>
+            <div class="form-group half">
+              <label class="form-label">GeoIP 国家码</label>
+              <input class="input" v-model="newGeoip" placeholder="cn, private, telegram" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group half">
+              <label class="form-label">域名（精确匹配）</label>
+              <textarea class="input textarea-sm" v-model="newDomain" placeholder="example.com&#10;another.com" />
+            </div>
+            <div class="form-group half">
+              <label class="form-label">域名后缀</label>
+              <textarea class="input textarea-sm" v-model="newDomainSuffix" placeholder=".netflix.com&#10;.google.com" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group half">
+              <label class="form-label">域名关键词</label>
+              <input class="input" v-model="newDomainKeyword" placeholder="google, openai" />
+            </div>
+            <div class="form-group half">
+              <label class="form-label">IP / CIDR</label>
+              <input class="input" v-model="newIpCidr" placeholder="192.168.0.0/16, 10.0.0.0/8" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group half">
+              <label class="form-label">端口（支持范围 80-90）</label>
+              <input class="input" v-model="newPort" placeholder="80, 443, 8080-8090" />
+            </div>
+            <div class="form-group half">
+              <label class="form-label">进程名（Windows）</label>
+              <input class="input" v-model="newProcessName" placeholder="chrome.exe, steam.exe" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group half">
+              <label class="form-label">网络协议</label>
+              <select class="input" v-model="newRule.network">
+                <option :value="null">不限</option>
+                <option value="tcp">TCP</option>
+                <option value="udp">UDP</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
+        <div class="dialog-actions">
+          <button class="btn btn-ghost" @click="showAddDialog = false; resetNewRule()">取消</button>
+          <button class="btn btn-primary" @click="addRule" :disabled="!newRule.name.trim()">
+            <Plus :size="13" />
+            添加规则
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Rule order note -->
+    <div class="order-note">
+      <Info :size="12" />
+      规则按列表顺序依次匹配。修改顺序后点击「保存并应用」生效；代理运行中需重启才能使新规则生效。
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.page { display: flex; flex-direction: column; gap: 14px; max-width: 860px; }
+.page-header { display: flex; align-items: flex-start; justify-content: space-between; }
+.page-title { font-size: 20px; font-weight: 600; }
+.page-subtitle { font-size: 12px; color: var(--color-text-muted); margin-top: 2px; }
+.header-actions { display: flex; gap: 8px; }
+
+/* Presets */
+.preset-card { padding: 12px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.preset-label {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 11px; font-weight: 600; color: var(--color-text-secondary);
+  text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap;
+}
+.preset-list { display: flex; gap: 6px; flex-wrap: wrap; }
+.preset-btn {
+  display: flex; align-items: center; gap: 5px;
+  padding: 4px 12px; border-radius: 100px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-strong);
+  font-size: 12px; cursor: pointer; transition: all 0.15s;
+  color: var(--color-text-secondary);
+}
+.preset-btn:hover { box-shadow: var(--shadow-sm); color: var(--color-text); }
+.preset-action {
+  font-size: 10px; font-weight: 700; padding: 1px 5px;
+  border-radius: 3px; margin-right: 2px;
+}
+.preset-proxy .preset-action { background: rgba(0,120,212,.12); color: #0078d4; }
+.preset-direct .preset-action { background: rgba(16,124,16,.12); color: #107c10; }
+.preset-block .preset-action { background: rgba(209,52,56,.12); color: #d13438; }
+
+/* Empty */
+.empty-state { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 40px; color: var(--color-text-muted); }
+.empty-icon { opacity: 0.3; }
+.empty-title { font-size: 15px; font-weight: 600; color: var(--color-text-secondary); }
+.empty-desc { font-size: 13px; }
+
+/* Rules List */
+.rules-list { display: flex; flex-direction: column; gap: 6px; }
+.rule-item { overflow: hidden; }
+.rule-item.disabled { opacity: 0.55; }
+.rule-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; cursor: pointer;
+  transition: background 0.1s;
+}
+.rule-header:hover { background: rgba(128,128,128,0.04); }
+.rule-order {
+  width: 22px; height: 22px; border-radius: 50%;
+  background: rgba(128,128,128,0.12);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+.toggle-btn { background: none; border: none; cursor: pointer; padding: 2px; display: flex; }
+.toggle-on { color: var(--color-primary); }
+.toggle-off { color: var(--color-text-muted); }
+.rule-info { flex: 1; min-width: 0; }
+.rule-name { font-size: 13px; font-weight: 600; }
+.rule-summary { font-size: 11px; color: var(--color-text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+.rule-controls { display: flex; gap: 2px; flex-shrink: 0; }
+.icon-btn {
+  width: 28px; height: 28px; border: none; background: transparent;
+  border-radius: var(--radius-sm); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--color-text-muted); transition: all 0.1s;
+}
+.icon-btn:hover { background: rgba(128,128,128,0.1); color: var(--color-text); }
+.icon-btn.danger:hover { background: rgba(209,52,56,0.1); color: var(--color-error); }
+
+/* Expanded detail */
+.rule-detail {
+  padding: 10px 14px 14px;
+  border-top: 1px solid var(--color-border);
+  background: rgba(128,128,128,0.03);
+}
+.detail-grid { display: grid; grid-template-columns: 120px 1fr; gap: 6px 12px; font-size: 12px; }
+.detail-key {
+  display: flex; align-items: center; gap: 4px;
+  color: var(--color-text-secondary); font-weight: 500; padding-top: 1px;
+}
+.detail-val { color: var(--color-text); font-family: 'Cascadia Code', monospace; word-break: break-all; }
+.expand-enter-active, .expand-leave-active { transition: all 0.2s ease; max-height: 300px; overflow: hidden; }
+.expand-enter-from, .expand-leave-to { max-height: 0; opacity: 0; padding: 0 14px; }
+
+/* Add Dialog */
+.dialog-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0,0,0,0.3);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+  backdrop-filter: blur(4px);
+}
+.dialog {
+  width: 100%; max-width: 640px; max-height: 80vh; overflow-y: auto;
+  padding: 24px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.dialog-title { display: flex; align-items: center; gap: 8px; font-size: 16px; font-weight: 700; }
+.dialog-form { display: flex; flex-direction: column; gap: 10px; }
+.form-section-title {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 600; color: var(--color-text-secondary);
+  text-transform: uppercase; letter-spacing: 0.4px; padding: 4px 0;
+  border-bottom: 1px solid var(--color-border);
+}
+.form-row { display: flex; gap: 12px; }
+.form-group { display: flex; flex-direction: column; gap: 5px; }
+.form-group.half { flex: 1; }
+.form-label { font-size: 11px; font-weight: 500; color: var(--color-text-secondary); }
+.textarea-sm { min-height: 60px; resize: vertical; }
+.dialog-actions { display: flex; gap: 8px; justify-content: flex-end; padding-top: 4px; }
+
+.order-note {
+  display: flex; align-items: flex-start; gap: 6px;
+  font-size: 11px; color: var(--color-text-muted); line-height: 1.5;
+}
+</style>

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "sing-box-win",
+  "version": "0.1.0",
+  "identifier": "com.radium.sing-box-win",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "sing-box-win",
+        "width": 960,
+        "height": 640,
+        "minWidth": 800,
+        "minHeight": 540,
+        "decorations": false,
+        "transparent": false,
+        "resizable": true,
+        "center": true,
+        "devtools": false
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "id": "main",
+      "iconPath": "icons/icon.ico",
+      "menuOnLeftClick": false
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": []
+  },
+  "plugins": {
+    "shell": {
+      "open": true
+    }
+  }
+}
