@@ -150,7 +150,19 @@ pub fn run() {
                             let _ = crate::config::save_app_config(&cfg);
                         }
                         "quit" => {
-                            app.exit(0);
+                            // Stop sing-box and remove system proxy before exiting.
+                            // Use std::process::exit instead of app.exit to avoid the
+                            // WebView2 "Failed to unregister Chrome_WidgetWin_0" error
+                            // that occurs when Tauri tries to tear down the window class
+                            // while it still has live windows (Windows Error 1412).
+                            let app_c = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let state = app_c.state::<AppState>();
+                                let sb_state = state.singbox_state.clone();
+                                let _ = crate::singbox::stop_singbox(sb_state).await;
+                                let _ = crate::proxy::set_system_proxy(false, 0);
+                                std::process::exit(0);
+                            });
                         }
                         _ => {}
                     }

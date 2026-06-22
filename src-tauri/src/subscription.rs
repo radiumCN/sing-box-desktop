@@ -522,13 +522,30 @@ pub fn build_singbox_config(
         "log": { "level": config.log_level, "timestamp": true },
         "dns": {
             "servers": [
-                { "tag": "google", "address": "tls://8.8.8.8", "detour": "proxy" },
-                { "tag": "local", "address": "223.5.5.5", "detour": "direct" }
+                {
+                    "tag": "google",
+                    "type": "tls",
+                    "server": "8.8.8.8",
+                    "server_port": 853,
+                    "detour": "proxy"
+                },
+                {
+                    "tag": "local",
+                    "type": "https",
+                    "server": "223.5.5.5",
+                    "server_port": 443,
+                    "path": "/dns-query",
+                    "detour": "direct"
+                },
+                {
+                    "tag": "block",
+                    "type": "block"
+                }
             ],
             "rules": [
                 { "outbound": "any", "server": "local" },
-                { "clash_mode": "direct", "server": "local" },
-                { "clash_mode": "global", "server": "google" }
+                { "clash_mode": "Direct", "server": "local" },
+                { "clash_mode": "Global", "server": "google" }
             ],
             "final": "google",
             "strategy": "prefer_ipv4"
@@ -546,9 +563,9 @@ pub fn build_singbox_config(
         "route": {
             "rules": [
                 { "protocol": "dns", "outbound": "dns-out" },
-                { "clash_mode": "direct", "outbound": "direct" },
-                { "clash_mode": "global", "outbound": "proxy" },
-                { "geosite": "cn", "outbound": "direct" },
+                { "clash_mode": "Direct", "outbound": "direct" },
+                { "clash_mode": "Global", "outbound": "proxy" },
+                { "geosite": ["cn"], "outbound": "direct" },
                 { "geoip": ["private", "cn"], "outbound": "direct" }
             ],
             "final": "proxy",
