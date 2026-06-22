@@ -93,6 +93,38 @@ fn parse_clash(content: &str, sub_id: &str) -> Result<(Vec<ProxyNode>, Vec<Value
     Ok((nodes, outbounds))
 }
 
+/// Build a sing-box transport object from a Clash YAML proxy.
+/// Returns None for plain TCP (transport field must be omitted entirely).
+fn clash_transport(network: &str, proxy: &YamlValue) -> Option<Value> {
+    match network {
+        "tcp" | "" => None,
+        "ws" => {
+            let path = proxy["ws-opts"]["path"].as_str()
+                .or_else(|| proxy["ws-path"].as_str())
+                .unwrap_or("/");
+            let host = proxy["ws-opts"]["headers"]["Host"].as_str()
+                .or_else(|| proxy["ws-headers"]["Host"].as_str())
+                .unwrap_or("");
+            Some(json!({ "type": "ws", "path": path, "headers": { "Host": host } }))
+        }
+        "grpc" => {
+            let svc = proxy["grpc-opts"]["grpc-service-name"].as_str().unwrap_or("");
+            Some(json!({ "type": "grpc", "service_name": svc }))
+        }
+        "h2" | "http" => {
+            let path = proxy["h2-opts"]["path"][0].as_str().unwrap_or("/");
+            let host = proxy["h2-opts"]["host"][0].as_str().unwrap_or("");
+            Some(json!({ "type": "http", "path": path, "host": [host] }))
+        }
+        "httpupgrade" => {
+            let path = proxy["httpupgrade-opts"]["path"].as_str().unwrap_or("/");
+            let host = proxy["httpupgrade-opts"]["host"].as_str().unwrap_or("");
+            Some(json!({ "type": "httpupgrade", "path": path, "host": host }))
+        }
+        other => Some(json!({ "type": other })),
+    }
+}
+
 fn clash_yaml_proxy_to_singbox(proxy: &YamlValue, tag: &str) -> Option<Value> {
     let proto = proxy["type"].as_str()?;
     let server = proxy["server"].as_str()?;
@@ -123,9 +155,11 @@ fn clash_yaml_proxy_to_singbox(proxy: &YamlValue, tag: &str) -> Option<Value> {
                 "server_port": port,
                 "uuid": uuid,
                 "alter_id": alter_id,
-                "security": "auto",
-                "transport": { "type": network }
+                "security": "auto"
             });
+            if let Some(t) = clash_transport(network, proxy) {
+                ob["transport"] = t;
+            }
             if tls {
                 ob["tls"] = json!({ "enabled": true, "insecure": true });
             }
@@ -134,19 +168,45 @@ fn clash_yaml_proxy_to_singbox(proxy: &YamlValue, tag: &str) -> Option<Value> {
         "vless" => {
             let uuid = proxy["uuid"].as_str().unwrap_or("");
             let network = proxy["network"].as_str().unwrap_or("tcp");
-            let tls = proxy["tls"].as_bool().unwrap_or(false);
             let flow = proxy["flow"].as_str().unwrap_or("");
+            let sni = proxy["servername"].as_str()
+                .or_else(|| proxy["sni"].as_str())
+                .unwrap_or(server);
+            let reality_opts = &proxy["reality-opts"];
+            let has_reality = reality_opts.is_mapping();
+            // Reality implies TLS even if the `tls` flag is absent.
+            let tls = proxy["tls"].as_bool().unwrap_or(false) || has_reality;
             let mut ob = json!({
                 "type": "vless",
                 "tag": tag,
                 "server": server,
                 "server_port": port,
                 "uuid": uuid,
-                "flow": flow,
-                "transport": { "type": network }
+                "flow": flow
             });
+            if let Some(t) = clash_transport(network, proxy) {
+                ob["transport"] = t;
+            }
             if tls {
-                ob["tls"] = json!({ "enabled": true, "insecure": true });
+                let fp = proxy["client-fingerprint"].as_str().unwrap_or("chrome");
+                let mut tls_obj = json!({
+                    "enabled": true,
+                    "server_name": sni,
+                    "utls": { "enabled": true, "fingerprint": fp }
+                });
+                if has_reality {
+                    // Reality verifies the server via its public key; never set `insecure`.
+                    let pbk = reality_opts["public-key"].as_str().unwrap_or("");
+                    let sid = reality_opts["short-id"].as_str().unwrap_or("");
+                    tls_obj["reality"] = json!({
+                        "enabled": true,
+                        "public_key": pbk,
+                        "short_id": sid
+                    });
+                } else {
+                    tls_obj["insecure"] = json!(true);
+                }
+                ob["tls"] = tls_obj;
             }
             Some(ob)
         }
@@ -251,9 +311,20 @@ fn parse_vmess(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
         "server_port": port,
         "uuid": uuid,
         "alter_id": alter_id,
-        "security": "auto",
-        "transport": { "type": network }
+        "security": "auto"
     });
+    // Only set transport when it's not plain TCP
+    if network != "tcp" && !network.is_empty() {
+        let path = v["path"].as_str().unwrap_or("/").to_string();
+        let host = v["host"].as_str().unwrap_or(&sni).to_string();
+        let transport = match network.as_str() {
+            "ws" => json!({ "type": "ws", "path": path, "headers": { "Host": host } }),
+            "grpc" => json!({ "type": "grpc", "service_name": path }),
+            "h2" | "http" => json!({ "type": "http", "path": path, "host": [host] }),
+            other => json!({ "type": other }),
+        };
+        outbound["transport"] = transport;
+    }
     if tls {
         outbound["tls"] = json!({ "enabled": true, "server_name": sni, "insecure": true });
     }
@@ -288,30 +359,51 @@ fn parse_vless(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
     let sni = params.get("sni").cloned().unwrap_or_else(|| server.clone());
     let flow = params.get("flow").cloned().unwrap_or_default();
 
-    let mut transport = json!({ "type": network });
-    if network == "ws" {
-        let path = params.get("path").cloned().unwrap_or_else(|| "/".to_string());
-        let host = params.get("host").cloned().unwrap_or_else(|| server.clone());
-        transport = json!({ "type": "ws", "path": path, "headers": { "Host": host } });
-    }
-
     let mut outbound = json!({
         "type": "vless",
         "tag": name,
         "server": server,
         "server_port": port,
         "uuid": uuid,
-        "flow": flow,
-        "transport": transport
+        "flow": flow
     });
+    // Only add transport for non-TCP networks
+    if network != "tcp" && !network.is_empty() {
+        let path = params.get("path").cloned().unwrap_or_else(|| "/".to_string());
+        let host = params.get("host").cloned().unwrap_or_else(|| server.clone());
+        let svc = params.get("serviceName").or(params.get("service_name")).cloned().unwrap_or_default();
+        let transport = match network.as_str() {
+            "ws" => json!({ "type": "ws", "path": path, "headers": { "Host": host } }),
+            "grpc" => json!({ "type": "grpc", "service_name": svc }),
+            "h2" | "http" => json!({ "type": "http", "path": path, "host": [host] }),
+            "httpupgrade" => json!({ "type": "httpupgrade", "path": path, "host": host }),
+            other => json!({ "type": other }),
+        };
+        outbound["transport"] = transport;
+    }
     if security == "tls" || security == "reality" {
         let fp = params.get("fp").cloned().unwrap_or_else(|| "chrome".to_string());
-        outbound["tls"] = json!({
+        let mut tls = json!({
             "enabled": true,
             "server_name": sni,
-            "insecure": true,
             "utls": { "enabled": true, "fingerprint": fp }
         });
+        if security == "reality" {
+            // Reality performs its own certificate verification via the public key,
+            // so `insecure` must NOT be set. Public key (pbk) and short id (sid)
+            // are mandatory for the Reality handshake to succeed.
+            let pbk = params.get("pbk").cloned().unwrap_or_default();
+            let sid = params.get("sid").cloned().unwrap_or_default();
+            tls["reality"] = json!({
+                "enabled": true,
+                "public_key": pbk,
+                "short_id": sid
+            });
+        } else {
+            // Plain TLS: allow self-signed certs for compatibility.
+            tls["insecure"] = json!(true);
+        }
+        outbound["tls"] = tls;
     }
 
     let node = ProxyNode {
@@ -505,6 +597,24 @@ pub fn build_singbox_config(
     let selected = active_tag
         .unwrap_or_else(|| selector_outbounds.first().and_then(|v| v.as_str()).unwrap_or(""));
 
+    // Sanitize proxy outbounds: remove any transport field whose type is "tcp"
+    // (tcp is the default in sing-box ? the field must be absent, not explicitly set).
+    // This also fixes outbounds cached before this rule was enforced in the parser.
+    let clean_outbounds: Vec<Value> = outbounds.iter().map(|ob| {
+        let mut ob = ob.clone();
+        let is_tcp_transport = ob.get("transport")
+            .and_then(|t| t.get("type"))
+            .and_then(|t| t.as_str())
+            .map(|t| t == "tcp")
+            .unwrap_or(false);
+        if is_tcp_transport {
+            if let Some(map) = ob.as_object_mut() {
+                map.remove("transport");
+            }
+        }
+        ob
+    }).collect();
+
     let mut all_outbounds = vec![
         json!({
             "type": "selector",
@@ -514,38 +624,29 @@ pub fn build_singbox_config(
         }),
         json!({ "type": "direct", "tag": "direct" }),
         json!({ "type": "block", "tag": "block" }),
-        json!({ "type": "dns", "tag": "dns-out" }),
     ];
-    all_outbounds.extend_from_slice(outbounds);
+    all_outbounds.extend_from_slice(&clean_outbounds);
 
     let mut cfg = json!({
         "log": { "level": config.log_level, "timestamp": true },
         "dns": {
             "servers": [
                 {
-                    "tag": "google",
                     "type": "tls",
+                    "tag": "google",
                     "server": "8.8.8.8",
-                    "server_port": 853,
                     "detour": "proxy"
                 },
                 {
+                    "type": "udp",
                     "tag": "local",
-                    "type": "https",
-                    "server": "223.5.5.5",
-                    "server_port": 443,
-                    "path": "/dns-query",
-                    "detour": "direct"
-                },
-                {
-                    "tag": "block",
-                    "type": "block"
+                    "server": "223.5.5.5"
                 }
             ],
             "rules": [
-                { "outbound": "any", "server": "local" },
                 { "clash_mode": "Direct", "server": "local" },
-                { "clash_mode": "Global", "server": "google" }
+                { "clash_mode": "Global", "server": "google" },
+                { "rule_set": "geosite-cn", "server": "local" }
             ],
             "final": "google",
             "strategy": "prefer_ipv4"
@@ -561,12 +662,32 @@ pub fn build_singbox_config(
         ],
         "outbounds": all_outbounds,
         "route": {
+            "default_domain_resolver": "local",
             "rules": [
-                { "protocol": "dns", "outbound": "dns-out" },
+                { "protocol": ["dns"], "action": "hijack-dns" },
                 { "clash_mode": "Direct", "outbound": "direct" },
                 { "clash_mode": "Global", "outbound": "proxy" },
-                { "geosite": ["cn"], "outbound": "direct" },
-                { "geoip": ["private", "cn"], "outbound": "direct" }
+                { "ip_is_private": true, "outbound": "direct" },
+                { "rule_set": ["geosite-cn"], "outbound": "direct" },
+                { "rule_set": ["geoip-cn"], "outbound": "direct" }
+            ],
+            "rule_set": [
+                {
+                    "tag": "geosite-cn",
+                    "type": "remote",
+                    "format": "binary",
+                    "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-cn.srs",
+                    "download_detour": "direct",
+                    "update_interval": "7d"
+                },
+                {
+                    "tag": "geoip-cn",
+                    "type": "remote",
+                    "format": "binary",
+                    "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-cn.srs",
+                    "download_detour": "direct",
+                    "update_interval": "7d"
+                }
             ],
             "final": "proxy",
             "auto_detect_interface": true

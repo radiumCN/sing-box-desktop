@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { Gauge, RefreshCw, CheckCircle, Signal, Zap } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
 
@@ -8,12 +8,8 @@ const testingAll = ref(false);
 const autoSelecting = ref(false);
 const testingIds = ref<string[]>([]);
 const filterSubId = ref<string>(localStorage.getItem("nodes_filter_sub") ?? "all");
-const filterGroup = ref(localStorage.getItem("nodes_filter_group") ?? "全部");
 const search = ref("");
 const autoSelectedId = ref<string | null>(localStorage.getItem("auto_selected_node_id"));
-
-// Persist group filter in localStorage
-watch(filterGroup, (val) => localStorage.setItem("nodes_filter_group", val));
 
 // On mount, validate saved IDs still exist
 onMounted(() => {
@@ -40,16 +36,8 @@ const nodesForSub = computed(() => {
   return store.nodes.filter((n) => n.subscription_id === filterSubId.value);
 });
 
-const allGroups = computed(() => {
-  const groups = new Set(nodesForSub.value.map((n) => n.group));
-  return ["全部", ...groups];
-});
-
 const filtered = computed(() => {
   let nodes = nodesForSub.value;
-  if (filterGroup.value !== "全部") {
-    nodes = nodes.filter((n) => n.group === filterGroup.value);
-  }
   if (search.value) {
     const q = search.value.toLowerCase();
     nodes = nodes.filter(
@@ -64,9 +52,7 @@ const filtered = computed(() => {
 
 function switchSub(id: string) {
   filterSubId.value = id;
-  filterGroup.value = "全部";
   localStorage.setItem("nodes_filter_sub", id);
-  localStorage.removeItem("nodes_filter_group");
 }
 
 const latencyColor = (ms?: number) => {
@@ -196,18 +182,6 @@ async function autoSelect() {
           <span class="sub-count">{{ store.nodes.filter(n => n.subscription_id === sub.id).length }}</span>
         </button>
       </div>
-
-      <div class="group-tabs">
-        <button
-          v-for="g in allGroups"
-          :key="g"
-          class="group-tab"
-          :class="{ active: filterGroup === g }"
-          @click="filterGroup = g"
-        >
-          {{ g }}
-        </button>
-      </div>
     </div>
 
     <!-- Speed-test notice when proxy is not running -->
@@ -332,16 +306,6 @@ async function autoSelect() {
 .sub-tab.active .sub-count {
   background: rgba(0,120,212,0.15);
 }
-
-.group-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
-.group-tab {
-  padding: 4px 12px; border-radius: 100px;
-  border: 1px solid var(--color-border);
-  background: transparent; color: var(--color-text-secondary);
-  font-size: 12px; cursor: pointer; transition: all 0.15s;
-}
-.group-tab:hover { background: rgba(128,128,128,0.1); }
-.group-tab.active { background: var(--color-primary); color: white; border-color: transparent; }
 
 .empty-state {
   display: flex; flex-direction: column; align-items: center; gap: 10px;
