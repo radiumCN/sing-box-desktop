@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted, computed } from "vue";
+import { ref, nextTick, onMounted, onUnmounted, computed } from "vue";
 import {
   Play, Square, Wifi, WifiOff, ArrowUp, ArrowDown,
   Filter, Zap, Server, Clock, Globe, Shield
@@ -21,6 +21,7 @@ ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, 
 
 const store = useAppStore();
 const systemProxyEnabled = ref(false);
+const systemProxyReady = ref(false);
 
 async function fetchSystemProxy() {
   systemProxyEnabled.value = await invoke<boolean>("cmd_get_system_proxy_status");
@@ -128,13 +129,17 @@ async function toggleProxy() {
   await fetchSystemProxy();
 }
 
-// Keep system proxy indicator in sync when running state changes (e.g. external stop)
-watch(() => store.status.running, fetchSystemProxy);
+onMounted(async () => {
+  // Fetch the real state first, then enable transitions to avoid the initial "flash" animation.
+  await fetchSystemProxy();
+  await nextTick();
+  systemProxyReady.value = true;
 
-onMounted(() => {
-  fetchSystemProxy();
   pollTimer = setInterval(async () => {
     await store.fetchStatus();
+    // Always sync system proxy — avoids the timing race where the watcher fired
+    // before the backend finished setting the proxy on auto-restore startup.
+    fetchSystemProxy();
     if (store.status.running) {
       // TODO: replace with real traffic data from sing-box API
       const up = Math.random() * 200 * 1024;
@@ -278,7 +283,7 @@ onUnmounted(() => {
           </div>
           <button
             class="toggle-btn"
-            :class="{ on: systemProxyEnabled }"
+            :class="{ on: systemProxyEnabled, 'no-anim': !systemProxyReady }"
             @click="toggleSystemProxy"
             :title="systemProxyEnabled ? '关闭系统代理' : '开启系统代理'"
           >
@@ -511,6 +516,8 @@ onUnmounted(() => {
   display: block;
 }
 .toggle-btn.on .toggle-knob { transform: translateX(18px); }
+.toggle-btn.no-anim,
+.toggle-btn.no-anim .toggle-knob { transition: none; }
 
 /* Mode pills */
 .mode-pills { display: flex; gap: 4px; }
