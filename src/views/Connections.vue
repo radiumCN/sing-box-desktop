@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { RefreshCw, Activity, ArrowUp, ArrowDown } from "@lucide/vue";
+import { RefreshCw, Activity } from "@lucide/vue";
 
 interface ConnectionInfo {
   id: string;
@@ -41,12 +41,34 @@ const formatBytes = (b: number) => {
   return `${(b / 1048576).toFixed(1)}MB`;
 };
 
+// Build a compact rule label from rule + rule_payload
+function ruleLabel(conn: ConnectionInfo): string {
+  if (conn.rule_payload) return conn.rule_payload;
+  const r = conn.rule || "final";
+  // Shorten long rule names like "rule_set=geosite-cn => route(direct)"
+  const match = r.match(/rule_set=([^=\s]+)/);
+  if (match) return match[1];
+  const matchFn = r.match(/^([^=\s]+)/);
+  if (matchFn) return matchFn[1];
+  return r;
+}
+
+// Full chain: show "A → proxy", just last proxy name
+function chainLabel(chains: string[]): string {
+  if (!chains || chains.length === 0) return "direct";
+  return chains[chains.length - 1];
+}
+
+function isProxy(chains: string[]): boolean {
+  const label = chainLabel(chains).toLowerCase();
+  return label !== "direct" && label !== "block";
+}
+
 async function fetchConnections() {
   loading.value = true;
   try {
     connections.value = await invoke<ConnectionInfo[]>("cmd_get_connections");
   } catch {
-    // sing-box may not be running
     connections.value = [];
   } finally {
     loading.value = false;
@@ -87,35 +109,43 @@ onUnmounted(() => {
       <table v-if="filtered.length > 0" class="conn-table">
         <thead>
           <tr>
-            <th>主机</th>
-            <th>目标</th>
-            <th>规则</th>
-            <th>代理链</th>
-            <th>上传</th>
-            <th>下载</th>
-            <th>协议</th>
+            <th class="col-host">主机</th>
+            <th class="col-port">端口</th>
+            <th class="col-rule">规则</th>
+            <th class="col-chain">代理链</th>
+            <th class="col-traffic">上传</th>
+            <th class="col-traffic">下载</th>
+            <th class="col-proto">协议</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="conn in filtered" :key="conn.id">
-            <td class="host-cell">
-              <span class="host" :title="conn.host">{{ conn.host || conn.destination }}</span>
+          <tr
+            v-for="conn in filtered"
+            :key="conn.id"
+            :class="{ 'row-proxy': isProxy(conn.chains), 'row-direct': !isProxy(conn.chains) }"
+          >
+            <td class="col-host">
+              <span class="host" :title="conn.host || conn.destination">
+                {{ conn.host || conn.destination }}
+              </span>
             </td>
-            <td class="addr-cell">{{ conn.destination }}</td>
-            <td>
-              <span class="badge badge-blue rule-badge">{{ conn.rule }}</span>
+            <td class="col-port text-muted">
+              {{ conn.destination.split(':').pop() }}
             </td>
-            <td class="chain-cell">{{ conn.chains.join(" → ") }}</td>
-            <td class="traffic-cell upload">
-              <ArrowUp :size="10" />
-              {{ formatBytes(conn.upload) }}
+            <td class="col-rule">
+              <span class="rule-tag" :class="isProxy(conn.chains) ? 'tag-proxy' : 'tag-direct'">
+                {{ ruleLabel(conn) }}
+              </span>
             </td>
-            <td class="traffic-cell download">
-              <ArrowDown :size="10" />
-              {{ formatBytes(conn.download) }}
+            <td class="col-chain">
+              <span class="chain-label" :title="conn.chains.join(' → ')">
+                {{ chainLabel(conn.chains) }}
+              </span>
             </td>
-            <td>
-              <span class="badge badge-gray">{{ conn.network }}</span>
+            <td class="col-traffic upload-val">↑ {{ formatBytes(conn.upload) }}</td>
+            <td class="col-traffic download-val">↓ {{ formatBytes(conn.download) }}</td>
+            <td class="col-proto">
+              <span class="proto-tag">{{ conn.network.toUpperCase() }}</span>
             </td>
           </tr>
         </tbody>
@@ -125,7 +155,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.page { display: flex; flex-direction: column; gap: 14px; max-width: 1100px; }
+.page { display: flex; flex-direction: column; gap: 12px; height: 100%; }
 .page-header { display: flex; align-items: center; justify-content: space-between; }
 .page-title { font-size: 20px; font-weight: 600; }
 .header-actions { display: flex; align-items: center; gap: 8px; }
@@ -139,30 +169,63 @@ onUnmounted(() => {
 .empty-title { font-size: 15px; font-weight: 600; color: var(--color-text-secondary); }
 .empty-desc { font-size: 13px; }
 
-.conn-table-wrapper { overflow-x: auto; }
+.conn-table-wrapper { overflow: auto; flex: 1; }
 .conn-table {
-  width: 100%; border-collapse: collapse; font-size: 12px;
+  width: 100%; border-collapse: collapse; font-size: 12px; white-space: nowrap;
 }
 .conn-table th {
-  text-align: left; padding: 8px 12px;
-  border-bottom: 1px solid var(--color-border);
+  text-align: left; padding: 7px 10px;
+  border-bottom: 2px solid var(--color-border);
   color: var(--color-text-secondary); font-weight: 600;
-  font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px;
+  font-size: 11px; letter-spacing: 0.3px;
+  position: sticky; top: 0; background: var(--color-surface); z-index: 1;
 }
 .conn-table td {
-  padding: 8px 12px;
+  padding: 7px 10px;
   border-bottom: 1px solid var(--color-border);
   vertical-align: middle;
 }
-.conn-table tr:hover td { background: rgba(128,128,128,0.04); }
-.host-cell { max-width: 200px; }
-.host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; font-weight: 500; }
-.addr-cell { color: var(--color-text-secondary); font-family: 'Cascadia Code', monospace; }
-.rule-badge { font-size: 10px !important; }
-.chain-cell { color: var(--color-text-secondary); max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.traffic-cell { display: flex; align-items: center; gap: 3px; white-space: nowrap; }
-.upload { color: #0078d4; }
-.download { color: #107c10; }
+.conn-table tr:hover td { background: rgba(128,128,128,0.05); }
+
+/* Row tinting */
+.row-proxy td:first-child { border-left: 2px solid rgba(0,120,212,0.35); }
+.row-direct td:first-child { border-left: 2px solid rgba(16,124,16,0.25); }
+
+/* Columns */
+.col-host { max-width: 220px; }
+.host {
+  display: block; overflow: hidden; text-overflow: ellipsis;
+  font-weight: 500; max-width: 210px;
+}
+.col-port { color: var(--color-text-muted); width: 50px; }
+.col-rule { max-width: 160px; }
+.col-chain { max-width: 120px; color: var(--color-text-secondary); }
+.col-traffic { width: 80px; }
+.col-proto { width: 52px; }
+
+.text-muted { color: var(--color-text-muted); }
+
+.rule-tag {
+  display: inline-block; padding: 2px 7px; border-radius: 100px;
+  font-size: 10px; font-weight: 600; max-width: 150px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tag-proxy { background: rgba(0,120,212,0.1); color: #0078d4; }
+.tag-direct { background: rgba(16,124,16,0.1); color: #107c10; }
+
+.chain-label {
+  display: block; overflow: hidden; text-overflow: ellipsis;
+  max-width: 115px; font-size: 11px;
+}
+
+.upload-val { color: #0078d4; font-weight: 500; }
+.download-val { color: #107c10; font-weight: 500; }
+
+.proto-tag {
+  display: inline-block; padding: 1px 5px; border-radius: 3px;
+  background: rgba(128,128,128,0.1); color: var(--color-text-secondary);
+  font-size: 10px; font-weight: 600;
+}
 
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin { animation: spin 0.8s linear infinite; }

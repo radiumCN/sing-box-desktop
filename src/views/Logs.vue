@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, watch, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { Trash2, ArrowDown } from "@lucide/vue";
+import { Trash2, ArrowDown, Copy } from "@lucide/vue";
 
 const logs = ref<string[]>([]);
 const autoScroll = ref(true);
@@ -40,10 +40,31 @@ async function fetchLogs() {
   }
 }
 
+const copySuccess = ref(false);
+
 async function scrollToBottom() {
   await nextTick();
   if (autoScroll.value && logContainer.value) {
     logContainer.value.scrollTop = logContainer.value.scrollHeight;
+  }
+}
+
+async function copyAllLogs() {
+  const text = logs.value.join("\n");
+  try {
+    await navigator.clipboard.writeText(text);
+    copySuccess.value = true;
+    setTimeout(() => (copySuccess.value = false), 1500);
+  } catch {
+    // fallback: create a temporary textarea
+    const el = document.createElement("textarea");
+    el.value = text;
+    document.body.appendChild(el);
+    el.select();
+    document.execCommand("copy");
+    document.body.removeChild(el);
+    copySuccess.value = true;
+    setTimeout(() => (copySuccess.value = false), 1500);
   }
 }
 
@@ -77,6 +98,10 @@ onUnmounted(() => {
         <button class="btn btn-ghost" title="自动滚动" @click="autoScroll = !autoScroll">
           <ArrowDown :size="14" :style="{ opacity: autoScroll ? 1 : 0.4 }" />
           自动滚动
+        </button>
+        <button class="btn btn-ghost" @click="copyAllLogs" :title="copySuccess ? '已复制!' : '复制全部日志'">
+          <Copy :size="14" :style="{ color: copySuccess ? '#107c10' : undefined }" />
+          {{ copySuccess ? '已复制' : '复制' }}
         </button>
         <button class="btn btn-ghost" @click="logs = []" title="清空日志">
           <Trash2 :size="14" />

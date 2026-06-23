@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
-import { Gauge, RefreshCw, CheckCircle, Signal, Zap } from "@lucide/vue";
+import { ref, computed, watch, onMounted } from "vue";
+import { Gauge, RefreshCw, CheckCircle, Signal, Zap, ArrowUpDown } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
 
 const store = useAppStore();
@@ -8,17 +8,28 @@ const testingAll = ref(false);
 const autoSelecting = ref(false);
 const testingIds = ref<string[]>([]);
 const filterSubId = ref<string>(localStorage.getItem("nodes_filter_sub") ?? "all");
+const sortBy = ref<"none" | "latency" | "speed">(
+  (localStorage.getItem("nodes_sort") as "none" | "latency" | "speed") ?? "none"
+);
 const search = ref("");
 const autoSelectedId = ref<string | null>(localStorage.getItem("auto_selected_node_id"));
 
-// On mount, validate saved IDs still exist
-onMounted(() => {
-  // Validate subscription filter
-  const savedSub = localStorage.getItem("nodes_filter_sub");
-  if (savedSub && savedSub !== "all" && !store.subscriptions.find((s) => s.id === savedSub)) {
+watch(sortBy, (v) => localStorage.setItem("nodes_sort", v));
+
+function validateSubFilter() {
+  const savedSub = filterSubId.value;
+  if (savedSub !== "all" && store.subscriptions.length > 0 && !store.subscriptions.find((s) => s.id === savedSub)) {
     filterSubId.value = "all";
     localStorage.setItem("nodes_filter_sub", "all");
   }
+}
+
+// Re-validate when subscriptions load (async after mount)
+watch(() => store.subscriptions.length, validateSubFilter);
+
+// On mount, validate saved IDs still exist
+onMounted(() => {
+  validateSubFilter();
 
   // Validate auto-selected node — clear if the node no longer exists or is no longer active
   const savedAutoId = localStorage.getItem("auto_selected_node_id");
@@ -46,6 +57,21 @@ const filtered = computed(() => {
         n.server.toLowerCase().includes(q) ||
         n.protocol.toLowerCase().includes(q)
     );
+  }
+  if (sortBy.value === "latency") {
+    nodes = [...nodes].sort((a, b) => {
+      if (a.latency == null && b.latency == null) return 0;
+      if (a.latency == null) return 1;
+      if (b.latency == null) return -1;
+      return a.latency - b.latency;
+    });
+  } else if (sortBy.value === "speed") {
+    nodes = [...nodes].sort((a, b) => {
+      if (a.download_speed == null && b.download_speed == null) return 0;
+      if (a.download_speed == null) return 1;
+      if (b.download_speed == null) return -1;
+      return b.download_speed - a.download_speed;
+    });
   }
   return nodes;
 });
@@ -149,6 +175,18 @@ async function autoSelect() {
           <Gauge :size="14" :class="{ spin: testingAll }" />
           {{ testingAll ? "测试中..." : "全部测速" }}
         </button>
+        <!-- Sort selector -->
+        <div class="sort-group">
+          <ArrowUpDown :size="13" />
+          <button
+            v-for="[k, label] in [['none','默认'],['latency','延迟'],['speed','速度']]"
+            :key="k"
+            class="sort-btn"
+            :class="{ active: sortBy === k }"
+            @click="sortBy = k as typeof sortBy"
+          >{{ label }}</button>
+        </div>
+
         <button class="btn btn-ghost" @click="store.fetchNodes">
           <RefreshCw :size="14" />
           刷新
@@ -365,4 +403,19 @@ async function autoSelect() {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin { animation: spin 0.8s linear infinite; }
+
+.sort-group {
+  display: flex; align-items: center; gap: 3px;
+  padding: 3px 6px 3px 8px; border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted); font-size: 12px;
+}
+.sort-btn {
+  padding: 2px 7px; border-radius: var(--radius-sm);
+  border: none; background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 11px; cursor: pointer; transition: all 0.15s;
+}
+.sort-btn:hover { background: rgba(128,128,128,0.1); }
+.sort-btn.active { background: var(--color-primary); color: white; border-radius: var(--radius-sm); }
 </style>

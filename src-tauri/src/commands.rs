@@ -17,6 +17,12 @@ pub struct AppState {
     pub app_config: Mutex<AppConfig>,
 }
 
+/// Holds cloned handles to tray check-menu items so commands can update them.
+pub struct TrayState {
+    pub sys_proxy_item: Mutex<Option<tauri::menu::CheckMenuItem<tauri::Wry>>>,
+    pub tun_item:       Mutex<Option<tauri::menu::CheckMenuItem<tauri::Wry>>>,
+}
+
 // ─── Sing-box Control ───────────────────────────────────────────────
 
 #[tauri::command]
@@ -54,9 +60,20 @@ pub async fn cmd_start_singbox(
         .await
         .map_err(|e| e.to_string())?;
 
-    if config.proxy_mode != ProxyMode::Tun {
+    let enable_sys_proxy = config.proxy_mode != ProxyMode::Tun;
+    if enable_sys_proxy {
         proxy::set_system_proxy(true, config.mixed_port)
             .map_err(|e| e.to_string())?;
+    }
+
+    // Persist last running state for restore-on-startup
+    {
+        let mut cfg = state.app_config.lock().unwrap();
+        cfg.last_proxy_running = true;
+        cfg.last_system_proxy = enable_sys_proxy;
+        let cfg_clone = cfg.clone();
+        drop(cfg);
+        let _ = config::save_app_config(&cfg_clone);
     }
 
     Ok(())
@@ -72,6 +89,16 @@ pub async fn cmd_stop_singbox(
 
     proxy::set_system_proxy(false, 0)
         .map_err(|e| e.to_string())?;
+
+    // Persist last running state
+    {
+        let mut cfg = state.app_config.lock().unwrap();
+        cfg.last_proxy_running = false;
+        cfg.last_system_proxy = false;
+        let cfg_clone = cfg.clone();
+        drop(cfg);
+        let _ = config::save_app_config(&cfg_clone);
+    }
 
     Ok(())
 }
@@ -645,6 +672,46 @@ pub async fn cmd_download_singbox(
             // Emit failure event so frontend can handle it
             e.to_string()
         })
+}
+
+// ─── System Proxy ───────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn cmd_get_system_proxy_status() -> bool {
+    crate::proxy::get_system_proxy_status()
+}
+
+#[tauri::command]
+pub fn cmd_set_system_proxy(
+    enabled: bool,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let port = state.app_config.lock().unwrap().mixed_port;
+    crate::proxy::set_system_proxy(enabled, if enabled { port } else { 0 })
+        .map_err(|e| e.to_string())
+}
+
+// ─── Tray ───────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn cmd_update_tray_tooltip(app_handle: tauri::AppHandle, tooltip: String) {
+    use tauri::Manager;
+    if let Some(tray) = app_handle.tray_by_id("tray-main") {
+        let _ = tray.set_tooltip(Some(&tooltip));
+    }
+}
+
+/// Update the tray check-menu items to reflect current proxy / system-proxy state.
+#[tauri::command]
+pub fn cmd_sync_tray_menu(
+    sys_proxy_enabled: bool,
+    tray_state: State<'_, TrayState>,
+) {
+    if let Ok(guard) = tray_state.sys_proxy_item.lock() {
+        if let Some(item) = guard.as_ref() {
+            let _ = item.set_checked(sys_proxy_enabled);
+        }
+    }
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────

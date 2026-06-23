@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use tauri::Manager;
 use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use commands::AppState;
+use commands::{AppState, TrayState};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -72,7 +72,43 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
         .manage(app_state)
+        .manage(TrayState {
+            sys_proxy_item: Mutex::new(None),
+            tun_item:       Mutex::new(None),
+        })
         .setup(|app| {
+            // Restore proxy state if configured
+            {
+                let cfg = crate::config::load_app_config();
+                if cfg.restore_proxy_on_startup && cfg.last_proxy_running {
+                    let handle = app.handle().clone();
+                    let outbounds = app.state::<AppState>().outbounds.lock().unwrap().clone();
+                    let active_tag = cfg.active_nodes.get("proxy").cloned();
+                    let mixed_port = cfg.mixed_port;
+                    let restore_sys_proxy = cfg.last_system_proxy;
+                    let singbox_state = app.state::<AppState>().singbox_state.clone();
+                    let config_path = crate::config::singbox_config_path();
+                    let singbox_cfg = crate::subscription::build_singbox_config(
+                        &outbounds, &cfg, active_tag.as_deref(),
+                    );
+                    let _ = std::fs::write(
+                        &config_path,
+                        serde_json::to_string_pretty(&singbox_cfg).unwrap(),
+                    );
+                    tauri::async_runtime::spawn(async move {
+                        // Small delay to let the window/tray finish initializing
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        if let Ok(()) = crate::singbox::start_singbox(
+                            &handle, &config_path, singbox_state,
+                        ).await {
+                            if restore_sys_proxy {
+                                let _ = crate::proxy::set_system_proxy(true, mixed_port);
+                            }
+                        }
+                    });
+                }
+            }
+
             // Spawn auto-update checker via Tauri's runtime (not bare tokio::spawn)
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -111,13 +147,20 @@ pub fn run() {
                 .item(&quit_item)
                 .build()?;
 
+            // Store handles in TrayState so commands can update check states
+            {
+                let ts = app.state::<TrayState>();
+                *ts.sys_proxy_item.lock().unwrap() = Some(sys_proxy_item.clone());
+                *ts.tun_item.lock().unwrap()       = Some(tun_item.clone());
+            }
+
             // Clone handles for use inside the event closure
             let sys_proxy_item_c = sys_proxy_item.clone();
             let tun_item_c = tun_item.clone();
 
-            let tray = TrayIconBuilder::new()
+            let tray = TrayIconBuilder::with_id("tray-main")
                 .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("sing-box-win")
+                .tooltip("sing-box-win\n● 已停止")
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false) // left click = show window; right click = menu
                 .on_menu_event(move |app, event| {
@@ -218,6 +261,10 @@ pub fn run() {
             commands::cmd_delete_rule,
             commands::cmd_toggle_rule,
             commands::cmd_reset_rules,
+            commands::cmd_update_tray_tooltip,
+            commands::cmd_get_system_proxy_status,
+            commands::cmd_set_system_proxy,
+            commands::cmd_sync_tray_menu,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

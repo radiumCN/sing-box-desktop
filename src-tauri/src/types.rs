@@ -103,6 +103,14 @@ pub struct AppConfig {
     pub auto_update_notify: bool,
     /// true = close button minimizes to tray; false = exits the app
     pub close_to_tray: bool,
+    /// Restore proxy running state (sing-box + system proxy) on next startup
+    pub restore_proxy_on_startup: bool,
+    /// Last known sing-box running state (written on start/stop)
+    #[serde(default)]
+    pub last_proxy_running: bool,
+    /// Last known system proxy enabled state (written on start/stop)
+    #[serde(default)]
+    pub last_system_proxy: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -134,6 +142,9 @@ impl Default for AppConfig {
             auto_update_interval: 24,
             auto_update_notify: true,
             close_to_tray: true,
+            restore_proxy_on_startup: false,
+            last_proxy_running: false,
+            last_system_proxy: false,
         }
     }
 }

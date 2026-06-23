@@ -56,6 +56,9 @@ export interface AppConfig {
   auto_update_interval: number;
   auto_update_notify: boolean;
   close_to_tray: boolean;
+  restore_proxy_on_startup: boolean;
+  last_proxy_running: boolean;
+  last_system_proxy: boolean;
 }
 
 export interface TrafficPoint {
@@ -85,6 +88,9 @@ export const useAppStore = defineStore("app", () => {
     auto_update_interval: 24,
     auto_update_notify: true,
     close_to_tray: true,
+    restore_proxy_on_startup: false,
+    last_proxy_running: false,
+    last_system_proxy: false,
   });
   const trafficHistory = ref<TrafficPoint[]>([]);
   const loading = ref(false);
@@ -116,12 +122,29 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  function updateTrayTooltip() {
+    const modeMap: Record<string, string> = { rule: "规则", global: "全局", direct: "直连", tun: "TUN" };
+    const mode = modeMap[config.value.proxy_mode] ?? config.value.proxy_mode;
+    const node = activeNode.value?.name ?? "未选择";
+    const state = status.value.running ? "● 运行中" : "○ 已停止";
+    const tooltip = `sing-box-win\n${state}\n节点: ${node}\n模式: ${mode}`;
+    invoke("cmd_update_tray_tooltip", { tooltip }).catch(() => {});
+  }
+
+  function syncTrayMenu(sysProxyEnabled: boolean) {
+    invoke("cmd_sync_tray_menu", { sysProxyEnabled }).catch(() => {});
+  }
+
   async function startProxy() {
     loading.value = true;
     error.value = null;
     try {
       await invoke("cmd_start_singbox");
       await fetchStatus();
+      updateTrayTooltip();
+      // System proxy is enabled on start (unless TUN mode)
+      const sysProxyOn = config.value.proxy_mode !== "tun";
+      syncTrayMenu(sysProxyOn);
     } catch (e) {
       error.value = String(e);
     } finally {
@@ -135,6 +158,8 @@ export const useAppStore = defineStore("app", () => {
     try {
       await invoke("cmd_stop_singbox");
       await fetchStatus();
+      updateTrayTooltip();
+      syncTrayMenu(false);
     } catch (e) {
       error.value = String(e);
     } finally {
@@ -174,6 +199,7 @@ export const useAppStore = defineStore("app", () => {
   async function setActiveNode(nodeId: string) {
     await invoke("cmd_set_active_node", { nodeId });
     await fetchNodes();
+    updateTrayTooltip();
   }
 
   async function testNodeLatency(nodeId: string): Promise<number | null> {
@@ -234,6 +260,20 @@ export const useAppStore = defineStore("app", () => {
   async function setProxyMode(mode: string) {
     await invoke("cmd_set_proxy_mode", { mode });
     config.value.proxy_mode = mode as AppConfig["proxy_mode"];
+    // Restart sing-box so the new mode config takes effect immediately
+    if (status.value.running) {
+      loading.value = true;
+      try {
+        await invoke("cmd_stop_singbox");
+        await invoke("cmd_start_singbox");
+        await fetchStatus();
+        updateTrayTooltip();
+      } catch (e) {
+        error.value = String(e);
+      } finally {
+        loading.value = false;
+      }
+    }
   }
 
   function addTrafficPoint(upload: number, download: number) {
@@ -250,6 +290,7 @@ export const useAppStore = defineStore("app", () => {
       fetchNodes(),
       fetchConfig(),
     ]);
+    updateTrayTooltip();
   }
 
   return {

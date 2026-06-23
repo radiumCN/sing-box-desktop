@@ -1,18 +1,32 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from "vue";
+import { ref, watch, onMounted, computed } from "vue";
 import {
-  Save, Shield, Globe, Cpu, Monitor, Download,
+  Shield, Globe, Cpu, Monitor, Download,
   RefreshCw, CheckCircle, AlertCircle, Package, ExternalLink,
-  ShieldCheck, ShieldAlert
+  ShieldCheck, ShieldAlert, Check
 } from "@lucide/vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { useAppStore, type AppConfig } from "../stores/app";
 
 const store = useAppStore();
-const saving = ref(false);
 const saved = ref(false);
+const appVersion = ref("0.1.1");
 const localConfig = ref<AppConfig>({ ...store.config });
+
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleSave() {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    await store.saveConfig({ ...localConfig.value });
+    saved.value = true;
+    setTimeout(() => (saved.value = false), 1500);
+  }, 600);
+}
+
+watch(localConfig, scheduleSave, { deep: true });
 
 // ─── Kernel Updater ───────────────────────────────────────────────────
 
@@ -153,20 +167,13 @@ async function startDownload() {
   }
 }
 
-async function save() {
-  saving.value = true;
-  try {
-    await store.saveConfig({ ...localConfig.value });
-    saved.value = true;
-    setTimeout(() => (saved.value = false), 2000);
-  } finally {
-    saving.value = false;
-  }
-}
-
 onMounted(async () => {
   localConfig.value = { ...store.config };
-  await Promise.all([refreshKernelStatus(), refreshTunStatus()]);
+  await Promise.all([
+    refreshKernelStatus(),
+    refreshTunStatus(),
+    getVersion().then((v) => (appVersion.value = v)),
+  ]);
 });
 </script>
 
@@ -174,10 +181,11 @@ onMounted(async () => {
   <div class="page">
     <div class="page-header">
       <h1 class="page-title">设置</h1>
-      <button class="btn btn-primary" :disabled="saving" @click="save">
-        <Save :size="14" />
-        {{ saving ? "保存中..." : saved ? "已保存 ✓" : "保存设置" }}
-      </button>
+      <Transition name="autosave">
+        <span v-if="saved" class="autosave-badge">
+          <Check :size="12" />已保存
+        </span>
+      </Transition>
     </div>
 
     <!-- ─── sing-box 内核管理 ─── -->
@@ -333,6 +341,17 @@ onMounted(async () => {
           </div>
           <label class="toggle">
             <input type="checkbox" v-model="localConfig.close_to_tray" />
+            <span class="toggle-track" />
+          </label>
+        </div>
+        <div class="setting-divider" />
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">记住代理状态</div>
+            <div class="setting-desc">开机自启动时自动恢复上次的代理状态（系统代理 / TUN 模式）</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" v-model="localConfig.restore_proxy_on_startup" />
             <span class="toggle-track" />
           </label>
         </div>
@@ -521,7 +540,7 @@ onMounted(async () => {
       <div>
         <div class="about-name">sing-box-win</div>
         <div class="about-desc">基于 sing-box 的 Windows 图形化管理工具</div>
-        <div class="about-version">v0.1.0 · {{ installedVersion ?? "sing-box 未安装" }}</div>
+        <div class="about-version">v{{ appVersion }} · {{ installedVersion ?? "sing-box 未安装" }}</div>
       </div>
     </div>
   </div>
@@ -531,6 +550,16 @@ onMounted(async () => {
 .page { display: flex; flex-direction: column; gap: 20px; max-width: 700px; }
 .page-header { display: flex; align-items: center; justify-content: space-between; }
 .page-title { font-size: 20px; font-weight: 600; }
+
+.autosave-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 12px; font-weight: 500;
+  color: #107c10; padding: 4px 10px;
+  background: rgba(16,124,16,0.08);
+  border-radius: 100px;
+}
+.autosave-enter-active, .autosave-leave-active { transition: opacity 0.3s, transform 0.3s; }
+.autosave-enter-from, .autosave-leave-to { opacity: 0; transform: translateY(-4px); }
 
 .settings-section { display: flex; flex-direction: column; gap: 10px; }
 .section-header {

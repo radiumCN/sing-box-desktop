@@ -7,17 +7,13 @@ import "./styles/main.css";
 // Disable right-click context menu
 document.addEventListener("contextmenu", (e) => e.preventDefault());
 
-// Disable DevTools shortcuts (F12, Ctrl+Shift+I, Ctrl+Shift+J, Ctrl+U)
+// Block all browser F-key shortcuts (F1=help, F3=search, F5=refresh, F7=caret, F12=devtools …)
 document.addEventListener("keydown", (e) => {
-  if (
-    e.key === "F12" ||
-    (e.ctrlKey && e.shiftKey && (e.key === "I" || e.key === "J" || e.key === "C")) ||
-    (e.ctrlKey && e.key === "U")
-  ) {
+  if (e.key.match(/^F\d+$/)) {
     e.preventDefault();
     e.stopPropagation();
   }
-});
+}, true);
 
 const app = createApp(App);
 app.use(createPinia());

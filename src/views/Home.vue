@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from "vue";
+import { ref, watch, onMounted, onUnmounted, computed } from "vue";
 import {
   Play, Square, Wifi, WifiOff, ArrowUp, ArrowDown,
-  Filter, Zap, Server, Clock
+  Filter, Zap, Server, Clock, Globe, Shield
 } from "@lucide/vue";
 import { Line } from "vue-chartjs";
 import {
@@ -14,11 +14,28 @@ import {
   Filler,
   Tooltip,
 } from "chart.js";
+import { invoke } from "@tauri-apps/api/core";
 import { useAppStore } from "../stores/app";
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip);
 
 const store = useAppStore();
+const systemProxyEnabled = ref(false);
+
+async function fetchSystemProxy() {
+  systemProxyEnabled.value = await invoke<boolean>("cmd_get_system_proxy_status");
+}
+
+async function toggleSystemProxy() {
+  const next = !systemProxyEnabled.value;
+  try {
+    await invoke("cmd_set_system_proxy", { enabled: next });
+    systemProxyEnabled.value = next;
+    invoke("cmd_sync_tray_menu", { sysProxyEnabled: next }).catch(() => {});
+  } catch (e) {
+    store.error = String(e);
+  }
+}
 const uploadSpeed = ref(0);
 const downloadSpeed = ref(0);
 const totalUpload = ref(0);
@@ -107,9 +124,14 @@ async function toggleProxy() {
   } else {
     await store.startProxy();
   }
+  await fetchSystemProxy();
 }
 
+// Keep system proxy indicator in sync when running state changes (e.g. external stop)
+watch(() => store.status.running, fetchSystemProxy);
+
 onMounted(() => {
+  fetchSystemProxy();
   pollTimer = setInterval(async () => {
     await store.fetchStatus();
     if (store.status.running) {
@@ -226,6 +248,76 @@ onUnmounted(() => {
           <div class="stat-sub">
             {{ store.status.version ?? "sing-box" }}
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Network Settings -->
+    <div class="card net-settings-card">
+      <div class="net-settings-title">
+        <Globe :size="14" />
+        网络设置
+      </div>
+      <div class="net-settings-body">
+        <!-- System Proxy toggle -->
+        <div class="net-row">
+          <div class="net-row-left">
+            <div class="net-row-icon icon-blue"><Globe :size="15" /></div>
+            <div>
+              <div class="net-row-label">系统代理</div>
+              <div class="net-row-sub">{{ systemProxyEnabled ? `127.0.0.1:${store.config.mixed_port}` : '未开启' }}</div>
+            </div>
+          </div>
+          <button
+            class="toggle-btn"
+            :class="{ on: systemProxyEnabled }"
+            @click="toggleSystemProxy"
+            :title="systemProxyEnabled ? '关闭系统代理' : '开启系统代理'"
+          >
+            <span class="toggle-knob" />
+          </button>
+        </div>
+
+        <div class="net-divider" />
+
+        <!-- Proxy mode selector -->
+        <div class="net-row">
+          <div class="net-row-left">
+            <div class="net-row-icon icon-purple"><Filter :size="15" /></div>
+            <div>
+              <div class="net-row-label">代理模式</div>
+              <div class="net-row-sub">{{ proxyModeLabel }}</div>
+            </div>
+          </div>
+          <div class="mode-pills">
+            <button
+              v-for="[k, label] in [['rule','规则'],['global','全局'],['direct','直连']]"
+              :key="k"
+              class="mode-pill"
+              :class="{ active: store.config.proxy_mode === k }"
+              @click="store.setProxyMode(k)"
+            >{{ label }}</button>
+          </div>
+        </div>
+
+        <div class="net-divider" />
+
+        <!-- TUN Mode toggle -->
+        <div class="net-row">
+          <div class="net-row-left">
+            <div class="net-row-icon icon-orange"><Shield :size="15" /></div>
+            <div>
+              <div class="net-row-label">TUN 模式</div>
+              <div class="net-row-sub">{{ store.config.tun_enabled ? '虚拟网卡已启用' : '未启用，需管理员权限' }}</div>
+            </div>
+          </div>
+          <button
+            class="toggle-btn"
+            :class="{ on: store.config.tun_enabled }"
+            @click="async () => { const c = { ...store.config, tun_enabled: !store.config.tun_enabled }; await store.saveConfig(c); }"
+          >
+            <span class="toggle-knob" />
+          </button>
         </div>
       </div>
     </div>
@@ -372,6 +464,56 @@ onUnmounted(() => {
   height: 100%; display: flex; align-items: center; justify-content: center;
   color: var(--color-text-muted); font-size: 13px;
 }
+
+/* Network Settings Card */
+.net-settings-card { padding: 14px 16px; }
+.net-settings-title {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 600; color: var(--color-text-secondary);
+  text-transform: uppercase; letter-spacing: 0.5px;
+  margin-bottom: 10px;
+}
+.net-settings-body { display: flex; flex-direction: column; }
+.net-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 0; gap: 12px;
+}
+.net-row-left { display: flex; align-items: center; gap: 10px; }
+.net-row-icon {
+  width: 32px; height: 32px; border-radius: var(--radius-md);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+}
+.net-row-label { font-size: 13px; font-weight: 500; }
+.net-row-sub { font-size: 11px; color: var(--color-text-muted); margin-top: 1px; }
+.net-divider { height: 1px; background: var(--color-border); margin: 2px 0; }
+
+/* Toggle switch */
+.toggle-btn {
+  width: 42px; height: 24px; border-radius: 100px;
+  background: var(--color-border); border: none; cursor: pointer;
+  position: relative; transition: background 0.2s; flex-shrink: 0;
+  padding: 0;
+}
+.toggle-btn.on { background: var(--color-primary); }
+.toggle-knob {
+  position: absolute; top: 3px; left: 3px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: white; transition: transform 0.2s;
+  display: block;
+}
+.toggle-btn.on .toggle-knob { transform: translateX(18px); }
+
+/* Mode pills */
+.mode-pills { display: flex; gap: 4px; }
+.mode-pill {
+  padding: 3px 10px; border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: transparent; color: var(--color-text-secondary);
+  font-size: 11px; cursor: pointer; transition: all 0.15s;
+}
+.mode-pill:hover { background: rgba(128,128,128,0.1); }
+.mode-pill.active { background: var(--color-primary); color: white; border-color: transparent; }
 
 .error-banner {
   display: flex; align-items: center; justify-content: space-between;

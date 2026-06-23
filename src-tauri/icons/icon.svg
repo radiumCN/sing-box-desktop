@@ -1,0 +1,89 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#070b16"/>
+      <stop offset="100%" stop-color="#0c1422"/>
+    </linearGradient>
+    <linearGradient id="faceTop" x1="182" y1="193" x2="330" y2="278" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#1e4060"/>
+      <stop offset="100%" stop-color="#152f4c"/>
+    </linearGradient>
+    <linearGradient id="faceLeft" x1="182" y1="235" x2="256" y2="363" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0e2240"/>
+      <stop offset="100%" stop-color="#081a30"/>
+    </linearGradient>
+    <linearGradient id="faceRight" x1="330" y1="235" x2="256" y2="363" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#14304e"/>
+      <stop offset="100%" stop-color="#0b2038"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#00e5a0"/>
+      <stop offset="50%" stop-color="#00bbee"/>
+      <stop offset="100%" stop-color="#0088ff"/>
+    </linearGradient>
+    <linearGradient id="edgeHL" x1="182" y1="0" x2="330" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00e5a0"/>
+      <stop offset="100%" stop-color="#0088ff"/>
+    </linearGradient>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="arcGlow" x="-100%" y="-100%" width="300%" height="300%">
+      <feGaussianBlur stdDeviation="10" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="clip"><rect width="512" height="512" rx="108"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#clip)">
+    <rect width="512" height="512" fill="url(#bg)"/>
+    <circle cx="256" cy="260" r="180" fill="#0c1e38" opacity="0.3"/>
+    <circle cx="256" cy="240" r="110" fill="#0e2a48" opacity="0.18"/>
+  </g>
+  <rect width="512" height="512" rx="108" fill="none" stroke="#152540" stroke-width="1"/>
+
+  <polygon points="182,235 256,278 256,363 182,320" fill="url(#faceLeft)"/>
+  <polygon points="256,278 330,235 330,320 256,363" fill="url(#faceRight)"/>
+  <polygon points="182,235 256,193 330,235 256,278" fill="url(#faceTop)"/>
+
+  <path d="M182,235 L256,193 L330,235" fill="none" stroke="url(#edgeHL)"
+        stroke-width="2.5" stroke-linejoin="round" opacity="0.7"/>
+  <path d="M182,235 L256,278" fill="none" stroke="#1c3555" stroke-width="1.5" opacity="0.55"/>
+  <path d="M330,235 L256,278" fill="none" stroke="#1c3555" stroke-width="1.5" opacity="0.55"/>
+  <path d="M256,278 L256,363" fill="none" stroke="#0e2040" stroke-width="1.5" opacity="0.45"/>
+  <line x1="182" y1="235" x2="182" y2="320" stroke="#0c1e38" stroke-width="1" opacity="0.35"/>
+  <line x1="330" y1="235" x2="330" y2="320" stroke="#102840" stroke-width="1" opacity="0.35"/>
+  <line x1="182" y1="320" x2="256" y2="363" stroke="#081828" stroke-width="1" opacity="0.3"/>
+  <line x1="330" y1="320" x2="256" y2="363" stroke="#0a1c30" stroke-width="1" opacity="0.3"/>
+
+  <g opacity="0.6" stroke-linecap="round">
+    <line x1="256" y1="235" x2="256" y2="208" stroke="#00e5a0" stroke-width="2"/>
+    <line x1="256" y1="235" x2="218" y2="235" stroke="#00ddee" stroke-width="2"/>
+    <line x1="256" y1="235" x2="294" y2="235" stroke="#00aaff" stroke-width="2"/>
+    <line x1="256" y1="235" x2="256" y2="260" stroke="#0088ff" stroke-width="2"/>
+    <line x1="256" y1="208" x2="218" y2="235" stroke="#00e5a0" stroke-width="1" opacity="0.45"/>
+    <line x1="256" y1="208" x2="294" y2="235" stroke="#00ccee" stroke-width="1" opacity="0.45"/>
+    <line x1="218" y1="235" x2="256" y2="260" stroke="#00bbee" stroke-width="1" opacity="0.45"/>
+    <line x1="294" y1="235" x2="256" y2="260" stroke="#0088ff" stroke-width="1" opacity="0.45"/>
+  </g>
+
+  <g filter="url(#glow)">
+    <circle cx="256" cy="235" r="8"  fill="#00e5a0"/>
+    <circle cx="256" cy="208" r="5.5" fill="#00d4a0"/>
+    <circle cx="218" cy="235" r="5.5" fill="#00ccee"/>
+    <circle cx="294" cy="235" r="5.5" fill="#00aaff"/>
+    <circle cx="256" cy="260" r="5.5" fill="#0088ff"/>
+  </g>
+
+  <circle cx="256" cy="278" r="12" fill="#00e5a0" opacity="0.1" filter="url(#arcGlow)"/>
+
+  <g filter="url(#arcGlow)" opacity="0.3">
+    <path d="M232,170 Q256,155 280,170" fill="none" stroke="#00e5a0"
+          stroke-width="2" stroke-linecap="round"/>
+    <path d="M220,153 Q256,132 292,153" fill="none" stroke="#00ccee"
+          stroke-width="1.6" stroke-linecap="round"/>
+    <path d="M208,136 Q256,108 304,136" fill="none" stroke="#0088ff"
+          stroke-width="1.3" stroke-linecap="round"/>
+  </g>
+</svg>
