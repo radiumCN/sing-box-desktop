@@ -426,6 +426,7 @@ pub fn save_rules(rules: &[RouteRule]) -> Result<()> {
 }
 
 /// Convert RouteRule list to sing-box route.rules JSON array
+#[allow(dead_code)]
 pub fn rules_to_singbox(rules: &[RouteRule]) -> Vec<serde_json::Value> {
     use serde_json::json;
     let mut result = Vec::new();

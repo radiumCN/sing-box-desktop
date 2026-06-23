@@ -12,7 +12,7 @@ import { useAppStore, type AppConfig } from "../stores/app";
 
 const store = useAppStore();
 const saved = ref(false);
-const appVersion = ref("0.1.1");
+const appVersion = ref("");
 const localConfig = ref<AppConfig>({ ...store.config });
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;

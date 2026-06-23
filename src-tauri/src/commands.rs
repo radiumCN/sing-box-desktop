@@ -695,7 +695,6 @@ pub fn cmd_set_system_proxy(
 
 #[tauri::command]
 pub fn cmd_update_tray_tooltip(app_handle: tauri::AppHandle, tooltip: String) {
-    use tauri::Manager;
     if let Some(tray) = app_handle.tray_by_id("tray-main") {
         let _ = tray.set_tooltip(Some(&tooltip));
     }
@@ -718,6 +717,40 @@ pub fn cmd_sync_tray_menu(
             let _ = item.set_checked(tun_enabled);
         }
     }
+}
+
+// ─── Process Memory ─────────────────────────────────────────────────
+
+/// Returns the working-set memory (RSS) of the sing-box process in bytes,
+/// or None if sing-box is not running or the query fails.
+#[tauri::command]
+pub fn cmd_get_memory_usage(state: State<AppState>) -> Option<u64> {
+    let pid = state.singbox_state.lock().unwrap().pid?;
+
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use winapi::um::handleapi::CloseHandle;
+        use winapi::um::processthreadsapi::OpenProcess;
+        use winapi::um::psapi::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use winapi::um::winnt::{PROCESS_QUERY_INFORMATION, PROCESS_VM_READ};
+
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut pmc: PROCESS_MEMORY_COUNTERS = std::mem::zeroed();
+        pmc.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        let ok = GetProcessMemoryInfo(
+            handle,
+            &mut pmc,
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        );
+        CloseHandle(handle);
+        if ok != 0 { Some(pmc.WorkingSetSize as u64) } else { None }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    None
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────

@@ -265,6 +265,7 @@ pub fn run() {
             commands::cmd_get_system_proxy_status,
             commands::cmd_set_system_proxy,
             commands::cmd_sync_tray_menu,
+            commands::cmd_get_memory_usage,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

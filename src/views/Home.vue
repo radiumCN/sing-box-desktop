@@ -40,6 +40,7 @@ const uploadSpeed = ref(0);
 const downloadSpeed = ref(0);
 const totalUpload = ref(0);
 const totalDownload = ref(0);
+const memoryUsage = ref<number | null>(null);
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 const chartLabels = computed(() =>
@@ -143,9 +144,11 @@ onMounted(() => {
       totalUpload.value += up;
       totalDownload.value += down;
       store.addTrafficPoint(up, down);
+      memoryUsage.value = await invoke<number | null>("cmd_get_memory_usage").catch(() => null);
     } else {
       uploadSpeed.value = 0;
       downloadSpeed.value = 0;
+      memoryUsage.value = null;
     }
   }, 1000);
 });
@@ -246,7 +249,12 @@ onUnmounted(() => {
           <div class="stat-label">运行时长</div>
           <div class="stat-value">{{ formatUptime(store.status.uptime) }}</div>
           <div class="stat-sub">
-            {{ store.status.version ?? "sing-box" }}
+            <template v-if="memoryUsage !== null">
+              内存 {{ formatBytes(memoryUsage) }} · {{ store.status.version ?? "sing-box" }}
+            </template>
+            <template v-else>
+              {{ store.status.version ?? "sing-box" }}
+            </template>
           </div>
         </div>
       </div>

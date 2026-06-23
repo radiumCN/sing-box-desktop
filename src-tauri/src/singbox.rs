@@ -70,6 +70,7 @@ pub fn singbox_binary_path(app_handle: &tauri::AppHandle) -> Result<std::path::P
 }
 
 /// Fetch sing-box version
+#[allow(dead_code)]
 pub async fn get_version(binary_path: &std::path::Path) -> Result<String> {
     let mut cmd = TokioCommand::new(binary_path);
     cmd.arg("version");
@@ -189,6 +190,7 @@ pub async fn stop_singbox(state: SharedState) -> Result<()> {
 }
 
 /// Fetch real-time stats from sing-box API (Clash API compatible)
+#[allow(dead_code)]
 pub async fn fetch_traffic_stats(api_port: u16) -> Result<crate::types::TrafficStats> {
     let url = format!("http://127.0.0.1:{}/traffic", api_port);
     let client = reqwest::Client::new();
