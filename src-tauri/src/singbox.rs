@@ -6,6 +6,11 @@ use tauri::Manager;
 use tokio::process::Command as TokioCommand;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+/// Windows CREATE_NO_WINDOW flag: prevents a console window from popping up
+/// when spawning child processes (sing-box, taskkill).
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 #[derive(Debug, Clone)]
 pub struct SingboxState {
     pub running: bool,
@@ -66,8 +71,11 @@ pub fn singbox_binary_path(app_handle: &tauri::AppHandle) -> Result<std::path::P
 
 /// Fetch sing-box version
 pub async fn get_version(binary_path: &std::path::Path) -> Result<String> {
-    let output = TokioCommand::new(binary_path)
-        .arg("version")
+    let mut cmd = TokioCommand::new(binary_path);
+    cmd.arg("version");
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd
         .output()
         .await?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -96,11 +104,13 @@ pub async fn start_singbox(
     let state_clone = state.clone();
 
     tokio::spawn(async move {
-        let mut child = match TokioCommand::new(&binary)
-            .args(["run", "-c", config_path.to_str().unwrap_or("")])
+        let mut cmd = TokioCommand::new(&binary);
+        cmd.args(["run", "-c", config_path.to_str().unwrap_or("")])
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
+            .stderr(std::process::Stdio::piped());
+        #[cfg(windows)]
+        cmd.creation_flags(CREATE_NO_WINDOW);
+        let mut child = match cmd.spawn()
         {
             Ok(c) => c,
             Err(e) => {
@@ -157,6 +167,7 @@ pub async fn stop_singbox(state: SharedState) -> Result<()> {
         {
             TokioCommand::new("taskkill")
                 .args(["/PID", &pid.to_string(), "/F"])
+                .creation_flags(CREATE_NO_WINDOW)
                 .output()
                 .await?;
         }

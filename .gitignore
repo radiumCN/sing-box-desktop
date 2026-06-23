@@ -32,3 +32,4 @@ src-tauri/binaries/
 
 # App data (generated at runtime)
 *.app_data.json
+installers

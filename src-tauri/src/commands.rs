@@ -28,6 +28,17 @@ pub async fn cmd_start_singbox(
     let outbounds = state.outbounds.lock().unwrap().clone();
     let active_tag = config.active_nodes.get("proxy").cloned();
 
+    // TUN mode preconditions: requires administrator privileges and the WinTun driver.
+    // Fail early with a clear message instead of letting sing-box crash silently.
+    if config.tun_enabled {
+        if !crate::tun::is_elevated() {
+            return Err("TUN 模式需要管理员权限。请在「设置 → TUN 模式」中点击「以管理员身份重启」后再启动。".to_string());
+        }
+        if !crate::tun::wintun_available() {
+            return Err("TUN 模式需要 WinTun 驱动。请在「设置 → TUN 模式」中点击「下载 WinTun」后再启动。".to_string());
+        }
+    }
+
     let singbox_cfg = subscription::build_singbox_config(
         &outbounds,
         &config,

@@ -664,6 +664,7 @@ pub fn build_singbox_config(
         "route": {
             "default_domain_resolver": "local",
             "rules": [
+                { "action": "sniff" },
                 { "protocol": ["dns"], "action": "hijack-dns" },
                 { "clash_mode": "Direct", "outbound": "direct" },
                 { "clash_mode": "Global", "outbound": "proxy" },
@@ -709,8 +710,7 @@ pub fn build_singbox_config(
             "mtu": 9000,
             "auto_route": true,
             "strict_route": true,
-            "stack": "system",
-            "sniff": true
+            "stack": "system"
         }));
     }
 

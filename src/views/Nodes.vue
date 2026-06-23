@@ -109,6 +109,11 @@ async function selectNode(nodeId: string) {
   localStorage.removeItem("auto_selected_node_id");
 }
 
+function clearAutoSelect() {
+  autoSelectedId.value = null;
+  localStorage.removeItem("auto_selected_node_id");
+}
+
 async function autoSelect() {
   autoSelecting.value = true;
   autoSelectedId.value = null;
@@ -155,7 +160,7 @@ async function autoSelect() {
     <div v-if="autoSelectedId" class="auto-banner">
       <Zap :size="13" />
       已自动选择延迟最低节点：<strong>{{ store.nodes.find(n => n.id === autoSelectedId)?.name }}</strong>
-      <button class="banner-close" @click="autoSelectedId = null; localStorage.removeItem('auto_selected_node_id')">×</button>
+      <button class="banner-close" @click="clearAutoSelect">×</button>
     </div>
 
     <!-- Filters -->

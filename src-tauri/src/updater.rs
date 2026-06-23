@@ -182,8 +182,11 @@ pub async fn get_installed_version() -> Option<String> {
     if !path.exists() {
         return None;
     }
-    let output = tokio::process::Command::new(&path)
-        .arg("version")
+    let mut cmd = tokio::process::Command::new(&path);
+    cmd.arg("version");
+    #[cfg(windows)]
+    cmd.creation_flags(0x0800_0000);
+    let output = cmd
         .output()
         .await
         .ok()?;
