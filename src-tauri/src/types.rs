@@ -103,6 +103,9 @@ pub struct AppConfig {
     /// 0 = disabled, otherwise check every N hours
     pub auto_update_interval: u32,
     pub auto_update_notify: bool,
+    /// App self-update channel: "stable" or "beta"
+    #[serde(default = "default_update_channel")]
+    pub update_channel: String,
     /// true = close button minimizes to tray; false = exits the app
     pub close_to_tray: bool,
     /// Restore proxy running state (sing-box + system proxy) on next startup
@@ -124,6 +127,10 @@ pub enum ProxyMode {
     Tun,
 }
 
+fn default_update_channel() -> String {
+    "stable".to_string()
+}
+
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
@@ -143,6 +150,7 @@ impl Default for AppConfig {
             active_nodes: std::collections::HashMap::new(),
             auto_update_interval: 24,
             auto_update_notify: true,
+            update_channel: "stable".to_string(),
             close_to_tray: true,
             restore_proxy_on_startup: false,
             last_proxy_running: false,

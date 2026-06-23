@@ -128,6 +128,7 @@ pub async fn download_wintun(dest_dir: &std::path::Path) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .user_agent("sing-box-win/0.1.0")
+        .no_proxy()
         .build()?;
 
     let resp = client.get(url).send().await?;

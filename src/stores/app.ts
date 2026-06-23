@@ -56,6 +56,7 @@ export interface AppConfig {
   active_nodes: Record<string, string>;
   auto_update_interval: number;
   auto_update_notify: boolean;
+  update_channel: string;
   close_to_tray: boolean;
   restore_proxy_on_startup: boolean;
   last_proxy_running: boolean;
@@ -88,6 +89,7 @@ export const useAppStore = defineStore("app", () => {
     active_nodes: {},
     auto_update_interval: 24,
     auto_update_notify: true,
+    update_channel: "stable",
     close_to_tray: true,
     restore_proxy_on_startup: false,
     last_proxy_running: false,
@@ -144,8 +146,11 @@ export const useAppStore = defineStore("app", () => {
       await invoke("cmd_start_singbox");
       await fetchStatus();
       updateTrayTooltip();
-      // System proxy is enabled on start (unless TUN mode)
-      const sysProxyOn = config.value.proxy_mode !== "tun";
+      // When not in TUN-only mode, enable Windows system proxy so browsers work immediately
+      const sysProxyOn = !config.value.tun_enabled || config.value.proxy_mode !== "tun";
+      if (sysProxyOn) {
+        await invoke("cmd_set_system_proxy", { enabled: true }).catch(() => {});
+      }
       syncTrayMenu(sysProxyOn);
     } catch (e) {
       error.value = String(e);
@@ -161,6 +166,8 @@ export const useAppStore = defineStore("app", () => {
       await invoke("cmd_stop_singbox");
       await fetchStatus();
       updateTrayTooltip();
+      // Always clear system proxy when stopping sing-box
+      await invoke("cmd_set_system_proxy", { enabled: false }).catch(() => {});
       syncTrayMenu(false);
     } catch (e) {
       error.value = String(e);

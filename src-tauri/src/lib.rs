@@ -273,6 +273,8 @@ pub fn run() {
             commands::cmd_sync_tray_menu,
             commands::cmd_get_memory_usage,
             commands::cmd_save_subscription_settings,
+            commands::cmd_check_app_update,
+            commands::cmd_download_app_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

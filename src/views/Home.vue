@@ -30,6 +30,21 @@ async function fetchSystemProxy() {
 async function toggleSystemProxy() {
   const next = !systemProxyEnabled.value;
   try {
+    if (next && !store.status.running) {
+      // Start sing-box first when user enables system proxy while it's stopped.
+      // startProxy() also calls cmd_set_system_proxy internally so we're done after this.
+      await store.startProxy();
+      await fetchSystemProxy();
+      return;
+    }
+    if (!next && store.status.running && !store.config.tun_enabled) {
+      // When disabling system proxy and TUN is also off, stop sing-box entirely
+      // so we don't leave an orphaned listener on the mixed port.
+      await store.stopProxy();
+      await fetchSystemProxy();
+      return;
+    }
+    // sing-box already in the desired state — just flip the system proxy flag
     await invoke("cmd_set_system_proxy", { enabled: next });
     systemProxyEnabled.value = next;
     invoke("cmd_sync_tray_menu", { sysProxyEnabled: next, tunEnabled: store.config.tun_enabled ?? false }).catch(() => {});

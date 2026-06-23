@@ -4,6 +4,10 @@ use std::path::PathBuf;
 use tauri::Emitter;
 
 const GITHUB_API: &str = "https://api.github.com/repos/SagerNet/sing-box/releases/latest";
+const APP_GITHUB_STABLE_API: &str =
+    "https://api.github.com/repos/radiumCN/sing-box-desktop/releases/latest";
+const APP_GITHUB_ALL_API: &str =
+    "https://api.github.com/repos/radiumCN/sing-box-desktop/releases";
 /// Cache validity duration in seconds (1 hour)
 const CACHE_TTL_SECS: u64 = 3600;
 
@@ -65,6 +69,7 @@ pub async fn fetch_latest_release(force_refresh: bool) -> Result<ReleaseInfo> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .user_agent(concat!("sing-box-win/", env!("CARGO_PKG_VERSION")))
+        .no_proxy()
         .build()?;
 
     let resp = client.get(GITHUB_API).send().await?;
@@ -167,6 +172,7 @@ pub async fn download_singbox(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .user_agent(concat!("sing-box-win/", env!("CARGO_PKG_VERSION")))
+        .no_proxy()
         .build()?;
 
     let resp = client.get(&download_url).send().await?;
@@ -281,4 +287,220 @@ pub async fn get_installed_version() -> Option<String> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Typical output: "sing-box version 1.10.0"
     stdout.lines().next().map(|s| s.to_string())
+}
+
+// ─── App Self-Updater ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppReleaseInfo {
+    pub version: String,
+    pub published_at: String,
+    pub release_notes: String,
+    pub download_url: String,
+    pub is_prerelease: bool,
+}
+
+fn app_cache_path(channel: &str) -> PathBuf {
+    crate::config::app_data_dir().join(format!("app_update_cache_{}.json", channel))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AppUpdateCache {
+    cached_at_secs: u64,
+    release: AppReleaseInfo,
+}
+
+fn load_app_cache(channel: &str) -> Option<AppReleaseInfo> {
+    let data = std::fs::read_to_string(app_cache_path(channel)).ok()?;
+    let cache: AppUpdateCache = serde_json::from_str(&data).ok()?;
+    if unix_now().saturating_sub(cache.cached_at_secs) < CACHE_TTL_SECS {
+        Some(cache.release)
+    } else {
+        None
+    }
+}
+
+fn save_app_cache(channel: &str, release: &AppReleaseInfo) {
+    let cache = AppUpdateCache {
+        cached_at_secs: unix_now(),
+        release: release.clone(),
+    };
+    if let Ok(data) = serde_json::to_string_pretty(&cache) {
+        let _ = std::fs::write(app_cache_path(channel), data);
+    }
+}
+
+fn parse_app_release(body: &serde_json::Value) -> Result<AppReleaseInfo> {
+    let version = body["tag_name"]
+        .as_str()
+        .ok_or_else(|| anyhow!("无法解析版本号"))?
+        .to_string();
+
+    let published_at = body["published_at"].as_str().unwrap_or("").to_string();
+    let is_prerelease = body["prerelease"].as_bool().unwrap_or(false);
+
+    let release_notes = body["body"]
+        .as_str()
+        .unwrap_or("")
+        .lines()
+        .take(12)
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Find Windows x64 installer asset (.exe)
+    let download_url = body["assets"]
+        .as_array()
+        .ok_or_else(|| anyhow!("未找到下载资源"))?
+        .iter()
+        .find(|a| {
+            let name = a["name"].as_str().unwrap_or("").to_lowercase();
+            name.ends_with(".exe") && (name.contains("x64") || name.contains("setup") || name.contains("install"))
+        })
+        .or_else(|| {
+            // fallback: first .exe asset
+            body["assets"].as_array().and_then(|arr| {
+                arr.iter().find(|a| {
+                    a["name"].as_str().unwrap_or("").to_lowercase().ends_with(".exe")
+                })
+            })
+        })
+        .and_then(|a| a["browser_download_url"].as_str())
+        .ok_or_else(|| anyhow!("未找到 Windows 安装包(.exe)"))?
+        .to_string();
+
+    Ok(AppReleaseInfo { version, published_at, release_notes, download_url, is_prerelease })
+}
+
+/// Fetch the latest app release for the given channel.
+/// channel = "stable" → non-prerelease only; channel = "beta" → includes pre-release
+pub async fn fetch_app_release(channel: &str, force_refresh: bool) -> Result<AppReleaseInfo> {
+    if !force_refresh {
+        if let Some(cached) = load_app_cache(channel) {
+            return Ok(cached);
+        }
+    }
+
+    // Bypass system proxy (which points to sing-box itself) to avoid circular dependency.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent(concat!("sing-box-win/", env!("CARGO_PKG_VERSION")))
+        .no_proxy()
+        .build()?;
+
+    let url = if channel == "beta" {
+        APP_GITHUB_ALL_API
+    } else {
+        APP_GITHUB_STABLE_API
+    };
+
+    let resp = client.get(url).send().await?;
+
+    if resp.status() == reqwest::StatusCode::FORBIDDEN
+        || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        return Err(anyhow!("GitHub API 请求频率超限，请稍后重试"));
+    }
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(anyhow!("暂无可用版本，请稍后再试"));
+    }
+
+    if !resp.status().is_success() {
+        return Err(anyhow!("GitHub API 请求失败: HTTP {}", resp.status()));
+    }
+
+    let body: serde_json::Value = resp.json().await?;
+
+    // For beta channel the API returns an array; pick the first (most recent) release
+    let release_body = if channel == "beta" {
+        let arr = body.as_array().ok_or_else(|| anyhow!("无法解析版本列表"))?;
+        if arr.is_empty() {
+            return Err(anyhow!("暂无可用版本"));
+        }
+        arr[0].clone()
+    } else {
+        body
+    };
+
+    if let Some(msg) = release_body["message"].as_str() {
+        return Err(anyhow!("GitHub API 错误: {}", msg));
+    }
+
+    let release = parse_app_release(&release_body)?;
+    save_app_cache(channel, &release);
+    Ok(release)
+}
+
+/// Download app installer to temp directory and launch it.
+/// Emits: "app-download-progress" { percent, downloaded, total }
+/// Emits: "app-download-done"     { success, message }
+pub async fn download_and_install_app(
+    app_handle: tauri::AppHandle,
+    download_url: String,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    // Bypass system proxy (which points to sing-box itself) to avoid circular dependency.
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .user_agent(concat!("sing-box-win/", env!("CARGO_PKG_VERSION")))
+        .no_proxy()
+        .build()?;
+
+    let resp = client.get(&download_url).send().await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("下载失败: HTTP {}", resp.status()));
+    }
+
+    let total = resp.content_length().unwrap_or(0);
+    let mut downloaded: u64 = 0;
+
+    let temp_dir = std::env::temp_dir();
+    let file_name = download_url
+        .split('/')
+        .last()
+        .unwrap_or("sing-box-win-setup.exe")
+        .to_string();
+    let installer_path = temp_dir.join(&file_name);
+
+    let mut file = tokio::fs::File::create(&installer_path).await
+        .map_err(|e| anyhow!("无法创建临时文件: {}", e))?;
+
+    let mut stream = resp.bytes_stream();
+    use futures_util::StreamExt;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| anyhow!("下载中断: {}", e))?;
+        file.write_all(&chunk).await?;
+        downloaded += chunk.len() as u64;
+
+        let percent = if total > 0 {
+            (downloaded as f64 / total as f64) * 100.0
+        } else {
+            0.0
+        };
+        let _ = app_handle.emit("app-download-progress", serde_json::json!({
+            "percent": percent,
+            "downloaded": downloaded,
+            "total": total,
+        }));
+    }
+    file.flush().await?;
+    drop(file);
+
+    let _ = app_handle.emit("app-download-done", serde_json::json!({
+        "success": true,
+        "message": "下载完成，即将启动安装程序",
+        "path": installer_path.to_string_lossy(),
+    }));
+
+    // Launch installer — the NSIS installer handles closing and restarting the app
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", installer_path.to_str().unwrap_or("")])
+            .spawn()
+            .map_err(|e| anyhow!("无法启动安装程序: {}", e))?;
+    }
+
+    Ok(())
 }

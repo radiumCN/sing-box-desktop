@@ -3,7 +3,7 @@ import { ref, watch, onMounted, computed } from "vue";
 import {
   Shield, Globe, Cpu, Monitor, Download,
   RefreshCw, CheckCircle, AlertCircle, Package, ExternalLink,
-  ShieldCheck, ShieldAlert, Check
+  ShieldCheck, ShieldAlert, Check, Rocket
 } from "@lucide/vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -172,6 +172,90 @@ async function startDownload() {
   }
 }
 
+// ─── App Self-Updater ─────────────────────────────────────────────────
+
+interface AppReleaseInfo {
+  version: string;
+  published_at: string;
+  release_notes: string;
+  download_url: string;
+  is_prerelease: boolean;
+}
+
+const appLatestRelease = ref<AppReleaseInfo | null>(null);
+const checkingAppUpdate = ref(false);
+const appCheckError = ref("");
+const downloadingApp = ref(false);
+const appDownloadProgress = ref(0);
+const appDownloadedBytes = ref(0);
+const appTotalBytes = ref(0);
+const appDownloadDone = ref(false);
+const appDownloadError = ref("");
+
+const hasAppUpdate = computed(() => {
+  if (!appLatestRelease.value || !appVersion.value) return false;
+  const installed = appVersion.value.replace(/^v/, "");
+  const latest = appLatestRelease.value.version.replace(/^v/, "");
+  return installed !== latest && installed !== "";
+});
+
+async function checkAppUpdate(forceRefresh = false) {
+  checkingAppUpdate.value = true;
+  appCheckError.value = "";
+  appLatestRelease.value = null;
+  try {
+    appLatestRelease.value = await invoke<AppReleaseInfo>("cmd_check_app_update", {
+      channel: localConfig.value.update_channel ?? "stable",
+      forceRefresh,
+    });
+  } catch (e) {
+    appCheckError.value = String(e);
+  } finally {
+    checkingAppUpdate.value = false;
+  }
+}
+
+async function startAppDownload() {
+  if (!appLatestRelease.value) return;
+  downloadingApp.value = true;
+  appDownloadProgress.value = 0;
+  appDownloadError.value = "";
+  appDownloadDone.value = false;
+
+  const unlistenProgress = await listen<{ percent: number; downloaded: number; total: number }>(
+    "app-download-progress",
+    (event) => {
+      appDownloadProgress.value = event.payload.percent;
+      appDownloadedBytes.value = event.payload.downloaded;
+      appTotalBytes.value = event.payload.total;
+    }
+  );
+
+  const unlistenDone = await listen<{ success: boolean; message: string }>(
+    "app-download-done",
+    (event) => {
+      if (event.payload.success) {
+        appDownloadDone.value = true;
+        appDownloadProgress.value = 100;
+      }
+      unlistenProgress();
+      unlistenDone();
+    }
+  );
+
+  try {
+    await invoke("cmd_download_app_update", {
+      downloadUrl: appLatestRelease.value.download_url,
+    });
+  } catch (e) {
+    appDownloadError.value = String(e);
+    unlistenProgress();
+    unlistenDone();
+  } finally {
+    downloadingApp.value = false;
+  }
+}
+
 onMounted(async () => {
   await Promise.all([
     refreshKernelStatus(),
@@ -191,6 +275,106 @@ onMounted(async () => {
         </span>
       </Transition>
     </div>
+
+    <!-- ─── 应用更新 ─── -->
+    <section class="settings-section">
+      <div class="section-header">
+        <Rocket :size="15" />
+        <span>应用更新</span>
+      </div>
+      <div class="card settings-card kernel-card">
+
+        <!-- Current app version + channel -->
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">当前版本</div>
+            <div class="setting-desc">v{{ appVersion }}</div>
+          </div>
+          <div class="channel-select-wrap">
+            <span class="channel-label">更新通道</span>
+            <select class="input select-input" v-model="localConfig.update_channel" style="width:110px">
+              <option value="stable">稳定版</option>
+              <option value="beta">测试版</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Latest release info -->
+        <div v-if="appLatestRelease" class="release-info">
+          <div class="release-header">
+            <span class="release-tag">{{ appLatestRelease.version }}</span>
+            <span class="release-date">{{ formatDate(appLatestRelease.published_at) }}</span>
+            <span v-if="appLatestRelease.is_prerelease" class="badge badge-purple">预览版</span>
+            <span v-if="hasAppUpdate" class="badge badge-yellow">有新版本</span>
+            <span v-else class="badge badge-green">已是最新</span>
+          </div>
+          <div v-if="appLatestRelease.release_notes" class="release-notes">
+            {{ appLatestRelease.release_notes }}
+          </div>
+        </div>
+
+        <div class="setting-divider" />
+
+        <!-- Action buttons -->
+        <div class="kernel-actions">
+          <button
+            class="btn btn-ghost"
+            :disabled="checkingAppUpdate"
+            @click="() => checkAppUpdate(true)"
+          >
+            <RefreshCw :size="13" :class="{ spin: checkingAppUpdate }" />
+            {{ checkingAppUpdate ? "检查中..." : "检查更新" }}
+          </button>
+
+          <button
+            v-if="appLatestRelease && hasAppUpdate"
+            class="btn btn-primary"
+            :disabled="downloadingApp"
+            @click="startAppDownload"
+          >
+            <Download :size="13" :class="{ spin: downloadingApp }" />
+            {{ downloadingApp ? "下载中..." : "下载并安装" }}
+          </button>
+
+          <a
+            class="btn btn-ghost"
+            href="https://github.com/radiumCN/sing-box-desktop/releases"
+            target="_blank"
+          >
+            <ExternalLink :size="13" />
+            查看所有版本
+          </a>
+        </div>
+
+        <!-- Download progress -->
+        <div v-if="downloadingApp || appDownloadDone" class="download-progress-area">
+          <div class="progress-info">
+            <span>{{ appDownloadDone ? "下载完成 ✓ 安装程序即将启动" : `下载中 ${appDownloadProgress.toFixed(1)}%` }}</span>
+            <span v-if="!appDownloadDone && appTotalBytes > 0" class="progress-bytes">
+              {{ formatBytes(appDownloadedBytes) }} / {{ formatBytes(appTotalBytes) }}
+            </span>
+          </div>
+          <div class="progress-bar-track">
+            <div
+              class="progress-bar-fill"
+              :style="{ width: `${appDownloadProgress}%` }"
+              :class="{ done: appDownloadDone }"
+            />
+          </div>
+        </div>
+
+        <!-- Errors -->
+        <div v-if="appCheckError || appDownloadError" class="kernel-error">
+          <AlertCircle :size="13" />
+          {{ appCheckError || appDownloadError }}
+        </div>
+
+        <div class="kernel-hint">
+          更新通道：<strong>稳定版</strong> 发布经过测试的正式版本，<strong>测试版</strong> 包含最新功能但可能存在已知问题。
+          下载完成后将自动启动安装程序完成升级。
+        </div>
+      </div>
+    </section>
 
     <!-- ─── sing-box 内核管理 ─── -->
     <section class="settings-section">
@@ -670,6 +854,18 @@ onMounted(async () => {
   background: rgba(128,128,128,0.12);
   padding: 1px 4px; border-radius: 3px;
 }
+
+.badge-purple {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 500; padding: 2px 8px;
+  border-radius: 100px;
+  background: rgba(100, 65, 165, 0.12); color: #6441a5;
+}
+
+.channel-select-wrap {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+}
+.channel-label { font-size: 11px; color: var(--color-text-muted); white-space: nowrap; }
 
 /* TUN checklist */
 .tun-checklist {

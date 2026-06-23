@@ -692,6 +692,29 @@ pub async fn cmd_download_singbox(
         })
 }
 
+// ─── App Self-Updater ───────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn cmd_check_app_update(
+    channel: Option<String>,
+    force_refresh: Option<bool>,
+) -> Result<crate::updater::AppReleaseInfo, String> {
+    let ch = channel.as_deref().unwrap_or("stable");
+    crate::updater::fetch_app_release(ch, force_refresh.unwrap_or(false))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn cmd_download_app_update(
+    app_handle: tauri::AppHandle,
+    download_url: String,
+) -> Result<(), String> {
+    crate::updater::download_and_install_app(app_handle, download_url)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ─── System Proxy ───────────────────────────────────────────────────
 
 #[tauri::command]
