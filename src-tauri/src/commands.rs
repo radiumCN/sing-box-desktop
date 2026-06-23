@@ -25,17 +25,16 @@ pub struct TrayState {
 
 // ─── Sing-box Control ───────────────────────────────────────────────
 
-#[tauri::command]
-pub async fn cmd_start_singbox(
-    app_handle: tauri::AppHandle,
-    state: State<'_, AppState>,
+/// Core start logic shared by the Tauri command and the tray menu handler.
+pub async fn start_proxy_internal(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
 ) -> Result<(), String> {
     let config = state.app_config.lock().unwrap().clone();
     let outbounds = state.outbounds.lock().unwrap().clone();
     let active_tag = config.active_nodes.get("proxy").cloned();
 
     // TUN mode preconditions: requires administrator privileges and the WinTun driver.
-    // Fail early with a clear message instead of letting sing-box crash silently.
     if config.tun_enabled {
         if !crate::tun::is_elevated() {
             return Err("TUN 模式需要管理员权限。请在「设置 → TUN 模式」中点击「以管理员身份重启」后再启动。".to_string());
@@ -43,7 +42,6 @@ pub async fn cmd_start_singbox(
         if !crate::tun::wintun_available() {
             return Err("TUN 模式需要 WinTun 驱动。请在「设置 → TUN 模式」中点击「下载 WinTun」后再启动。".to_string());
         }
-        // Remove any stale WinTun adapter left from a previous crashed run before starting.
         crate::tun::cleanup_stale_tun_adapter().await;
     }
 
@@ -58,14 +56,20 @@ pub async fn cmd_start_singbox(
     std::fs::write(&config_path, serde_json::to_string_pretty(&singbox_cfg).unwrap())
         .map_err(|e| e.to_string())?;
 
-    start_singbox(&app_handle, &config_path, state.singbox_state.clone())
+    start_singbox(app_handle, &config_path, state.singbox_state.clone())
         .await
         .map_err(|e| e.to_string())?;
 
-    let enable_sys_proxy = config.proxy_mode != ProxyMode::Tun;
+    // System proxy and TUN are mutually exclusive routing paths.
+    // When TUN is on it captures traffic at the network layer, so a WinINet
+    // system proxy would create a conflicting double-proxy path — skip it.
+    let enable_sys_proxy = !config.tun_enabled && config.proxy_mode != ProxyMode::Tun;
     if enable_sys_proxy {
         proxy::set_system_proxy(true, config.mixed_port)
             .map_err(|e| e.to_string())?;
+    } else {
+        // Ensure any stale system proxy is cleared so it never coexists with TUN.
+        let _ = proxy::set_system_proxy(false, 0);
     }
 
     // Persist last running state for restore-on-startup
@@ -79,6 +83,14 @@ pub async fn cmd_start_singbox(
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn cmd_start_singbox(
+    app_handle: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    start_proxy_internal(&app_handle, &state).await
 }
 
 #[tauri::command]
@@ -727,6 +739,15 @@ pub fn cmd_set_system_proxy(
     enabled: bool,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
+    if enabled {
+        let running = state.singbox_state.lock().unwrap().running;
+        if !running {
+            return Err("sing-box 未运行，请先启动代理再开启系统代理".to_string());
+        }
+        if state.app_config.lock().unwrap().tun_enabled {
+            return Err("TUN 模式已接管全部流量，无需且不能再开启系统代理".to_string());
+        }
+    }
     let port = state.app_config.lock().unwrap().mixed_port;
     crate::proxy::set_system_proxy(enabled, if enabled { port } else { 0 })
         .map_err(|e| e.to_string())

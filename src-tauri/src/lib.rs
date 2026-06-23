@@ -186,16 +186,33 @@ pub fn run() {
                         "system_proxy" => {
                             // is_checked() reflects the NEW state after the click
                             let enabled = sys_proxy_item_c.is_checked().unwrap_or(false);
-                            let port = app
-                                .state::<AppState>()
-                                .app_config
-                                .lock()
-                                .unwrap()
-                                .mixed_port;
-                            let _ = crate::proxy::set_system_proxy(
-                                enabled,
-                                if enabled { port } else { 0 },
-                            );
+                            let app_c = app.clone();
+                            let sys_proxy_item_ref = sys_proxy_item_c.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let state = app_c.state::<AppState>();
+                                if enabled {
+                                    // TUN and system proxy are mutually exclusive. If TUN is on,
+                                    // refuse to enable system proxy and revert the checkbox.
+                                    if state.app_config.lock().unwrap().tun_enabled {
+                                        let _ = sys_proxy_item_ref.set_checked(false);
+                                        return;
+                                    }
+                                    let running = state.singbox_state.lock().unwrap().running;
+                                    if !running {
+                                        // sing-box not running: start it first (which also sets proxy)
+                                        if let Err(_) = crate::commands::start_proxy_internal(&app_c, &state).await {
+                                            // Start failed — revert the tray checkbox
+                                            let _ = sys_proxy_item_ref.set_checked(false);
+                                        }
+                                    } else {
+                                        // Already running — just enable system proxy
+                                        let port = state.app_config.lock().unwrap().mixed_port;
+                                        let _ = crate::proxy::set_system_proxy(true, port);
+                                    }
+                                } else {
+                                    let _ = crate::proxy::set_system_proxy(false, 0);
+                                }
+                            });
                         }
                         "tun_mode" => {
                             let new_tun = tun_item_c.is_checked().unwrap_or(false);
