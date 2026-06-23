@@ -703,22 +703,31 @@ pub fn build_singbox_config(
     });
 
     if config.tun_enabled {
-        // Use a unique interface name per start. If a previous run crashed and left an
-        // orphaned adapter behind, a fresh name avoids the WinTun "Cannot create a file
-        // when that file already exists" failure entirely. Old "sing-box-tun*" adapters
-        // are cleaned up before start by tun::cleanup_stale_tun_adapter().
-        let unique_suffix = uuid::Uuid::new_v4().simple().to_string();
-        let interface_name = format!("sing-box-tun-{}", &unique_suffix[..6]);
-        cfg["inbounds"].as_array_mut().unwrap().push(json!({
+        let mut tun_in = json!({
             "type": "tun",
             "tag": "tun-in",
-            "interface_name": interface_name,
             "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
             "mtu": 9000,
             "auto_route": true,
             "strict_route": true,
             "stack": "system"
-        }));
+        });
+
+        // On Windows, use a unique interface name per start. If a previous run crashed
+        // and left an orphaned adapter behind, a fresh name avoids the WinTun "Cannot
+        // create a file when that file already exists" failure entirely. Old
+        // "sing-box-tun*" adapters are cleaned up before start by cleanup_stale_tun_adapter().
+        //
+        // On macOS/Linux the TUN device must be named "utunN"/"tunN" by the kernel, so we
+        // omit interface_name and let sing-box pick a valid one automatically.
+        #[cfg(target_os = "windows")]
+        {
+            let unique_suffix = uuid::Uuid::new_v4().simple().to_string();
+            let interface_name = format!("sing-box-tun-{}", &unique_suffix[..6]);
+            tun_in["interface_name"] = json!(interface_name);
+        }
+
+        cfg["inbounds"].as_array_mut().unwrap().push(tun_in);
     }
 
     cfg

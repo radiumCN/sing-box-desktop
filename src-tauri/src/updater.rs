@@ -19,6 +19,60 @@ pub struct ReleaseInfo {
     pub download_url: String,
 }
 
+/// The sing-box release asset matching the platform we are currently running on.
+/// sing-box publishes one archive per OS/arch on its GitHub releases, e.g.
+///   sing-box-1.x.y-windows-amd64.zip   → sing-box.exe
+///   sing-box-1.x.y-darwin-amd64.tar.gz → sing-box   (macOS Intel)
+///   sing-box-1.x.y-darwin-arm64.tar.gz → sing-box   (macOS Apple Silicon)
+///   sing-box-1.x.y-linux-amd64.tar.gz  → sing-box
+struct PlatformAsset {
+    /// OS keyword used in the asset file name.
+    os: &'static str,
+    /// CPU arch keyword used in the asset file name (sing-box uses Go names).
+    arch: &'static str,
+    /// Archive file extension, including the leading dot.
+    ext: &'static str,
+}
+
+fn current_platform_asset() -> PlatformAsset {
+    let os = if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        "linux"
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        // x86_64 → amd64 (the only other arch we ship)
+        "amd64"
+    };
+    let ext = if cfg!(target_os = "windows") { ".zip" } else { ".tar.gz" };
+    PlatformAsset { os, arch, ext }
+}
+
+/// File name of the sing-box executable for the current platform.
+fn singbox_binary_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "sing-box.exe"
+    } else {
+        "sing-box"
+    }
+}
+
+/// On Unix, mark the freshly-extracted binary as executable (0755).
+fn finalize_binary(_dest: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(_dest)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(_dest, perms)?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct UpdateCache {
     cached_at_secs: u64,
@@ -135,17 +189,18 @@ pub async fn fetch_latest_release(force_refresh: bool) -> Result<ReleaseInfo> {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Find Windows amd64 asset
+    // Find the asset matching the current OS + CPU architecture.
+    let p = current_platform_asset();
     let download_url = body["assets"]
         .as_array()
         .ok_or_else(|| anyhow!("未找到下载资源"))?
         .iter()
         .find(|a| {
             let name = a["name"].as_str().unwrap_or("").to_lowercase();
-            name.contains("windows") && name.contains("amd64") && name.ends_with(".zip")
+            name.contains(p.os) && name.contains(p.arch) && name.ends_with(p.ext)
         })
         .and_then(|a| a["browser_download_url"].as_str())
-        .ok_or_else(|| anyhow!("未找到 Windows x64 下载链接"))?
+        .ok_or_else(|| anyhow!("未找到 {}-{} 平台的下载链接", p.os, p.arch))?
         .to_string();
 
     let release = ReleaseInfo {
@@ -189,13 +244,20 @@ pub async fn download_singbox(
             .map_err(|e| anyhow!("无法创建目录 {:?}: {}", parent, e))?;
     }
 
-    // Download to a temp zip file in the same directory
-    let zip_path = dest_path.parent()
+    // Download to a temp archive file in the same directory. The extension is
+    // inferred from the download URL so we know how to extract it (.zip vs .tar.gz).
+    let is_tar_gz = download_url.to_lowercase().ends_with(".tar.gz");
+    let archive_name = if is_tar_gz {
+        "sing-box-download.tar.gz"
+    } else {
+        "sing-box-download.zip"
+    };
+    let archive_path = dest_path.parent()
         .unwrap_or(std::path::Path::new("."))
-        .join("sing-box-download.zip");
+        .join(archive_name);
 
-    let mut file = tokio::fs::File::create(&zip_path).await
-        .map_err(|e| anyhow!("无法创建临时文件 {:?}: {}", zip_path, e))?;
+    let mut file = tokio::fs::File::create(&archive_path).await
+        .map_err(|e| anyhow!("无法创建临时文件 {:?}: {}", archive_path, e))?;
     let mut stream = resp.bytes_stream();
 
     use futures_util::StreamExt;
@@ -219,10 +281,17 @@ pub async fn download_singbox(
     file.flush().await?;
     drop(file);
 
-    // Extract sing-box.exe from zip
-    let zip_data = std::fs::read(&zip_path)?;
-    extract_exe_from_zip(&zip_data, &dest_path)?;
-    let _ = std::fs::remove_file(&zip_path);
+    // Extract the sing-box binary from the archive.
+    let archive_data = std::fs::read(&archive_path)?;
+    if is_tar_gz {
+        extract_binary_from_tar_gz(&archive_data, &dest_path)?;
+    } else {
+        extract_binary_from_zip(&archive_data, &dest_path)?;
+    }
+    let _ = std::fs::remove_file(&archive_path);
+
+    // Ensure the extracted binary is executable on Unix.
+    finalize_binary(&dest_path)?;
 
     let _ = app_handle.emit("singbox-download-done", serde_json::json!({
         "success": true,
@@ -232,8 +301,25 @@ pub async fn download_singbox(
     Ok(())
 }
 
-fn extract_exe_from_zip(zip_data: &[u8], dest: &PathBuf) -> Result<()> {
+/// Write extracted bytes to `dest`, going through a temp file + rename so an
+/// already-running sing-box binary doesn't block the write.
+fn write_binary(dest: &PathBuf, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = dest.with_extension("tmp");
+    let mut out = std::fs::File::create(&tmp)?;
+    out.write_all(bytes)?;
+    drop(out);
+    std::fs::rename(&tmp, dest)?;
+    Ok(())
+}
+
+/// Extract the sing-box executable from a Windows `.zip` archive.
+fn extract_binary_from_zip(zip_data: &[u8], dest: &PathBuf) -> Result<()> {
     use std::io::{Cursor, Read};
+    let target = singbox_binary_name().to_lowercase();
     let cursor = Cursor::new(zip_data);
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| anyhow!("ZIP 解压失败: {}", e))?;
@@ -241,28 +327,48 @@ fn extract_exe_from_zip(zip_data: &[u8], dest: &PathBuf) -> Result<()> {
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
         let name = file.name().to_lowercase();
-        if name.ends_with("sing-box.exe") || name == "sing-box.exe" {
-            if let Some(parent) = dest.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            // If sing-box is running, write to temp file then rename
-            let tmp = dest.with_extension("exe.tmp");
-            let mut out = std::fs::File::create(&tmp)?;
+        if name.ends_with(target.as_str()) {
             let mut buf = Vec::new();
             file.read_to_end(&mut buf)?;
-            std::io::Write::write_all(&mut out, &buf)?;
-            drop(out);
-            std::fs::rename(&tmp, dest)?;
+            write_binary(dest, &buf)?;
             return Ok(());
         }
     }
 
-    Err(anyhow!("ZIP 包中未找到 sing-box.exe"))
+    Err(anyhow!("压缩包中未找到 {}", singbox_binary_name()))
+}
+
+/// Extract the sing-box executable from a macOS/Linux `.tar.gz` archive.
+fn extract_binary_from_tar_gz(data: &[u8], dest: &PathBuf) -> Result<()> {
+    use std::io::{Cursor, Read};
+    use flate2::read::GzDecoder;
+
+    let target = singbox_binary_name();
+    let decoder = GzDecoder::new(Cursor::new(data));
+    let mut archive = tar::Archive::new(decoder);
+
+    for entry in archive.entries().map_err(|e| anyhow!("tar.gz 解压失败: {}", e))? {
+        let mut entry = entry?;
+        let path = entry.path()?.to_path_buf();
+        let is_match = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n == target)
+            .unwrap_or(false);
+        if is_match {
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf)?;
+            write_binary(dest, &buf)?;
+            return Ok(());
+        }
+    }
+
+    Err(anyhow!("压缩包中未找到 {}", target))
 }
 
 /// Get sing-box binary path
 pub fn singbox_binary_path() -> PathBuf {
-    crate::config::app_data_dir().join("bin").join("sing-box.exe")
+    crate::config::app_data_dir().join("bin").join(singbox_binary_name())
 }
 
 /// Check if sing-box binary exists
@@ -330,6 +436,65 @@ fn save_app_cache(channel: &str, release: &AppReleaseInfo) {
     }
 }
 
+/// Pick the app installer asset for the current platform from a release's asset list.
+/// Windows → `.exe`; macOS → `.dmg` (prefer arch-matched, then universal).
+fn find_app_installer_url(assets: &[serde_json::Value]) -> Option<String> {
+    let url_of = |a: &serde_json::Value| {
+        a["browser_download_url"].as_str().map(|s| s.to_string())
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        // Prefer a clearly-named x64 installer, then fall back to any .exe.
+        assets
+            .iter()
+            .find(|a| {
+                let name = a["name"].as_str().unwrap_or("").to_lowercase();
+                name.ends_with(".exe")
+                    && (name.contains("x64") || name.contains("setup") || name.contains("install"))
+            })
+            .or_else(|| {
+                assets.iter().find(|a| {
+                    a["name"].as_str().unwrap_or("").to_lowercase().ends_with(".exe")
+                })
+            })
+            .and_then(url_of)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // sing-box-desktop releases ship per-arch .dmg files; match the running arch.
+        let arch_kw = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x64" };
+        let arch_alt = if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" };
+        assets
+            .iter()
+            .find(|a| {
+                let name = a["name"].as_str().unwrap_or("").to_lowercase();
+                name.ends_with(".dmg") && (name.contains(arch_kw) || name.contains(arch_alt))
+            })
+            .or_else(|| {
+                // Universal or single-arch build.
+                assets.iter().find(|a| {
+                    a["name"].as_str().unwrap_or("").to_lowercase().ends_with(".dmg")
+                })
+            })
+            .and_then(url_of)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = url_of;
+        assets.iter().find_map(|a| {
+            let name = a["name"].as_str().unwrap_or("").to_lowercase();
+            if name.ends_with(".appimage") || name.ends_with(".deb") {
+                a["browser_download_url"].as_str().map(|s| s.to_string())
+            } else {
+                None
+            }
+        })
+    }
+}
+
 fn parse_app_release(body: &serde_json::Value) -> Result<AppReleaseInfo> {
     let version = body["tag_name"]
         .as_str()
@@ -347,26 +512,13 @@ fn parse_app_release(body: &serde_json::Value) -> Result<AppReleaseInfo> {
         .collect::<Vec<_>>()
         .join("\n");
 
-    // Find Windows x64 installer asset (.exe)
-    let download_url = body["assets"]
+    let assets = body["assets"]
         .as_array()
-        .ok_or_else(|| anyhow!("未找到下载资源"))?
-        .iter()
-        .find(|a| {
-            let name = a["name"].as_str().unwrap_or("").to_lowercase();
-            name.ends_with(".exe") && (name.contains("x64") || name.contains("setup") || name.contains("install"))
-        })
-        .or_else(|| {
-            // fallback: first .exe asset
-            body["assets"].as_array().and_then(|arr| {
-                arr.iter().find(|a| {
-                    a["name"].as_str().unwrap_or("").to_lowercase().ends_with(".exe")
-                })
-            })
-        })
-        .and_then(|a| a["browser_download_url"].as_str())
-        .ok_or_else(|| anyhow!("未找到 Windows 安装包(.exe)"))?
-        .to_string();
+        .ok_or_else(|| anyhow!("未找到下载资源"))?;
+
+    // Find the installer asset matching the current platform.
+    let download_url = find_app_installer_url(assets)
+        .ok_or_else(|| anyhow!("未找到当前平台的安装包"))?;
 
     Ok(AppReleaseInfo { version, published_at, release_notes, download_url, is_prerelease })
 }
@@ -493,7 +645,8 @@ pub async fn download_and_install_app(
         "path": installer_path.to_string_lossy(),
     }));
 
-    // Launch installer — the NSIS installer handles closing and restarting the app.
+    // Launch the installer.
+    // Windows: the NSIS installer handles closing and restarting the app.
     // Use CREATE_NO_WINDOW so the helper `cmd` doesn't flash a black console window.
     #[cfg(target_os = "windows")]
     {
@@ -504,6 +657,24 @@ pub async fn download_and_install_app(
             .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| anyhow!("无法启动安装程序: {}", e))?;
+    }
+
+    // macOS: open the downloaded .dmg in Finder so the user can drag-install.
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&installer_path)
+            .spawn()
+            .map_err(|e| anyhow!("无法打开安装包: {}", e))?;
+    }
+
+    // Linux: open the downloaded package with the default handler.
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&installer_path)
+            .spawn()
+            .map_err(|e| anyhow!("无法打开安装包: {}", e))?;
     }
 
     Ok(())

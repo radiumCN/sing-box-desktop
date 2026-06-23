@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+#[cfg(target_os = "windows")]
 use std::path::PathBuf;
 
 /// Check if the current process is running as Administrator
@@ -31,9 +32,10 @@ pub fn is_elevated() -> bool {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+/// On Unix (macOS/Linux), sing-box's TUN mode needs root privileges.
+#[cfg(unix)]
 pub fn is_elevated() -> bool {
-    false
+    unsafe { libc::geteuid() == 0 }
 }
 
 /// Relaunch the current process with UAC elevation (Windows only)
@@ -74,7 +76,32 @@ pub fn relaunch_as_admin() -> Result<()> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Relaunch the whole app with root privileges via a macOS admin prompt, then exit
+/// this instance. sing-box (spawned as a child) then inherits root, which the macOS
+/// utun-based TUN mode requires. This mirrors the Windows UAC relaunch flow.
+#[cfg(target_os = "macos")]
+pub fn relaunch_as_admin() -> Result<()> {
+    let exe = std::env::current_exe()?;
+    let exe_str = exe.to_string_lossy().to_string();
+
+    // Single-quote the path inside the AppleScript shell command so spaces are handled.
+    let script = format!(
+        "do shell script \"'{}' > /dev/null 2>&1 &\" with administrator privileges",
+        exe_str
+    );
+
+    let status = std::process::Command::new("osascript")
+        .args(["-e", &script])
+        .status()?;
+
+    if status.success() {
+        std::process::exit(0);
+    } else {
+        Err(anyhow!("管理员授权被取消或失败"))
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn relaunch_as_admin() -> Result<()> {
     Err(anyhow!("不支持此平台"))
 }
@@ -109,7 +136,10 @@ pub async fn cleanup_stale_tun_adapter() {
 #[cfg(not(target_os = "windows"))]
 pub async fn cleanup_stale_tun_adapter() {}
 
-/// Check if WinTun driver DLL is present alongside sing-box binary
+/// Check if WinTun driver DLL is present alongside sing-box binary.
+/// Only Windows needs WinTun; on macOS/Linux the kernel provides the TUN device,
+/// so we always report it as available.
+#[cfg(target_os = "windows")]
 pub fn wintun_available() -> bool {
     let bin_dir = crate::updater::singbox_binary_path()
         .parent()
@@ -118,6 +148,11 @@ pub fn wintun_available() -> bool {
 
     // WinTun ships wintun.dll in the same directory as sing-box on Windows
     bin_dir.join("wintun.dll").exists()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn wintun_available() -> bool {
+    true
 }
 
 /// Download WinTun driver DLL

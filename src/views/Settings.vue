@@ -15,6 +15,11 @@ const saved = ref(false);
 const appVersion = ref("");
 const localConfig = ref<AppConfig>({ ...store.config });
 
+// Platform detection (WinTun is a Windows-only requirement).
+const isWindows = /win/i.test(navigator.userAgent);
+const isMacOS = /mac/i.test(navigator.userAgent);
+const kernelBinaryName = isWindows ? "sing-box.exe" : "sing-box";
+
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
 function scheduleSave() {
@@ -502,7 +507,7 @@ onUnmounted(() => {
 
         <div class="kernel-hint">
           sing-box 内核保存在应用数据目录中，下载完成后无需重启即可使用。
-          如需手动安装，也可将 <code>sing-box.exe</code> 放入应用数据目录的 <code>bin/</code> 子目录。
+          如需手动安装，也可将 <code>{{ kernelBinaryName }}</code> 放入应用数据目录的 <code>bin/</code> 子目录。
         </div>
       </div>
     </section>
@@ -654,32 +659,46 @@ onUnmounted(() => {
             </button>
           </div>
 
-          <div class="tun-divider" />
-
-          <!-- WinTun driver -->
-          <div class="tun-check-row">
-            <div class="check-status">
-              <CheckCircle v-if="wintunAvailable" :size="15" class="check-ok" />
-              <AlertCircle v-else :size="15" class="check-bad" />
+          <!-- WinTun driver (Windows only; macOS/Linux use the kernel TUN device) -->
+          <template v-if="isWindows">
+            <div class="tun-divider" />
+            <div class="tun-check-row">
+              <div class="check-status">
+                <CheckCircle v-if="wintunAvailable" :size="15" class="check-ok" />
+                <AlertCircle v-else :size="15" class="check-bad" />
+              </div>
+              <div class="check-info">
+                <div class="check-label">WinTun 驱动</div>
+                <div class="check-desc">
+                  <span v-if="wintunAvailable" class="text-ok">wintun.dll 已就绪</span>
+                  <span v-else class="text-bad">未找到 wintun.dll，需要下载</span>
+                </div>
+              </div>
+              <button
+                v-if="!wintunAvailable"
+                class="btn btn-ghost btn-sm"
+                :disabled="downloadingWintun"
+                @click="downloadWintun"
+              >
+                <Download :size="12" :class="{ spin: downloadingWintun }" />
+                {{ downloadingWintun ? "下载中..." : "下载 WinTun" }}
+              </button>
             </div>
-            <div class="check-info">
-              <div class="check-label">WinTun 驱动</div>
-              <div class="check-desc">
-                <span v-if="wintunAvailable" class="text-ok">wintun.dll 已就绪</span>
-                <span v-else class="text-bad">未找到 wintun.dll，需要下载</span>
+            <div v-if="wintunError" class="tun-error">{{ wintunError }}</div>
+          </template>
+
+          <!-- macOS TUN note -->
+          <template v-else-if="isMacOS">
+            <div class="tun-divider" />
+            <div class="tun-check-row">
+              <div class="check-info">
+                <div class="check-label">macOS TUN</div>
+                <div class="check-desc">
+                  <span class="text-ok">无需额外驱动；启用 TUN 时将请求一次 root 授权。</span>
+                </div>
               </div>
             </div>
-            <button
-              v-if="!wintunAvailable"
-              class="btn btn-ghost btn-sm"
-              :disabled="downloadingWintun"
-              @click="downloadWintun"
-            >
-              <Download :size="12" :class="{ spin: downloadingWintun }" />
-              {{ downloadingWintun ? "下载中..." : "下载 WinTun" }}
-            </button>
-          </div>
-          <div v-if="wintunError" class="tun-error">{{ wintunError }}</div>
+          </template>
         </div>
       </div>
     </section>

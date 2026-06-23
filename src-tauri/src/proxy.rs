@@ -54,7 +54,83 @@ unsafe fn winapi_refresh_proxy(_setting: *const u16) {
     );
 }
 
-#[cfg(not(target_os = "windows"))]
+// ─── macOS ──────────────────────────────────────────────────────────
+
+/// Enumerate the user's active network services (Wi-Fi, Ethernet, …).
+/// Services that are disabled are prefixed with `*` in the listing and are skipped.
+#[cfg(target_os = "macos")]
+fn macos_network_services() -> Vec<String> {
+    let output = std::process::Command::new("networksetup")
+        .arg("-listallnetworkservices")
+        .output();
+    let Ok(output) = output else { return Vec::new() };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .skip(1) // first line is an informational header
+        .filter(|l| !l.starts_with('*') && !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+pub fn set_system_proxy(enabled: bool, port: u16) -> Result<()> {
+    let port_str = port.to_string();
+    for svc in macos_network_services() {
+        if enabled {
+            // sing-box's mixed inbound serves HTTP and SOCKS on the same port.
+            let _ = std::process::Command::new("networksetup")
+                .args(["-setwebproxy", &svc, "127.0.0.1", &port_str])
+                .output();
+            let _ = std::process::Command::new("networksetup")
+                .args(["-setsecurewebproxy", &svc, "127.0.0.1", &port_str])
+                .output();
+            let _ = std::process::Command::new("networksetup")
+                .args(["-setsocksfirewallproxy", &svc, "127.0.0.1", &port_str])
+                .output();
+            let _ = std::process::Command::new("networksetup")
+                .args(["-setwebproxystate", &svc, "on"])
+                .output();
+            let _ = std::process::Command::new("networksetup")
+                .args(["-setsecurewebproxystate", &svc, "on"])
+                .output();
+            let _ = std::process::Command::new("networksetup")
+                .args(["-setsocksfirewallproxystate", &svc, "on"])
+                .output();
+        } else {
+            let _ = std::process::Command::new("networksetup")
+                .args(["-setwebproxystate", &svc, "off"])
+                .output();
+            let _ = std::process::Command::new("networksetup")
+                .args(["-setsecurewebproxystate", &svc, "off"])
+                .output();
+            let _ = std::process::Command::new("networksetup")
+                .args(["-setsocksfirewallproxystate", &svc, "off"])
+                .output();
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub fn get_system_proxy_status() -> bool {
+    for svc in macos_network_services() {
+        let output = std::process::Command::new("networksetup")
+            .args(["-getwebproxy", &svc])
+            .output();
+        if let Ok(output) = output {
+            let text = String::from_utf8_lossy(&output.stdout);
+            // `networksetup -getwebproxy` prints a line like "Enabled: Yes".
+            if text.lines().any(|l| l.trim() == "Enabled: Yes") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+// ─── Other Unix (no-op) ─────────────────────────────────────────────
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn set_system_proxy(_enabled: bool, _port: u16) -> Result<()> {
     Ok(())
 }
@@ -73,7 +149,7 @@ pub fn get_system_proxy_status() -> bool {
     false
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn get_system_proxy_status() -> bool {
     false
 }

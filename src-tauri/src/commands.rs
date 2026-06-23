@@ -34,11 +34,13 @@ pub async fn start_proxy_internal(
     let outbounds = state.outbounds.lock().unwrap().clone();
     let active_tag = config.active_nodes.get("proxy").cloned();
 
-    // TUN mode preconditions: requires administrator privileges and the WinTun driver.
+    // TUN mode preconditions: requires elevated privileges (admin on Windows, root on
+    // macOS/Linux). On Windows it additionally needs the WinTun driver.
     if config.tun_enabled {
         if !crate::tun::is_elevated() {
-            return Err("TUN 模式需要管理员权限。请在「设置 → TUN 模式」中点击「以管理员身份重启」后再启动。".to_string());
+            return Err("TUN 模式需要管理员/root 权限。请在「设置 → TUN 模式」中点击「以管理员身份重启」后再启动。".to_string());
         }
+        #[cfg(target_os = "windows")]
         if !crate::tun::wintun_available() {
             return Err("TUN 模式需要 WinTun 驱动。请在「设置 → TUN 模式」中点击「下载 WinTun」后再启动。".to_string());
         }
@@ -811,8 +813,25 @@ pub fn cmd_get_memory_usage(state: State<AppState>) -> Option<u64> {
         if ok != 0 { Some(pmc.WorkingSetSize as u64) } else { None }
     }
 
-    #[cfg(not(target_os = "windows"))]
-    None
+    // macOS: read resident set size (in KB) from `ps`.
+    #[cfg(target_os = "macos")]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &pid.to_string()])
+            .output()
+            .ok()?;
+        let kb: u64 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .ok()?;
+        Some(kb * 1024)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        let _ = pid;
+        None
+    }
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────
