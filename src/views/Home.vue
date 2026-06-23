@@ -135,11 +135,22 @@ onMounted(async () => {
   await nextTick();
   systemProxyReady.value = true;
 
+  let lastRunning = store.status.running;
+
   pollTimer = setInterval(async () => {
     await store.fetchStatus();
     // Always sync system proxy — avoids the timing race where the watcher fired
     // before the backend finished setting the proxy on auto-restore startup.
     fetchSystemProxy();
+
+    // Keep tray tooltip in sync whenever the running state changes (e.g. auto-restore
+    // on startup, or sing-box crash) — these paths bypass startProxy/stopProxy so
+    // updateTrayTooltip would otherwise never be called.
+    if (store.status.running !== lastRunning) {
+      lastRunning = store.status.running;
+      store.updateTrayTooltip();
+    }
+
     if (store.status.running) {
       // TODO: replace with real traffic data from sing-box API
       const up = Math.random() * 200 * 1024;

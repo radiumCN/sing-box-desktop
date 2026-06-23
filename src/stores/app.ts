@@ -336,6 +336,7 @@ export const useAppStore = defineStore("app", () => {
     saveConfig,
     setProxyMode,
     addTrafficPoint,
+    updateTrayTooltip,
     init,
   };
 });
