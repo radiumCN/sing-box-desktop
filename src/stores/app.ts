@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 
 export interface SingboxStatus {
   running: boolean;
@@ -265,9 +266,27 @@ export const useAppStore = defineStore("app", () => {
     config.value = await invoke<AppConfig>("cmd_get_app_config");
   }
 
+  // Apply the "launch on system startup" setting to the OS (registry Run key on Windows).
+  // Only toggles when the desired state differs from the actual state to avoid redundant work.
+  async function syncAutostart(want: boolean) {
+    try {
+      const current = await isEnabled();
+      if (want && !current) {
+        await enable();
+      } else if (!want && current) {
+        await disable();
+      }
+    } catch (e) {
+      console.error("autostart sync failed:", e);
+      error.value = `开机自启动设置失败: ${String(e)}`;
+    }
+  }
+
   async function saveConfig(newConfig: AppConfig) {
     await invoke("cmd_save_app_config", { newConfig });
     config.value = newConfig;
+    // Apply the autostart setting to the OS — the toggle alone only persists a flag.
+    await syncAutostart(newConfig.startup_with_system);
     // Keep tray TUN checkbox in sync whenever config changes
     const sysProxy = await invoke<boolean>("cmd_get_system_proxy_status").catch(() => false);
     syncTrayMenu(sysProxy, newConfig.tun_enabled);
@@ -306,6 +325,16 @@ export const useAppStore = defineStore("app", () => {
       fetchNodes(),
       fetchConfig(),
     ]);
+    // Reconcile the autostart toggle with the real OS state so the UI never lies,
+    // and re-apply the configured value in case a previous session failed to persist it.
+    try {
+      const actual = await isEnabled();
+      if (actual !== config.value.startup_with_system) {
+        await syncAutostart(config.value.startup_with_system);
+      }
+    } catch (e) {
+      console.error("autostart reconcile failed:", e);
+    }
     updateTrayTooltip();
   }
 

@@ -79,24 +79,17 @@ pub fn relaunch_as_admin() -> Result<()> {
     Err(anyhow!("不支持此平台"))
 }
 
-/// Clean up WinTun state before starting sing-box in TUN mode.
+/// Remove leftover "sing-box-tun*" network adapters from previous runs (fast path).
 ///
-/// Two distinct failure modes can block a TUN start, each with its own fix:
+/// Because each start now uses a UNIQUE interface name, an orphaned adapter can no longer
+/// cause the "Cannot create a file when that file already exists" conflict — so this cleanup
+/// is NOT a blocking precondition for startup, it only prevents stale adapters from
+/// accumulating over time. It is therefore kept lightweight (no fixed sleep).
 ///
-///   1. Orphaned adapter — a previous crash left a "sing-box-tun*" network adapter behind.
-///      Symptom: "Cannot create a file when that file already exists. | ... Element not found."
-///      Fix: Remove-NetAdapter (network-stack level, safe). Combined with the unique
-///      interface name we now generate per start, this class of error is fully avoided.
-///
-///   2. Stale wintun driver service — the HKLM\...\Services\wintun service entry got wedged
-///      (e.g. after a Windows update or a hard kill).
-///      Symptom: "configure tun interface: The system cannot find the file specified."
-///      Fix: `sc.exe delete wintun`. sing-box re-installs the driver automatically on the
-///      next WintunCreateAdapter call, restoring a clean RUNNING state.
-///
-/// NOTE: We deliberately do NOT touch the Network-Adapter class registry keys
-/// ({4D36E972-...}). Editing those can corrupt the driver and is exactly what caused the
-/// regression from "already exists" to "cannot find the file specified".
+/// We deliberately do NOT delete the wintun driver service here: doing that on every start
+/// forces sing-box to reinstall the driver each time, which is the slow
+/// "open interface take too much time" path. Driver-service repair is handled separately
+/// by `repair_wintun_driver()` for the rare wedged-service case.
 ///
 /// Must be called with admin privileges (the app always runs elevated).
 #[cfg(target_os = "windows")]
@@ -104,29 +97,13 @@ pub async fn cleanup_stale_tun_adapter() {
     use tokio::process::Command as TokioCommand;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    let ps = r#"
-# Remove any leftover sing-box TUN network adapters (safe, network-stack level)
-Get-NetAdapter -Name 'sing-box-tun*' -ErrorAction SilentlyContinue |
-    Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue
-
-# Clear a wedged wintun driver service so sing-box can re-register it cleanly.
-# This repairs the "The system cannot find the file specified" failure; sing-box
-# reinstalls the driver automatically on the next adapter creation.
-$svc = Get-Service -Name 'wintun' -ErrorAction SilentlyContinue
-if ($svc) {
-    & sc.exe stop wintun | Out-Null
-    & sc.exe delete wintun | Out-Null
-}
-"#;
-
+    let ps = "Get-NetAdapter -Name 'sing-box-tun*' -ErrorAction SilentlyContinue | \
+              Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue";
     let _ = TokioCommand::new("powershell")
         .args(["-NonInteractive", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .await;
-
-    // Brief pause so Windows propagates the removal before sing-box re-creates the adapter.
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 }
 
 #[cfg(not(target_os = "windows"))]
