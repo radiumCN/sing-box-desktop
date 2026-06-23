@@ -135,6 +135,12 @@ const proxyModeLabel = computed(() => {
   return map[store.config.proxy_mode] ?? store.config.proxy_mode;
 });
 
+// When TUN mode is active and sing-box is running, system proxy is irrelevant.
+// TUN captures traffic at the network layer, no WinHTTP proxy needed.
+const tunProxying = computed(() =>
+  store.config.tun_enabled && store.status.running
+);
+
 async function toggleProxy() {
   if (store.status.running) {
     await store.stopProxy();
@@ -299,19 +305,22 @@ onUnmounted(() => {
       </div>
       <div class="net-settings-body">
         <!-- System Proxy toggle -->
-        <div class="net-row">
+        <div class="net-row" :class="{ 'row-dimmed': tunProxying }">
           <div class="net-row-left">
             <div class="net-row-icon icon-blue"><Globe :size="15" /></div>
             <div>
               <div class="net-row-label">系统代理</div>
-              <div class="net-row-sub">{{ systemProxyEnabled ? `127.0.0.1:${store.config.mixed_port}` : '未开启' }}</div>
+              <div class="net-row-sub">
+                <template v-if="tunProxying">TUN 模式已接管，无需系统代理</template>
+                <template v-else>{{ systemProxyEnabled ? `127.0.0.1:${store.config.mixed_port}` : '未开启' }}</template>
+              </div>
             </div>
           </div>
           <button
             class="toggle-btn"
-            :class="{ on: systemProxyEnabled, 'no-anim': !systemProxyReady }"
-            @click="toggleSystemProxy"
-            :title="systemProxyEnabled ? '关闭系统代理' : '开启系统代理'"
+            :class="{ on: systemProxyEnabled && !tunProxying, 'no-anim': !systemProxyReady, 'toggle-disabled': tunProxying }"
+            @click="tunProxying ? undefined : toggleSystemProxy()"
+            :title="tunProxying ? 'TUN 模式已接管全部流量，系统代理不生效' : (systemProxyEnabled ? '关闭系统代理' : '开启系统代理')"
           >
             <span class="toggle-knob" />
           </button>
@@ -544,6 +553,12 @@ onUnmounted(() => {
 .toggle-btn.on .toggle-knob { transform: translateX(18px); }
 .toggle-btn.no-anim,
 .toggle-btn.no-anim .toggle-knob { transition: none; }
+.toggle-btn.toggle-disabled {
+  opacity: 0.35; cursor: not-allowed;
+  background: var(--color-border) !important;
+}
+.row-dimmed { opacity: 0.6; }
+.row-dimmed .net-row-sub { color: var(--color-text-muted); font-style: italic; }
 
 /* Mode pills */
 .mode-pills { display: flex; gap: 4px; }

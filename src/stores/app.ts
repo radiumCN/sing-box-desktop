@@ -146,10 +146,15 @@ export const useAppStore = defineStore("app", () => {
       await invoke("cmd_start_singbox");
       await fetchStatus();
       updateTrayTooltip();
-      // When not in TUN-only mode, enable Windows system proxy so browsers work immediately
-      const sysProxyOn = !config.value.tun_enabled || config.value.proxy_mode !== "tun";
+      // Only enable Windows system proxy when TUN is NOT active.
+      // TUN mode captures traffic at the network layer — system proxy is redundant and
+      // would cause double-proxying confusion.
+      const sysProxyOn = !config.value.tun_enabled;
       if (sysProxyOn) {
         await invoke("cmd_set_system_proxy", { enabled: true }).catch(() => {});
+      } else {
+        // TUN is on: ensure system proxy is cleared to avoid mixing two proxy methods
+        await invoke("cmd_set_system_proxy", { enabled: false }).catch(() => {});
       }
       syncTrayMenu(sysProxyOn);
     } catch (e) {

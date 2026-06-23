@@ -87,6 +87,26 @@ pub async fn get_version(binary_path: &std::path::Path) -> Result<String> {
     Ok(version)
 }
 
+/// Kill any orphaned sing-box.exe processes left over from a previous run or app update.
+/// Uses process-name kill (not PID) so it catches instances started by any previous app version.
+#[cfg(target_os = "windows")]
+async fn kill_orphan_singbox() {
+    // taskkill /F /IM sing-box.exe — returns error if no matching process; we ignore it.
+    let _ = TokioCommand::new("taskkill")
+        .args(["/F", "/IM", "sing-box.exe"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .await;
+    // Give the OS ~400ms to fully release the bound ports before we try to rebind.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn kill_orphan_singbox() {
+    let _ = TokioCommand::new("pkill").args(["-f", "sing-box"]).output().await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+}
+
 /// Start sing-box with the given config file
 pub async fn start_singbox(
     app_handle: &tauri::AppHandle,
@@ -99,6 +119,10 @@ pub async fn start_singbox(
             return Err(anyhow!("sing-box 已在运行中"));
         }
     }
+
+    // Kill any leftover sing-box processes (e.g. from app update / crash).
+    // This prevents "address already in use" errors on the mixed/http/socks ports.
+    kill_orphan_singbox().await;
 
     let binary = singbox_binary_path(app_handle)?;
     let config_path = config_path.to_path_buf();

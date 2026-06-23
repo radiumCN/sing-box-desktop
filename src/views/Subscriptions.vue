@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, nextTick } from "vue";
 import {
-  Plus, RefreshCw, Trash2, ExternalLink, Clock, Server, AlertCircle
+  Plus, RefreshCw, Trash2, QrCode, Clock, Server, AlertCircle, X, Copy, Check as CheckIcon
 } from "@lucide/vue";
+import QRCode from "qrcode";
 import { useAppStore } from "../stores/app";
 
 const store = useAppStore();
@@ -80,6 +81,46 @@ function cancelAdd() {
   newSubName.value = "";
   newSubUrl.value = "";
   addError.value = "";
+}
+
+// ─── QR Code share dialog ──────────────────────────────────────────
+const qrVisible = ref(false);
+const qrSubName = ref("");
+const qrSubUrl = ref("");
+const qrDataUrl = ref("");
+const qrCopied = ref(false);
+
+async function showQr(name: string, url: string) {
+  qrSubName.value = name;
+  qrSubUrl.value = url;
+  qrVisible.value = true;
+  await nextTick();
+  try {
+    qrDataUrl.value = await QRCode.toDataURL(url, {
+      width: 240,
+      margin: 2,
+      color: { dark: "#1a1a1a", light: "#ffffff" },
+      errorCorrectionLevel: "M",
+    });
+  } catch {
+    qrDataUrl.value = "";
+  }
+}
+
+function closeQr() {
+  qrVisible.value = false;
+  qrCopied.value = false;
+  qrDataUrl.value = "";
+}
+
+async function copyUrl() {
+  try {
+    await navigator.clipboard.writeText(qrSubUrl.value);
+    qrCopied.value = true;
+    setTimeout(() => (qrCopied.value = false), 1800);
+  } catch {
+    // Fallback: show the URL selected
+  }
 }
 
 const INTERVAL_OPTIONS = [
@@ -208,10 +249,10 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
             </button>
             <button
               class="btn btn-ghost icon-btn"
-              title="打开链接"
-              @click="() => {}"
+              title="二维码分享"
+              @click="showQr(sub.name, sub.url)"
             >
-              <ExternalLink :size="14" />
+              <QrCode :size="14" />
             </button>
             <button
               class="btn btn-ghost icon-btn danger"
@@ -255,6 +296,42 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
         </div>
       </div>
     </div>
+
+    <!-- QR Code dialog -->
+    <Teleport to="body">
+      <Transition name="qr-fade">
+        <div v-if="qrVisible" class="qr-overlay" @click.self="closeQr">
+          <div class="qr-dialog">
+            <div class="qr-header">
+              <div class="qr-title">
+                <QrCode :size="15" />
+                {{ qrSubName }}
+              </div>
+              <button class="qr-close" @click="closeQr">
+                <X :size="16" />
+              </button>
+            </div>
+
+            <div class="qr-body">
+              <div class="qr-image-wrap">
+                <img v-if="qrDataUrl" :src="qrDataUrl" alt="QR Code" class="qr-image" />
+                <div v-else class="qr-placeholder">生成中...</div>
+              </div>
+
+              <div class="qr-desc">用手机扫描二维码导入订阅</div>
+
+              <div class="qr-url-row">
+                <span class="qr-url-text">{{ qrSubUrl }}</span>
+                <button class="btn btn-ghost qr-copy-btn" @click="copyUrl" :title="qrCopied ? '已复制' : '复制链接'">
+                  <CheckIcon v-if="qrCopied" :size="13" class="copy-ok" />
+                  <Copy v-else :size="13" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
 
     <!-- Supported formats hint -->
     <div class="hint-card card">
@@ -374,4 +451,74 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
 
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin { animation: spin 0.8s linear infinite; }
+
+/* ─── QR Code dialog ─── */
+.qr-overlay {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0,0,0,0.45);
+  display: flex; align-items: center; justify-content: center;
+}
+.qr-dialog {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+  width: 320px;
+  overflow: hidden;
+}
+.qr-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--color-border);
+}
+.qr-title {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 14px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 240px;
+}
+.qr-close {
+  background: none; border: none; cursor: pointer;
+  color: var(--color-text-muted); padding: 4px; border-radius: var(--radius-sm);
+  display: flex; align-items: center;
+  transition: color 0.15s, background 0.15s;
+}
+.qr-close:hover { color: var(--color-text); background: rgba(128,128,128,0.12); }
+
+.qr-body {
+  padding: 20px 24px 20px;
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+}
+.qr-image-wrap {
+  background: #fff;
+  border-radius: var(--radius-md);
+  padding: 8px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+.qr-image { display: block; width: 200px; height: 200px; }
+.qr-placeholder {
+  width: 200px; height: 200px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: var(--color-text-muted);
+}
+.qr-desc {
+  font-size: 12px; color: var(--color-text-muted); text-align: center;
+}
+.qr-url-row {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  background: rgba(128,128,128,0.06); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); padding: 6px 8px 6px 10px;
+}
+.qr-url-text {
+  flex: 1; min-width: 0;
+  font-size: 11px; font-family: 'Cascadia Code', monospace;
+  color: var(--color-text-secondary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.qr-copy-btn { padding: 4px 6px !important; flex-shrink: 0; }
+.copy-ok { color: #107c10; }
+
+/* QR dialog enter/leave transition */
+.qr-fade-enter-active, .qr-fade-leave-active { transition: opacity 0.18s, transform 0.18s; }
+.qr-fade-enter-from, .qr-fade-leave-to { opacity: 0; transform: scale(0.95); }
 </style>

@@ -107,6 +107,41 @@ async fn do_update_subscription(
     Ok(())
 }
 
+// ─── App Self-Update Checker ─────────────────────────────────────────
+
+/// Background task: check for app updates once at startup (after a short delay).
+/// Emits "app-update-available" { version, download_url, release_notes, is_prerelease }
+/// when the latest release version differs from the running app version.
+pub async fn start_app_update_checker(app_handle: tauri::AppHandle) {
+    // Wait 45 seconds after launch so the window is fully up before showing anything
+    tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+
+    let channel = {
+        let cfg = crate::config::load_app_config();
+        cfg.update_channel.clone()
+    };
+
+    match crate::updater::fetch_app_release(&channel, false).await {
+        Ok(release) => {
+            let current = env!("CARGO_PKG_VERSION");
+            let latest = release.version.trim_start_matches('v');
+            if latest != current {
+                let _ = app_handle.emit("app-update-available", serde_json::json!({
+                    "version": release.version,
+                    "download_url": release.download_url,
+                    "release_notes": release.release_notes,
+                    "published_at": release.published_at,
+                    "is_prerelease": release.is_prerelease,
+                    "current_version": current,
+                }));
+            }
+        }
+        Err(e) => {
+            log::debug!("应用更新检查失败: {}", e);
+        }
+    }
+}
+
 // ─── sing-box Binary Updater ─────────────────────────────────────────
 
 async fn check_and_emit(app_handle: &tauri::AppHandle) {

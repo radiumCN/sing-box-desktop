@@ -125,6 +125,12 @@ pub fn run() {
                 crate::auto_update::start_subscription_auto_updater(handle_sub).await;
             });
 
+            // Spawn app self-update checker (runs once, 45s after launch)
+            let handle_app_upd = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                crate::auto_update::start_app_update_checker(handle_app_upd).await;
+            });
+
             // ── Tray context menu ────────────────────────────────────────
             let initial_sys_proxy = crate::proxy::get_system_proxy_status();
             let initial_tun = {

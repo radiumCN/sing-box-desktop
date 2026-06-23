@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, onMounted, computed } from "vue";
+import { ref, watch, onMounted, onUnmounted, computed } from "vue";
 import {
   Shield, Globe, Cpu, Monitor, Download,
   RefreshCw, CheckCircle, AlertCircle, Package, ExternalLink,
@@ -256,12 +256,39 @@ async function startAppDownload() {
   }
 }
 
+let unlistenAppUpdate: (() => void) | null = null;
+
 onMounted(async () => {
   await Promise.all([
     refreshKernelStatus(),
     refreshTunStatus(),
     getVersion().then((v) => (appVersion.value = v)),
   ]);
+
+  // Silently check for app update in background (uses 1-hour cache, won't spam API).
+  checkAppUpdate(false);
+
+  // Also listen for the background checker's event (fired ~45s after launch).
+  unlistenAppUpdate = await listen<{
+    version: string;
+    download_url: string;
+    release_notes: string;
+    published_at: string;
+    is_prerelease: boolean;
+    current_version: string;
+  }>("app-update-available", (event) => {
+    appLatestRelease.value = {
+      version: event.payload.version,
+      published_at: event.payload.published_at,
+      release_notes: event.payload.release_notes,
+      download_url: event.payload.download_url,
+      is_prerelease: event.payload.is_prerelease,
+    };
+  });
+});
+
+onUnmounted(() => {
+  unlistenAppUpdate?.();
 });
 </script>
 
