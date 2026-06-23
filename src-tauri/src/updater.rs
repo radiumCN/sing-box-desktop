@@ -493,11 +493,15 @@ pub async fn download_and_install_app(
         "path": installer_path.to_string_lossy(),
     }));
 
-    // Launch installer — the NSIS installer handles closing and restarting the app
+    // Launch installer — the NSIS installer handles closing and restarting the app.
+    // Use CREATE_NO_WINDOW so the helper `cmd` doesn't flash a black console window.
     #[cfg(target_os = "windows")]
     {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         std::process::Command::new("cmd")
             .args(["/C", "start", "", installer_path.to_str().unwrap_or("")])
+            .creation_flags(CREATE_NO_WINDOW)
             .spawn()
             .map_err(|e| anyhow!("无法启动安装程序: {}", e))?;
     }

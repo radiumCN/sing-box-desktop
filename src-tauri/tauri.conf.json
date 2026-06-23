@@ -21,7 +21,8 @@
         "transparent": false,
         "resizable": true,
         "center": true,
-        "devtools": false
+        "devtools": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu --disable-gpu-compositing --disable-software-rasterizer"
       }
     ],
     "security": {
