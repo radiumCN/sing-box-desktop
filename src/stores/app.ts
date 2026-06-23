@@ -193,6 +193,18 @@ export const useAppStore = defineStore("app", () => {
     nodes.value = nodes.value.filter((n) => n.subscription_id !== id);
   }
 
+  async function saveSubscriptionSettings(id: string, autoUpdate: boolean, updateInterval: number) {
+    await invoke("cmd_save_subscription_settings", { id, autoUpdate, updateInterval });
+    const idx = subscriptions.value.findIndex((s) => s.id === id);
+    if (idx !== -1) {
+      subscriptions.value[idx] = {
+        ...subscriptions.value[idx],
+        auto_update: autoUpdate,
+        update_interval: updateInterval,
+      };
+    }
+  }
+
   async function fetchNodes() {
     nodes.value = await invoke<ProxyNode[]>("cmd_get_nodes");
   }
@@ -314,6 +326,7 @@ export const useAppStore = defineStore("app", () => {
     addSubscription,
     updateSubscription,
     deleteSubscription,
+    saveSubscriptionSettings,
     fetchNodes,
     setActiveNode,
     testNodeLatency,

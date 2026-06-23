@@ -79,6 +79,30 @@ pub fn relaunch_as_admin() -> Result<()> {
     Err(anyhow!("不支持此平台"))
 }
 
+/// Remove a stale "sing-box-tun" WinTun adapter left over from a previous crashed run.
+/// WinTun sometimes fails to clean up its registry entry when the process is force-killed,
+/// causing the next start to fail with "Cannot create a file when that file already exists".
+/// This must be called with administrator privileges (the app always runs elevated).
+#[cfg(target_os = "windows")]
+pub async fn cleanup_stale_tun_adapter() {
+    use tokio::process::Command as TokioCommand;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    // Remove-NetAdapter by the fixed interface name we specify in the TUN config.
+    let ps = "Remove-NetAdapter -Name 'sing-box-tun' -Confirm:$false -ErrorAction SilentlyContinue";
+    let _ = TokioCommand::new("powershell")
+        .args(["-NonInteractive", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .await;
+
+    // Brief pause so Windows propagates the device removal before sing-box creates a new one.
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+}
+
+#[cfg(not(target_os = "windows"))]
+pub async fn cleanup_stale_tun_adapter() {}
+
 /// Check if WinTun driver DLL is present alongside sing-box binary
 pub fn wintun_available() -> bool {
     let bin_dir = crate::updater::singbox_binary_path()

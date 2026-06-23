@@ -43,6 +43,8 @@ pub async fn cmd_start_singbox(
         if !crate::tun::wintun_available() {
             return Err("TUN 模式需要 WinTun 驱动。请在「设置 → TUN 模式」中点击「下载 WinTun」后再启动。".to_string());
         }
+        // Remove any stale WinTun adapter left from a previous crashed run before starting.
+        crate::tun::cleanup_stale_tun_adapter().await;
     }
 
     let singbox_cfg = subscription::build_singbox_config(
@@ -228,6 +230,22 @@ pub async fn cmd_update_subscription(
     }
 
     Ok(updated_sub)
+}
+
+#[tauri::command]
+pub fn cmd_save_subscription_settings(
+    id: String,
+    auto_update: bool,
+    update_interval: u32,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut subs = state.subscriptions.lock().unwrap();
+    let sub = subs.iter_mut()
+        .find(|s| s.id == id)
+        .ok_or_else(|| "订阅不存在".to_string())?;
+    sub.auto_update = auto_update;
+    sub.update_interval = update_interval;
+    config::save_subscriptions(&subs).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

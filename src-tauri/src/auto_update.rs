@@ -1,5 +1,5 @@
 use std::time::Duration;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 /// Background task: check for sing-box updates on startup and periodically.
 /// Emits "singbox-update-available" { version, download_url, release_notes } when a new version is found.
@@ -18,6 +18,96 @@ pub async fn start_auto_update_checker(app_handle: tauri::AppHandle, interval_ho
         check_and_emit(&app_handle).await;
     }
 }
+
+// ─── Subscription Auto-Updater ───────────────────────────────────────
+
+/// Background task: periodically refresh subscriptions that have auto_update enabled.
+/// Checks every 30 minutes; updates any subscription whose last_update is older than its interval.
+pub async fn start_subscription_auto_updater(app_handle: tauri::AppHandle) {
+    // Wait for app to settle before first check
+    tokio::time::sleep(Duration::from_secs(60)).await;
+
+    loop {
+        let state = app_handle.state::<crate::commands::AppState>();
+
+        let to_update: Vec<(String, String)> = {
+            let subs = state.subscriptions.lock().unwrap();
+            let now = chrono::Utc::now();
+            subs.iter()
+                .filter(|s| s.auto_update && s.update_interval > 0)
+                .filter(|s| match s.last_update {
+                    None => true,
+                    Some(last) => (now - last).num_hours() >= s.update_interval as i64,
+                })
+                .map(|s| (s.id.clone(), s.url.clone()))
+                .collect()
+        };
+
+        for (id, url) in to_update {
+            match do_update_subscription(&app_handle, &id, &url).await {
+                Ok(_) => log::info!("订阅自动更新成功: {}", id),
+                Err(e) => log::warn!("订阅自动更新失败 [{}]: {}", id, e),
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(30 * 60)).await;
+    }
+}
+
+async fn do_update_subscription(
+    app_handle: &tauri::AppHandle,
+    id: &str,
+    url: &str,
+) -> anyhow::Result<()> {
+    let content = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .user_agent("ClashForWindows/0.20.39")
+        .build()?
+        .get(url)
+        .send()
+        .await?
+        .text()
+        .await?;
+
+    crate::config::save_subscription_content(id, &content)?;
+
+    let state = app_handle.state::<crate::commands::AppState>();
+    let sub_type = crate::subscription::detect_sub_type(&content, url);
+    let (nodes, outbounds) = crate::subscription::parse_subscription(&content, id)?;
+
+    {
+        let mut subs = state.subscriptions.lock().unwrap();
+        if let Some(sub) = subs.iter_mut().find(|s| s.id == id) {
+            sub.sub_type = sub_type;
+            sub.node_count = nodes.len();
+            sub.last_update = Some(chrono::Utc::now());
+        }
+        crate::config::save_subscriptions(&subs)?;
+    }
+    {
+        let mut all_nodes = state.nodes.lock().unwrap();
+        all_nodes.retain(|n| n.subscription_id.as_deref() != Some(id));
+        all_nodes.extend(nodes);
+        crate::config::save_nodes(&all_nodes)?;
+    }
+    {
+        let mut all_outbounds = state.outbounds.lock().unwrap();
+        let new_tags: std::collections::HashSet<String> = outbounds.iter()
+            .filter_map(|ob| ob["tag"].as_str().map(|s| s.to_string()))
+            .collect();
+        all_outbounds.retain(|ob| {
+            ob["tag"].as_str()
+                .map(|t| !new_tags.contains(t))
+                .unwrap_or(true)
+        });
+        all_outbounds.extend(outbounds);
+        crate::config::save_outbounds(&all_outbounds)?;
+    }
+
+    Ok(())
+}
+
+// ─── sing-box Binary Updater ─────────────────────────────────────────
 
 async fn check_and_emit(app_handle: &tauri::AppHandle) {
     match crate::updater::fetch_latest_release(false).await {

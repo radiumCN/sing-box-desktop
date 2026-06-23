@@ -81,6 +81,33 @@ function cancelAdd() {
   newSubUrl.value = "";
   addError.value = "";
 }
+
+const INTERVAL_OPTIONS = [
+  { value: 1,  label: "每 1 小时" },
+  { value: 3,  label: "每 3 小时" },
+  { value: 6,  label: "每 6 小时" },
+  { value: 12, label: "每 12 小时" },
+  { value: 24, label: "每 24 小时" },
+  { value: 72, label: "每 3 天" },
+];
+
+function formatNextUpdate(sub: { last_update?: string; update_interval: number }) {
+  if (!sub.last_update) return "尚未更新";
+  const next = new Date(sub.last_update).getTime() + sub.update_interval * 3600 * 1000;
+  const diff = next - Date.now();
+  if (diff <= 0) return "即将更新";
+  const h = Math.floor(diff / 3600000);
+  const m = Math.floor((diff % 3600000) / 60000);
+  return h > 0 ? `${h}h ${m}m 后` : `${m}m 后`;
+}
+
+async function toggleAutoUpdate(id: string, currentAutoUpdate: boolean, interval: number) {
+  await store.saveSubscriptionSettings(id, !currentAutoUpdate, interval);
+}
+
+async function changeInterval(id: string, autoUpdate: boolean, interval: number) {
+  await store.saveSubscriptionSettings(id, autoUpdate, interval);
+}
 </script>
 
 <template>
@@ -154,44 +181,77 @@ function cancelAdd() {
     <!-- Subscription List -->
     <div class="sub-list">
       <div v-for="sub in store.subscriptions" :key="sub.id" class="card sub-item">
-        <div class="sub-left">
-          <div class="sub-name">{{ sub.name }}</div>
-          <div class="sub-meta">
-            <span class="badge badge-blue">{{ subTypeLabel(sub.sub_type) }}</span>
-            <span class="meta-item">
-              <Server :size="11" />
-              {{ sub.node_count }} 个节点
-            </span>
-            <span class="meta-item">
-              <Clock :size="11" />
-              {{ formatDate(sub.last_update) }}
+        <div class="sub-main">
+          <div class="sub-left">
+            <div class="sub-name">{{ sub.name }}</div>
+            <div class="sub-meta">
+              <span class="badge badge-blue">{{ subTypeLabel(sub.sub_type) }}</span>
+              <span class="meta-item">
+                <Server :size="11" />
+                {{ sub.node_count }} 个节点
+              </span>
+              <span class="meta-item">
+                <Clock :size="11" />
+                {{ formatDate(sub.last_update) }}
+              </span>
+            </div>
+            <div class="sub-url">{{ sub.url }}</div>
+          </div>
+          <div class="sub-actions">
+            <button
+              class="btn btn-ghost icon-btn"
+              :disabled="updatingId === sub.id"
+              title="更新订阅"
+              @click="updateSub(sub.id)"
+            >
+              <RefreshCw :size="14" :class="{ spin: updatingId === sub.id }" />
+            </button>
+            <button
+              class="btn btn-ghost icon-btn"
+              title="打开链接"
+              @click="() => {}"
+            >
+              <ExternalLink :size="14" />
+            </button>
+            <button
+              class="btn btn-ghost icon-btn danger"
+              title="删除"
+              @click="deleteSub(sub.id, sub.name)"
+            >
+              <Trash2 :size="14" />
+            </button>
+          </div>
+        </div>
+
+        <!-- Auto-update row -->
+        <div class="sub-autoupdate">
+          <div class="autoupdate-left">
+            <Clock :size="12" class="autoupdate-icon" />
+            <span class="autoupdate-label">自动更新</span>
+            <span v-if="sub.auto_update" class="autoupdate-next">
+              {{ formatNextUpdate(sub) }}
             </span>
           </div>
-          <div class="sub-url">{{ sub.url }}</div>
-        </div>
-        <div class="sub-actions">
-          <button
-            class="btn btn-ghost icon-btn"
-            :disabled="updatingId === sub.id"
-            title="更新订阅"
-            @click="updateSub(sub.id)"
-          >
-            <RefreshCw :size="14" :class="{ spin: updatingId === sub.id }" />
-          </button>
-          <button
-            class="btn btn-ghost icon-btn"
-            title="打开链接"
-            @click="() => {}"
-          >
-            <ExternalLink :size="14" />
-          </button>
-          <button
-            class="btn btn-ghost icon-btn danger"
-            title="删除"
-            @click="deleteSub(sub.id, sub.name)"
-          >
-            <Trash2 :size="14" />
-          </button>
+          <div class="autoupdate-right">
+            <select
+              v-if="sub.auto_update"
+              class="interval-select"
+              :value="sub.update_interval"
+              @change="changeInterval(sub.id, sub.auto_update, Number(($event.target as HTMLSelectElement).value))"
+            >
+              <option v-for="opt in INTERVAL_OPTIONS" :key="opt.value" :value="opt.value">
+                {{ opt.label }}
+              </option>
+            </select>
+            <button
+              class="mini-toggle"
+              :class="{ on: sub.auto_update }"
+              :title="sub.auto_update ? '关闭自动更新' : '开启自动更新'"
+              @click="toggleAutoUpdate(sub.id, sub.auto_update, sub.update_interval)"
+            >
+              <span class="mini-knob" />
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -243,11 +303,15 @@ function cancelAdd() {
 
 .sub-list { display: flex; flex-direction: column; gap: 10px; }
 .sub-item {
-  padding: 16px 18px;
-  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px;
-  transition: box-shadow 0.15s;
+  padding: 0;
+  display: flex; flex-direction: column;
+  transition: box-shadow 0.15s; overflow: hidden;
 }
 .sub-item:hover { box-shadow: var(--shadow-md); }
+.sub-main {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px; padding: 16px 18px;
+}
 .sub-left { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .sub-name { font-size: 14px; font-weight: 600; }
 .sub-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -262,6 +326,46 @@ function cancelAdd() {
 .sub-actions { display: flex; gap: 4px; flex-shrink: 0; }
 .icon-btn { padding: 6px !important; }
 .icon-btn.danger:hover { color: var(--color-error); }
+
+/* Auto-update row */
+.sub-autoupdate {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 18px;
+  background: rgba(128,128,128,0.04);
+  border-top: 1px solid var(--color-border);
+}
+.autoupdate-left {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--color-text-secondary);
+}
+.autoupdate-icon { color: var(--color-text-muted); flex-shrink: 0; }
+.autoupdate-label { font-weight: 500; }
+.autoupdate-next {
+  font-size: 11px; color: var(--color-text-muted);
+  background: rgba(128,128,128,0.1); padding: 1px 7px; border-radius: 10px;
+}
+.autoupdate-right { display: flex; align-items: center; gap: 8px; }
+
+.interval-select {
+  font-size: 12px; padding: 2px 6px; border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border); background: var(--color-surface);
+  color: var(--color-text); cursor: pointer; outline: none;
+}
+.interval-select:focus { border-color: var(--color-primary); }
+
+.mini-toggle {
+  width: 34px; height: 20px; border-radius: 10px;
+  background: rgba(128,128,128,0.3); border: none; cursor: pointer;
+  position: relative; transition: background 0.2s; padding: 0; flex-shrink: 0;
+}
+.mini-toggle.on { background: var(--color-primary); }
+.mini-knob {
+  position: absolute; top: 2px; left: 2px;
+  width: 16px; height: 16px; border-radius: 50%;
+  background: white; transition: transform 0.2s; display: block;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+}
+.mini-toggle.on .mini-knob { transform: translateX(14px); }
 
 .hint-card { padding: 16px 18px; display: flex; flex-direction: column; gap: 10px; }
 .hint-title { font-size: 12px; font-weight: 600; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }

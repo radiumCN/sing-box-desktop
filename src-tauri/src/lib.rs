@@ -109,7 +109,7 @@ pub fn run() {
                 }
             }
 
-            // Spawn auto-update checker via Tauri's runtime (not bare tokio::spawn)
+            // Spawn sing-box binary auto-update checker
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let interval = {
@@ -117,6 +117,12 @@ pub fn run() {
                     cfg.auto_update_interval
                 };
                 crate::auto_update::start_auto_update_checker(handle, interval).await;
+            });
+
+            // Spawn subscription auto-update checker
+            let handle_sub = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                crate::auto_update::start_subscription_auto_updater(handle_sub).await;
             });
 
             // ── Tray context menu ────────────────────────────────────────
@@ -266,6 +272,7 @@ pub fn run() {
             commands::cmd_set_system_proxy,
             commands::cmd_sync_tray_menu,
             commands::cmd_get_memory_usage,
+            commands::cmd_save_subscription_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
