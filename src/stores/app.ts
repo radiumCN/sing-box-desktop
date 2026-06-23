@@ -330,6 +330,10 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  function clearTrafficHistory() {
+    trafficHistory.value = [];
+  }
+
   async function init() {
     await Promise.all([
       fetchStatus(),
@@ -377,6 +381,7 @@ export const useAppStore = defineStore("app", () => {
     saveConfig,
     setProxyMode,
     addTrafficPoint,
+    clearTrafficHistory,
     updateTrayTooltip,
     init,
   };

@@ -1,11 +1,12 @@
 {
   "name": "sing-box-win",
   "private": true,
-  "version": "0.2.3",
+  "version": "0.2.4",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "prepare-installer": "node scripts/prepare-installer.js",
     "preview": "vite preview",
     "tauri": "tauri"
   },

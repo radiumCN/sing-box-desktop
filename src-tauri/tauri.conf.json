@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run prepare-installer && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -31,7 +31,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["nsis"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -41,16 +41,25 @@
     ],
     "resources": [],
     "publisher": "Radium",
-    "shortDescription": "基于 sing-box 的 Windows 代理客户端",
+    "shortDescription": "基于 sing-box 的跨平台代理客户端",
+    "longDescription": "一款基于 sing-box 内核的桌面代理客户端，支持 Shadowsocks、VMess、Trojan、Hysteria2 等主流协议。",
     "copyright": "Copyright © 2024 Radium",
     "windows": {
       "nsis": {
         "languages": ["SimpChinese"],
         "displayLanguageSelector": false,
-        "installMode": "currentUser"
-      },
-      "wix": {
-        "language": "zh-CN"
+        "installMode": "currentUser",
+        "installerIcon": "icons/icon.ico",
+        "headerImage": "installer/nsis-header.bmp",
+        "sidebarImage": "installer/nsis-sidebar.bmp"
+      }
+    },
+    "macOS": {
+      "dmg": {
+        "background": "installer/dmg-background.png",
+        "windowSize": { "width": 660, "height": 400 },
+        "appPosition": { "x": 180, "y": 200 },
+        "applicationFolderPosition": { "x": 480, "y": 200 }
       }
     }
   },

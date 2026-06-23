@@ -59,6 +59,47 @@ const totalDownload = ref(0);
 const memoryUsage = ref<number | null>(null);
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
+// ── Traffic WebSocket (Clash-compatible API: /traffic) ─────────────────────
+let trafficWs: WebSocket | null = null;
+let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+function connectTrafficWs() {
+  if (trafficWs && trafficWs.readyState === WebSocket.OPEN) return;
+  // Clean up any previous socket without triggering its onclose reconnect
+  if (trafficWs) { trafficWs.onclose = null; trafficWs.close(); trafficWs = null; }
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+
+  const port = store.config.api_port || 9090;
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/traffic`);
+  trafficWs = ws;
+
+  ws.onmessage = (event) => {
+    try {
+      const { up, down } = JSON.parse(event.data as string) as { up: number; down: number };
+      uploadSpeed.value = up;
+      downloadSpeed.value = down;
+      totalUpload.value += up;
+      totalDownload.value += down;
+      store.addTrafficPoint(up, down);
+    } catch (_) {}
+  };
+
+  ws.onerror = () => {};
+
+  ws.onclose = () => {
+    if (trafficWs === ws) trafficWs = null;
+    // Auto-reconnect while the proxy is still running
+    if (store.status.running) {
+      wsReconnectTimer = setTimeout(connectTrafficWs, 2000);
+    }
+  };
+}
+
+function disconnectTrafficWs() {
+  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+  if (trafficWs) { trafficWs.onclose = null; trafficWs.close(); trafficWs = null; }
+}
+
 const chartLabels = computed(() =>
   store.trafficHistory.map((_, i) => (i === store.trafficHistory.length - 1 ? "now" : ""))
 );
@@ -156,6 +197,9 @@ onMounted(async () => {
   await nextTick();
   systemProxyReady.value = true;
 
+  // If proxy is already running on mount (e.g. restored from last session), connect immediately.
+  if (store.status.running) connectTrafficWs();
+
   let lastRunning = store.status.running;
 
   pollTimer = setInterval(async () => {
@@ -164,27 +208,29 @@ onMounted(async () => {
     // before the backend finished setting the proxy on auto-restore startup.
     fetchSystemProxy();
 
-    // Keep tray tooltip in sync whenever the running state changes (e.g. auto-restore
-    // on startup, or sing-box crash) — these paths bypass startProxy/stopProxy so
-    // updateTrayTooltip would otherwise never be called.
+    // React to proxy start/stop transitions.
     if (store.status.running !== lastRunning) {
       lastRunning = store.status.running;
       store.updateTrayTooltip();
+
+      if (store.status.running) {
+        // Reset session totals and open the traffic WebSocket.
+        totalUpload.value = 0;
+        totalDownload.value = 0;
+        store.clearTrafficHistory();
+        connectTrafficWs();
+      } else {
+        disconnectTrafficWs();
+        uploadSpeed.value = 0;
+        downloadSpeed.value = 0;
+      }
     }
 
     if (store.status.running) {
-      // TODO: replace with real traffic data from sing-box API
-      const up = Math.random() * 200 * 1024;
-      const down = Math.random() * 800 * 1024;
-      uploadSpeed.value = up;
-      downloadSpeed.value = down;
-      totalUpload.value += up;
-      totalDownload.value += down;
-      store.addTrafficPoint(up, down);
       memoryUsage.value = await invoke<number | null>("cmd_get_memory_usage").catch(() => null);
+      // Traffic data (uploadSpeed / downloadSpeed / totals) are driven by the
+      // WebSocket above — no polling needed here.
     } else {
-      uploadSpeed.value = 0;
-      downloadSpeed.value = 0;
       memoryUsage.value = null;
     }
   }, 1000);
@@ -192,6 +238,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer);
+  disconnectTrafficWs();
 });
 </script>
 
