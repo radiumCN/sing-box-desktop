@@ -156,7 +156,9 @@ pub async fn start_singbox(
     Ok(())
 }
 
-/// Stop sing-box
+/// Stop sing-box.
+/// On Windows, first send a graceful Ctrl+Break so sing-box (and WinTun) can clean up
+/// the TUN adapter properly. If the process is still alive after 3 seconds, force-kill it.
 pub async fn stop_singbox(state: SharedState) -> Result<()> {
     let pid = {
         let s = state.lock().unwrap();
@@ -166,11 +168,35 @@ pub async fn stop_singbox(state: SharedState) -> Result<()> {
     if let Some(pid) = pid {
         #[cfg(target_os = "windows")]
         {
-            TokioCommand::new("taskkill")
+            // Graceful shutdown: taskkill without /F sends WM_CLOSE / Ctrl+Break,
+            // giving sing-box time to call WintunDeleteAdapter() and clean up the TUN driver.
+            let _ = TokioCommand::new("taskkill")
+                .args(["/PID", &pid.to_string()])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()
+                .await;
+
+            // Wait up to 3 seconds for the process to exit gracefully.
+            for _ in 0..6 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let alive = TokioCommand::new("tasklist")
+                    .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output()
+                    .await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+
+            // Force-kill if still running (e.g. process ignores Ctrl+Break).
+            let _ = TokioCommand::new("taskkill")
                 .args(["/PID", &pid.to_string(), "/F"])
                 .creation_flags(CREATE_NO_WINDOW)
                 .output()
-                .await?;
+                .await;
         }
         #[cfg(not(target_os = "windows"))]
         {

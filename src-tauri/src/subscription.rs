@@ -703,10 +703,16 @@ pub fn build_singbox_config(
     });
 
     if config.tun_enabled {
+        // Use a unique interface name per start. If a previous run crashed and left an
+        // orphaned adapter behind, a fresh name avoids the WinTun "Cannot create a file
+        // when that file already exists" failure entirely. Old "sing-box-tun*" adapters
+        // are cleaned up before start by tun::cleanup_stale_tun_adapter().
+        let unique_suffix = uuid::Uuid::new_v4().simple().to_string();
+        let interface_name = format!("sing-box-tun-{}", &unique_suffix[..6]);
         cfg["inbounds"].as_array_mut().unwrap().push(json!({
             "type": "tun",
             "tag": "tun-in",
-            "interface_name": "sing-box-tun",
+            "interface_name": interface_name,
             "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
             "mtu": 9000,
             "auto_route": true,
