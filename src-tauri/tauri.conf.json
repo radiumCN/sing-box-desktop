@@ -38,7 +38,20 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": []
+    "resources": [],
+    "publisher": "Radium",
+    "shortDescription": "基于 sing-box 的 Windows 代理客户端",
+    "copyright": "Copyright © 2024 Radium",
+    "windows": {
+      "nsis": {
+        "languages": ["SimpChinese"],
+        "displayLanguageSelector": false,
+        "installMode": "currentUser"
+      },
+      "wix": {
+        "language": "zh-CN"
+      }
+    }
   },
   "plugins": {
     "shell": {

@@ -173,7 +173,6 @@ async function startDownload() {
 }
 
 onMounted(async () => {
-  localConfig.value = { ...store.config };
   await Promise.all([
     refreshKernelStatus(),
     refreshTunStatus(),
