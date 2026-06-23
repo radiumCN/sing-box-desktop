@@ -42,6 +42,7 @@ pub struct SpeedResult {
     pub download_kbps: Option<u32>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyGroup {
     pub name: String,
@@ -75,6 +76,7 @@ pub struct ConnectionInfo {
     pub start: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogEntry {
     pub level: String,

@@ -33,9 +33,25 @@ pub fn set_system_proxy(enabled: bool, port: u16) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 unsafe fn winapi_refresh_proxy(_setting: *const u16) {
-    // Use InternetSetOption to refresh proxy settings
-    // This requires winapi crate; for simplicity, we skip the actual call
-    // In production, use: InternetSetOptionW(null, INTERNET_OPTION_SETTINGS_CHANGED, null, 0)
+    use winapi::um::wininet::{
+        InternetSetOptionW, INTERNET_OPTION_PROXY_SETTINGS_CHANGED,
+        INTERNET_OPTION_SETTINGS_CHANGED,
+    };
+    // Notify WinINet and all HINTERNET handles that proxy settings have changed.
+    // Without these two calls the registry write is invisible to running processes
+    // until they restart; with them the change takes effect immediately.
+    InternetSetOptionW(
+        std::ptr::null_mut(),
+        INTERNET_OPTION_SETTINGS_CHANGED,
+        std::ptr::null_mut(),
+        0,
+    );
+    InternetSetOptionW(
+        std::ptr::null_mut(),
+        INTERNET_OPTION_PROXY_SETTINGS_CHANGED,
+        std::ptr::null_mut(),
+        0,
+    );
 }
 
 #[cfg(not(target_os = "windows"))]
