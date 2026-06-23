@@ -113,13 +113,18 @@ async function refreshKernelStatus() {
   ]);
 }
 
-async function checkUpdate() {
+async function checkUpdate(forceRefresh = false) {
   checkingUpdate.value = true;
   checkError.value = "";
   try {
-    latestRelease.value = await invoke<ReleaseInfo>("cmd_check_singbox_update");
+    latestRelease.value = await invoke<ReleaseInfo>("cmd_check_singbox_update", { forceRefresh });
   } catch (e) {
-    checkError.value = String(e);
+    const msg = String(e);
+    if (msg.includes("频率超限") || msg.includes("rate limit") || msg.includes("Rate limit")) {
+      checkError.value = msg;
+    } else {
+      checkError.value = msg;
+    }
   } finally {
     checkingUpdate.value = false;
   }
@@ -235,7 +240,7 @@ onMounted(async () => {
           <button
             class="btn btn-ghost"
             :disabled="checkingUpdate"
-            @click="checkUpdate"
+            @click="() => checkUpdate()"
           >
             <RefreshCw :size="13" :class="{ spin: checkingUpdate }" />
             {{ checkingUpdate ? "检查中..." : "检查更新" }}

@@ -20,7 +20,7 @@ pub async fn start_auto_update_checker(app_handle: tauri::AppHandle, interval_ho
 }
 
 async fn check_and_emit(app_handle: &tauri::AppHandle) {
-    match crate::updater::fetch_latest_release().await {
+    match crate::updater::fetch_latest_release(false).await {
         Ok(release) => {
             let installed = crate::updater::get_installed_version().await;
             let installed_ver = installed

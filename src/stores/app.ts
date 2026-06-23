@@ -131,8 +131,9 @@ export const useAppStore = defineStore("app", () => {
     invoke("cmd_update_tray_tooltip", { tooltip }).catch(() => {});
   }
 
-  function syncTrayMenu(sysProxyEnabled: boolean) {
-    invoke("cmd_sync_tray_menu", { sysProxyEnabled }).catch(() => {});
+  function syncTrayMenu(sysProxyEnabled: boolean, tunEnabled?: boolean) {
+    const tun = tunEnabled ?? config.value.tun_enabled ?? false;
+    invoke("cmd_sync_tray_menu", { sysProxyEnabled, tunEnabled: tun }).catch(() => {});
   }
 
   async function startProxy() {
@@ -255,6 +256,9 @@ export const useAppStore = defineStore("app", () => {
   async function saveConfig(newConfig: AppConfig) {
     await invoke("cmd_save_app_config", { newConfig });
     config.value = newConfig;
+    // Keep tray TUN checkbox in sync whenever config changes
+    const sysProxy = await invoke<boolean>("cmd_get_system_proxy_status").catch(() => false);
+    syncTrayMenu(sysProxy, newConfig.tun_enabled);
   }
 
   async function setProxyMode(mode: string) {

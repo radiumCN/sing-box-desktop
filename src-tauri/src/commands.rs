@@ -644,8 +644,8 @@ pub fn cmd_reset_rules() -> Result<Vec<crate::rules::RouteRule>, String> {
 // ─── Updater ────────────────────────────────────────────────────────
 
 #[tauri::command]
-pub async fn cmd_check_singbox_update() -> Result<crate::updater::ReleaseInfo, String> {
-    crate::updater::fetch_latest_release()
+pub async fn cmd_check_singbox_update(force_refresh: Option<bool>) -> Result<crate::updater::ReleaseInfo, String> {
+    crate::updater::fetch_latest_release(force_refresh.unwrap_or(false))
         .await
         .map_err(|e| e.to_string())
 }
@@ -701,15 +701,21 @@ pub fn cmd_update_tray_tooltip(app_handle: tauri::AppHandle, tooltip: String) {
     }
 }
 
-/// Update the tray check-menu items to reflect current proxy / system-proxy state.
+/// Update the tray check-menu items to reflect current system-proxy and TUN state.
 #[tauri::command]
 pub fn cmd_sync_tray_menu(
     sys_proxy_enabled: bool,
+    tun_enabled: bool,
     tray_state: State<'_, TrayState>,
 ) {
     if let Ok(guard) = tray_state.sys_proxy_item.lock() {
         if let Some(item) = guard.as_ref() {
             let _ = item.set_checked(sys_proxy_enabled);
+        }
+    }
+    if let Ok(guard) = tray_state.tun_item.lock() {
+        if let Some(item) = guard.as_ref() {
+            let _ = item.set_checked(tun_enabled);
         }
     }
 }

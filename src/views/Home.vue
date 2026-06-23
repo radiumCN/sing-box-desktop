@@ -31,7 +31,7 @@ async function toggleSystemProxy() {
   try {
     await invoke("cmd_set_system_proxy", { enabled: next });
     systemProxyEnabled.value = next;
-    invoke("cmd_sync_tray_menu", { sysProxyEnabled: next }).catch(() => {});
+    invoke("cmd_sync_tray_menu", { sysProxyEnabled: next, tunEnabled: store.config.tun_enabled ?? false }).catch(() => {});
   } catch (e) {
     store.error = String(e);
   }

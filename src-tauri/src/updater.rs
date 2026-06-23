@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use tauri::Emitter;
 
 const GITHUB_API: &str = "https://api.github.com/repos/SagerNet/sing-box/releases/latest";
+/// Cache validity duration in seconds (1 hour)
+const CACHE_TTL_SECS: u64 = 3600;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseInfo {
@@ -13,19 +15,102 @@ pub struct ReleaseInfo {
     pub download_url: String,
 }
 
-/// Query latest sing-box release from GitHub
-pub async fn fetch_latest_release() -> Result<ReleaseInfo> {
+#[derive(Debug, Serialize, Deserialize)]
+struct UpdateCache {
+    cached_at_secs: u64,
+    release: ReleaseInfo,
+}
+
+fn cache_path() -> PathBuf {
+    crate::config::app_data_dir().join("update_cache.json")
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn load_cache() -> Option<ReleaseInfo> {
+    let data = std::fs::read_to_string(cache_path()).ok()?;
+    let cache: UpdateCache = serde_json::from_str(&data).ok()?;
+    if unix_now().saturating_sub(cache.cached_at_secs) < CACHE_TTL_SECS {
+        Some(cache.release)
+    } else {
+        None
+    }
+}
+
+fn save_cache(release: &ReleaseInfo) {
+    let cache = UpdateCache {
+        cached_at_secs: unix_now(),
+        release: release.clone(),
+    };
+    if let Ok(data) = serde_json::to_string_pretty(&cache) {
+        let _ = std::fs::write(cache_path(), data);
+    }
+}
+
+/// Query latest sing-box release from GitHub, with 1-hour local cache.
+/// Pass `force_refresh = true` to bypass the cache and always hit the API.
+pub async fn fetch_latest_release(force_refresh: bool) -> Result<ReleaseInfo> {
+    // Return cached result if still fresh
+    if !force_refresh {
+        if let Some(cached) = load_cache() {
+            return Ok(cached);
+        }
+    }
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .user_agent("sing-box-win/0.1.0")
+        .user_agent(concat!("sing-box-win/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
     let resp = client.get(GITHUB_API).send().await?;
+
+    // Detect rate limit (HTTP 403 or 429)
+    if resp.status() == reqwest::StatusCode::FORBIDDEN
+        || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+    {
+        // Try to read reset time from headers
+        let reset_hint = resp
+            .headers()
+            .get("X-RateLimit-Reset")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|reset_ts| {
+                let wait = reset_ts.saturating_sub(unix_now());
+                let mins = wait / 60;
+                if mins > 0 {
+                    format!("，请 {} 分钟后重试", mins)
+                } else {
+                    "，请稍后重试".to_string()
+                }
+            })
+            .unwrap_or_else(|| "，请稍后重试".to_string());
+
+        return Err(anyhow!(
+            "GitHub API 请求频率超限（未认证 IP 每小时限 60 次）{}",
+            reset_hint
+        ));
+    }
+
     if !resp.status().is_success() {
         return Err(anyhow!("GitHub API 请求失败: HTTP {}", resp.status()));
     }
 
     let body: serde_json::Value = resp.json().await?;
+
+    // Check for GitHub error message in body
+    if let Some(msg) = body["message"].as_str() {
+        if msg.to_lowercase().contains("rate limit") {
+            return Err(anyhow!(
+                "GitHub API 请求频率超限（未认证 IP 每小时限 60 次），请稍后重试"
+            ));
+        }
+        return Err(anyhow!("GitHub API 错误: {}", msg));
+    }
 
     let version = body["tag_name"]
         .as_str()
@@ -58,12 +143,15 @@ pub async fn fetch_latest_release() -> Result<ReleaseInfo> {
         .ok_or_else(|| anyhow!("未找到 Windows x64 下载链接"))?
         .to_string();
 
-    Ok(ReleaseInfo {
+    let release = ReleaseInfo {
         version,
         published_at,
         release_notes,
         download_url,
-    })
+    };
+
+    save_cache(&release);
+    Ok(release)
 }
 
 /// Download and install sing-box binary with progress events
@@ -78,7 +166,7 @@ pub async fn download_singbox(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
-        .user_agent("sing-box-win/0.1.0")
+        .user_agent(concat!("sing-box-win/", env!("CARGO_PKG_VERSION")))
         .build()?;
 
     let resp = client.get(&download_url).send().await?;
