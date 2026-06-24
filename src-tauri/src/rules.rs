@@ -425,7 +425,9 @@ pub fn save_rules(rules: &[RouteRule]) -> Result<()> {
     Ok(())
 }
 
-/// Convert RouteRule list to sing-box route.rules JSON array
+/// Convert RouteRule list to sing-box route.rules JSON array.
+/// Kept as a reusable converter; `build_singbox_config` currently inlines an
+/// equivalent (more tailored) transform, so this is not wired in by default.
 #[allow(dead_code)]
 pub fn rules_to_singbox(rules: &[RouteRule]) -> Vec<serde_json::Value> {
     use serde_json::json;

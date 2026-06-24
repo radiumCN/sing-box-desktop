@@ -58,11 +58,11 @@ onMounted(() => {
       <!-- Global proxy status (read-only; controlled from the dashboard switches) -->
       <div
         class="proxy-status"
-        :class="store.status.running ? 'running' : 'stopped'"
-        :title="store.status.running ? '代理运行中（在仪表盘控制开关）' : '代理已停止（在仪表盘控制开关）'"
+        :class="store.proxying ? 'running' : 'stopped'"
+        :title="store.proxying ? '代理已连接（在仪表盘控制开关）' : '代理未连接（在仪表盘控制开关）'"
       >
-        <span class="status-dot" :class="{ running: store.status.running }" />
-        <span>{{ store.status.running ? "运行中" : "已停止" }}</span>
+        <span class="status-dot" :class="{ running: store.proxying }" />
+        <span>{{ store.proxying ? "已连接" : "未连接" }}</span>
       </div>
 
       <button

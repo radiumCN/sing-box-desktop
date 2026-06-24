@@ -22,11 +22,17 @@ fn sync_tray_checks(
     sys_item: &tauri::menu::CheckMenuItem<tauri::Wry>,
     tun_item: &tauri::menu::CheckMenuItem<tauri::Wry>,
 ) {
+    // With the persistent-core model the core is almost always running, so the checks
+    // must reflect the actual *proxying* state: the system proxy registry toggle and
+    // whether the running core is in TUN mode — not merely whether the core is up.
     let state = app.state::<AppState>();
-    let running = state.singbox_state.lock().unwrap().running;
-    let tun = state.app_config.lock().unwrap().tun_enabled;
-    let _ = sys_item.set_checked(running && !tun);
-    let _ = tun_item.set_checked(running && tun);
+    let in_tun = {
+        let s = state.singbox_state.lock().unwrap();
+        s.running && s.tun_mode
+    };
+    let sys_on = crate::proxy::get_system_proxy_status();
+    let _ = sys_item.set_checked(sys_on && !in_tun);
+    let _ = tun_item.set_checked(in_tun);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -105,6 +111,17 @@ pub fn run() {
                 if close_to_tray {
                     api.prevent_close();
                     let _ = window.hide();
+                } else {
+                    // Real exit: tear down the persistent core and clear the system proxy
+                    // first (otherwise the registry would keep pointing at a dead port and
+                    // break connectivity). Prevent the default close, clean up, then exit.
+                    api.prevent_close();
+                    let app_c = window.app_handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        let state = app_c.state::<AppState>();
+                        crate::commands::shutdown_core(state.inner()).await;
+                        std::process::exit(0);
+                    });
                 }
             }
         })
@@ -131,37 +148,39 @@ pub fn run() {
                 }
             }
 
-            // Restore proxy state if configured
+            // Persistent core: start sing-box on launch so toggling the proxy later is
+            // instant. An idle core (mixed inbound only, no system proxy, no TUN) has no
+            // effect on the system network. If the user had a proxy running last session
+            // and enabled "restore on startup", re-apply that exact mode; otherwise start
+            // idle. The core is torn down on app exit (quit / window-close handlers).
             {
                 let cfg = crate::config::load_app_config();
-                if cfg.restore_proxy_on_startup && cfg.last_proxy_running {
-                    let handle = app.handle().clone();
-                    let outbounds = app.state::<AppState>().outbounds.lock().unwrap().clone();
-                    let nodes = app.state::<AppState>().nodes.lock().unwrap().clone();
-                    let active_tag = cfg.active_nodes.get("proxy").cloned();
-                    let mixed_port = cfg.mixed_port;
-                    let restore_sys_proxy = cfg.last_system_proxy;
-                    let singbox_state = app.state::<AppState>().singbox_state.clone();
-                    let config_path = crate::config::singbox_config_path();
-                    let singbox_cfg = crate::subscription::build_singbox_config(
-                        &outbounds, &cfg, active_tag.as_deref(), &nodes,
-                    );
-                    let _ = std::fs::write(
-                        &config_path,
-                        serde_json::to_string_pretty(&singbox_cfg).unwrap(),
-                    );
-                    tauri::async_runtime::spawn(async move {
-                        // Small delay to let the window/tray finish initializing
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        if let Ok(()) = crate::singbox::start_singbox(
-                            &handle, &config_path, singbox_state,
-                        ).await {
-                            if restore_sys_proxy {
-                                let _ = crate::proxy::set_system_proxy(true, mixed_port);
-                            }
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    // Small delay to let the window/tray finish initializing.
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    let state = handle.state::<AppState>();
+                    let restore = cfg.restore_proxy_on_startup && cfg.last_proxy_running;
+                    if restore {
+                        let mode = if cfg.last_system_proxy {
+                            "system"
+                        } else if cfg.tun_enabled {
+                            "tun"
+                        } else {
+                            "system"
+                        };
+                        // Fall back to an idle core if restoring the saved mode fails
+                        // (e.g. TUN without admin rights this session).
+                        if crate::commands::apply_connection_mode(&handle, state.inner(), mode)
+                            .await
+                            .is_err()
+                        {
+                            let _ = crate::commands::start_idle_core(&handle, state.inner()).await;
                         }
-                    });
-                }
+                    } else {
+                        let _ = crate::commands::start_idle_core(&handle, state.inner()).await;
+                    }
+                });
             }
 
             // Spawn sing-box binary auto-update checker
@@ -285,9 +304,7 @@ pub fn run() {
                             let app_c = app.clone();
                             tauri::async_runtime::spawn(async move {
                                 let state = app_c.state::<AppState>();
-                                let sb_state = state.singbox_state.clone();
-                                let _ = crate::singbox::stop_singbox(sb_state).await;
-                                let _ = crate::proxy::set_system_proxy(false, 0);
+                                crate::commands::shutdown_core(state.inner()).await;
                                 std::process::exit(0);
                             });
                         }
@@ -315,6 +332,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::cmd_start_singbox,
             commands::cmd_stop_singbox,
+            commands::cmd_set_connection_mode,
             commands::cmd_get_singbox_status,
             commands::cmd_get_logs,
             commands::cmd_get_subscriptions,
