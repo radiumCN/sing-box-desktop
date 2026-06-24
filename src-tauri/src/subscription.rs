@@ -627,29 +627,90 @@ pub fn build_singbox_config(
     ];
     all_outbounds.extend_from_slice(&clean_outbounds);
 
+    // ── Rule-sets ──────────────────────────────────────────────────────
+    // Prefer the locally bundled .srs files (copied to the app data dir on
+    // startup). They work offline and in regions where jsDelivr/GitHub are
+    // blocked. If a file is somehow missing, fall back to downloading it
+    // THROUGH THE PROXY (download_detour: "proxy"), which is reachable once the
+    // tunnel is up — never via "direct", which fails behind the GFW.
+    let rule_set_entry = |tag: &str, file: &str, url: &str| -> Value {
+        let path = crate::config::rule_sets_dir().join(file);
+        if path.exists() {
+            json!({
+                "type": "local",
+                "tag": tag,
+                "format": "binary",
+                "path": path.to_string_lossy().replace('\\', "/")
+            })
+        } else {
+            json!({
+                "type": "remote",
+                "tag": tag,
+                "format": "binary",
+                "url": url,
+                "download_detour": "proxy",
+                "update_interval": "7d"
+            })
+        }
+    };
+    let geosite_cn_rs = rule_set_entry(
+        "geosite-cn", "geosite-cn.srs",
+        "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-cn.srs",
+    );
+    let geoip_cn_rs = rule_set_entry(
+        "geoip-cn", "geoip-cn.srs",
+        "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
+    );
+
+    // Proxy server entry hostnames MUST resolve to their real IP (never fake-ip),
+    // otherwise the dialer cannot reach the node. Collect non-IP server fields.
+    let server_domains: Vec<Value> = outbounds.iter()
+        .filter_map(|ob| ob.get("server").and_then(|s| s.as_str()))
+        .filter(|s| s.parse::<std::net::IpAddr>().is_err())
+        .map(|s| Value::String(s.to_string()))
+        .collect();
+
+    // DNS routing rules (order matters — first match wins):
+    //   1. proxy node hostnames  → real IP (so the dialer can reach the node)
+    //   2. CN domains            → real IP via the local resolver (direct, fast)
+    //   3. EVERYTHING ELSE A/AAAA → fake IP, so the EXIT node performs the real
+    //      lookup (correct CDN edge ⇒ full node speed, no per-connection DoT).
+    // Non-A/AAAA queries (HTTPS/SVCB/PTR…) fall through to `final: dns_local`.
+    //
+    // The previous design only handed a fake IP to domains explicitly present in
+    // the geosite-geolocation-noncn list, so any foreign domain NOT in that list
+    // (e.g. proof.its-paris.scaleway.com) fell back to the China resolver, got a
+    // wrong/unreachable IP and could not be opened. A catch-all fake-ip rule
+    // ("not CN ⇒ fake IP") removes that whole class of failures.
+    let mut dns_rules: Vec<Value> = Vec::new();
+    if !server_domains.is_empty() {
+        dns_rules.push(json!({ "domain": server_domains, "server": "dns_local" }));
+    }
+    dns_rules.push(json!({ "rule_set": "geosite-cn", "server": "dns_local" }));
+    dns_rules.push(json!({
+        "query_type": ["A", "AAAA"],
+        "server": "dns_fakeip"
+    }));
+
     let mut cfg = json!({
         "log": { "level": config.log_level, "timestamp": true },
         "dns": {
             "servers": [
                 {
-                    "type": "tls",
-                    "tag": "google",
-                    "server": "8.8.8.8",
-                    "detour": "proxy"
+                    "type": "udp",
+                    "tag": "dns_local",
+                    "server": "223.5.5.5"
                 },
                 {
-                    "type": "udp",
-                    "tag": "local",
-                    "server": "223.5.5.5"
+                    "type": "fakeip",
+                    "tag": "dns_fakeip",
+                    "inet4_range": "198.18.0.0/15"
                 }
             ],
-            "rules": [
-                { "clash_mode": "Direct", "server": "local" },
-                { "clash_mode": "Global", "server": "google" },
-                { "rule_set": "geosite-cn", "server": "local" }
-            ],
-            "final": "google",
-            "strategy": "prefer_ipv4"
+            "rules": dns_rules,
+            "final": "dns_local",
+            "strategy": "ipv4_only",
+            "independent_cache": true
         },
         "inbounds": [
             {
@@ -662,34 +723,17 @@ pub fn build_singbox_config(
         ],
         "outbounds": all_outbounds,
         "route": {
-            "default_domain_resolver": "local",
+            "default_domain_resolver": "dns_local",
             "rules": [
                 { "action": "sniff" },
                 { "protocol": ["dns"], "action": "hijack-dns" },
+                { "ip_is_private": true, "outbound": "direct" },
                 { "clash_mode": "Direct", "outbound": "direct" },
                 { "clash_mode": "Global", "outbound": "proxy" },
-                { "ip_is_private": true, "outbound": "direct" },
                 { "rule_set": ["geosite-cn"], "outbound": "direct" },
                 { "rule_set": ["geoip-cn"], "outbound": "direct" }
             ],
-            "rule_set": [
-                {
-                    "tag": "geosite-cn",
-                    "type": "remote",
-                    "format": "binary",
-                    "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geosite@rule-set/geosite-cn.srs",
-                    "download_detour": "direct",
-                    "update_interval": "7d"
-                },
-                {
-                    "tag": "geoip-cn",
-                    "type": "remote",
-                    "format": "binary",
-                    "url": "https://cdn.jsdelivr.net/gh/SagerNet/sing-geoip@rule-set/geoip-cn.srs",
-                    "download_detour": "direct",
-                    "update_interval": "7d"
-                }
-            ],
+            "rule_set": [ geosite_cn_rs, geoip_cn_rs ],
             "final": "proxy",
             "auto_detect_interface": true
         },
@@ -698,6 +742,13 @@ pub fn build_singbox_config(
                 "external_controller": format!("127.0.0.1:{}", config.api_port),
                 "external_ui": "ui",
                 "secret": ""
+            },
+            /* Persist routing/fake-ip state across restarts. store_fakeip keeps the
+               domain↔fake-IP mapping stable so long-lived connections survive a
+               proxy restart instead of resolving to a stale address. */
+            "cache_file": {
+                "enabled": true,
+                "store_fakeip": true
             }
         }
     });

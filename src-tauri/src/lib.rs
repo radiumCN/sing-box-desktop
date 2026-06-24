@@ -77,6 +77,28 @@ pub fn run() {
             tun_item:       Mutex::new(None),
         })
         .setup(|app| {
+            // Copy bundled rule-set (.srs) files into the app data dir so the
+            // generated sing-box config can reference them by absolute path.
+            // This makes CN/non-CN routing work offline and behind the GFW,
+            // where the previous remote (jsDelivr) download always failed.
+            {
+                let _ = crate::config::ensure_dirs();
+                if let Ok(res_dir) = app.path().resource_dir() {
+                    let src_dir = res_dir.join("resources").join("rule-sets");
+                    let dst_dir = crate::config::rule_sets_dir();
+                    for name in [
+                        "geoip-cn.srs",
+                        "geosite-cn.srs",
+                        "geosite-geolocation-noncn.srs",
+                    ] {
+                        let src = src_dir.join(name);
+                        if src.exists() {
+                            let _ = std::fs::copy(&src, dst_dir.join(name));
+                        }
+                    }
+                }
+            }
+
             // Restore proxy state if configured
             {
                 let cfg = crate::config::load_app_config();
@@ -170,8 +192,20 @@ pub fn run() {
             let sys_proxy_item_c = sys_proxy_item.clone();
             let tun_item_c = tun_item.clone();
 
+            // macOS menu-bar requires a monochrome *template* icon: it uses only the
+            // alpha channel and auto-inverts with light/dark menu bars. The full-color
+            // app icon (dark) was invisible on a dark menu bar — hence "no tray icon".
+            // Other platforms keep the colored window icon.
+            #[cfg(target_os = "macos")]
+            let tray_icon = tauri::image::Image::from_bytes(
+                include_bytes!("../icons/tray-template.png")
+            ).expect("无效的托盘模板图标");
+            #[cfg(not(target_os = "macos"))]
+            let tray_icon = app.default_window_icon().unwrap().clone();
+
             let tray = TrayIconBuilder::with_id("tray-main")
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tray_icon)
+                .icon_as_template(cfg!(target_os = "macos"))
                 .tooltip("sing-box-win\n● 已停止")
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false) // left click = show window; right click = menu
