@@ -17,9 +17,10 @@
         "height": 640,
         "minWidth": 800,
         "minHeight": 540,
-        "decorations": false,
+        "decorations": true,
         "transparent": false,
-        "resizable": true,
+        "resizable": false,
+        "maximizable": false,
         "center": true,
         "devtools": false,
         "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu --disable-gpu-compositing --disable-software-rasterizer"

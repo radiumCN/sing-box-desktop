@@ -51,53 +51,15 @@ async function toggleTun() {
   await store.setConnectionMode(tunOn.value ? "off" : "tun");
   await fetchSystemProxy();
 }
-const uploadSpeed = ref(0);
-const downloadSpeed = ref(0);
-const totalUpload = ref(0);
-const totalDownload = ref(0);
+// Live speed and cumulative totals are tracked globally by the store's traffic
+// monitor (sourced from the Clash API), so they keep accruing regardless of which
+// page is open. The dashboard is a pure viewer of those values.
+const uploadSpeed = computed(() => store.uploadSpeed);
+const downloadSpeed = computed(() => store.downloadSpeed);
+const totalUpload = computed(() => store.totalUpload);
+const totalDownload = computed(() => store.totalDownload);
 const memoryUsage = ref<number | null>(null);
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-
-// ── Traffic WebSocket (Clash-compatible API: /traffic) ─────────────────────
-let trafficWs: WebSocket | null = null;
-let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
-function connectTrafficWs() {
-  if (trafficWs && trafficWs.readyState === WebSocket.OPEN) return;
-  // Clean up any previous socket without triggering its onclose reconnect
-  if (trafficWs) { trafficWs.onclose = null; trafficWs.close(); trafficWs = null; }
-  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
-
-  const port = store.config.api_port || 9090;
-  const ws = new WebSocket(`ws://127.0.0.1:${port}/traffic`);
-  trafficWs = ws;
-
-  ws.onmessage = (event) => {
-    try {
-      const { up, down } = JSON.parse(event.data as string) as { up: number; down: number };
-      uploadSpeed.value = up;
-      downloadSpeed.value = down;
-      totalUpload.value += up;
-      totalDownload.value += down;
-      store.addTrafficPoint(up, down);
-    } catch (_) {}
-  };
-
-  ws.onerror = () => {};
-
-  ws.onclose = () => {
-    if (trafficWs === ws) trafficWs = null;
-    // Auto-reconnect while the proxy is still running
-    if (store.status.running) {
-      wsReconnectTimer = setTimeout(connectTrafficWs, 2000);
-    }
-  };
-}
-
-function disconnectTrafficWs() {
-  if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
-  if (trafficWs) { trafficWs.onclose = null; trafficWs.close(); trafficWs = null; }
-}
 
 const chartLabels = computed(() =>
   store.trafficHistory.map((_, i) => (i === store.trafficHistory.length - 1 ? "now" : ""))
@@ -181,52 +143,32 @@ onMounted(async () => {
   await nextTick();
   systemProxyReady.value = true;
 
-  // Shared poller keeps the active auto group's current node up to date.
+  // Shared pollers (status + active node + traffic totals) run at app scope.
   store.ensureActiveNowPoller();
-
-  // If proxy is already running on mount (e.g. restored from last session), connect immediately.
-  if (store.status.running) connectTrafficWs();
+  store.ensureTrafficPoller();
 
   let lastRunning = store.status.running;
 
   pollTimer = setInterval(async () => {
-    await store.fetchStatus();
     // Always sync system proxy — avoids the timing race where the watcher fired
     // before the backend finished setting the proxy on auto-restore startup.
     fetchSystemProxy();
 
-    // React to proxy start/stop transitions.
+    // React to proxy start/stop transitions (tray tooltip only — traffic/totals
+    // are handled by the store's global traffic monitor).
     if (store.status.running !== lastRunning) {
       lastRunning = store.status.running;
       store.updateTrayTooltip();
-
-      if (store.status.running) {
-        // Reset session totals and open the traffic WebSocket.
-        totalUpload.value = 0;
-        totalDownload.value = 0;
-        store.clearTrafficHistory();
-        connectTrafficWs();
-      } else {
-        disconnectTrafficWs();
-        uploadSpeed.value = 0;
-        downloadSpeed.value = 0;
-      }
     }
 
-    if (store.status.running) {
-      memoryUsage.value = await invoke<number | null>("cmd_get_memory_usage").catch(() => null);
-      // The active auto group's current node is refreshed by the store's shared poller.
-      // Traffic data (uploadSpeed / downloadSpeed / totals) are driven by the
-      // WebSocket above — no polling needed here.
-    } else {
-      memoryUsage.value = null;
-    }
+    memoryUsage.value = store.status.running
+      ? await invoke<number | null>("cmd_get_memory_usage").catch(() => null)
+      : null;
   }, 1000);
 });
 
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer);
-  disconnectTrafficWs();
 });
 </script>
 
@@ -234,12 +176,6 @@ onUnmounted(() => {
   <div class="page">
     <div class="page-header">
       <h1 class="page-title">仪表盘</h1>
-      <div class="header-actions">
-        <span class="badge" :class="store.status.running ? 'badge-green' : 'badge-gray'">
-          <span class="dot" :class="store.status.running ? 'dot-green' : ''" />
-          {{ store.status.running ? "运行中" : "已停止" }}
-        </span>
-      </div>
     </div>
 
     <!-- Error Banner (top, prominent) -->
@@ -261,10 +197,6 @@ onUnmounted(() => {
             <div class="control-value">{{ connectionLabel }}</div>
           </div>
         </div>
-        <span class="badge" :class="store.status.running ? 'badge-green' : 'badge-gray'">
-          <span class="dot" :class="store.status.running ? 'dot-green' : ''" />
-          {{ store.status.running ? "运行中" : "已停止" }}
-        </span>
       </div>
 
       <!-- Active Node -->
@@ -411,13 +343,13 @@ onUnmounted(() => {
         <ArrowUp :size="16" />
         <span class="traffic-label">上传速率</span>
         <span class="traffic-value">{{ formatBytes(uploadSpeed) }}/s</span>
-        <span class="traffic-total">总计: {{ formatBytes(totalUpload) }}</span>
+        <span class="traffic-total">启动后累计: {{ formatBytes(totalUpload) }}</span>
       </div>
       <div class="card traffic-stat download">
         <ArrowDown :size="16" />
         <span class="traffic-label">下载速率</span>
         <span class="traffic-value">{{ formatBytes(downloadSpeed) }}/s</span>
-        <span class="traffic-total">总计: {{ formatBytes(totalDownload) }}</span>
+        <span class="traffic-total">启动后累计: {{ formatBytes(totalDownload) }}</span>
       </div>
     </div>
 

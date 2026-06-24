@@ -102,6 +102,12 @@ export const useAppStore = defineStore("app", () => {
     auto_tolerance: 50,
   });
   const trafficHistory = ref<TrafficPoint[]>([]);
+  // Cumulative bytes since the core started (authoritative, from the Clash API).
+  const totalUpload = ref(0);
+  const totalDownload = ref(0);
+  // Live speed in bytes/s, derived from the per-second delta of the totals above.
+  const uploadSpeed = ref(0);
+  const downloadSpeed = ref(0);
   const loading = ref(false);
   const error = ref<string | null>(null);
   // Concrete node currently picked by the active auto (urltest) group.
@@ -164,6 +170,7 @@ export const useAppStore = defineStore("app", () => {
     try {
       await invoke("cmd_start_singbox");
       await fetchStatus();
+      resetTrafficStats();
       updateTrayTooltip();
       // Only enable Windows system proxy when TUN is NOT active.
       // TUN mode captures traffic at the network layer — system proxy is redundant and
@@ -234,6 +241,7 @@ export const useAppStore = defineStore("app", () => {
       }
       await invoke("cmd_start_singbox"); // throws on failure (e.g. TUN needs admin)
       await fetchStatus();
+      resetTrafficStats();
 
       // System proxy and TUN are mutually exclusive routing paths.
       await invoke("cmd_set_system_proxy", { enabled: !wantTun }).catch(() => {});
@@ -382,6 +390,89 @@ export const useAppStore = defineStore("app", () => {
     activeNowTimer = setInterval(refreshActiveNow, 3000);
   }
 
+  // ── Global traffic monitor ─────────────────────────────────────────────────
+  // The cumulative totals come straight from the core (Clash API /connections
+  // totals), so they count ALL traffic since the proxy service started and keep
+  // counting no matter which page is open — fixing the old behaviour where totals
+  // only accrued while the dashboard was visible. Live speed is the per-second
+  // delta. The core resets its counters on restart, so a drop in the cumulative
+  // value is treated as a fresh baseline rather than a (nonsensical) negative speed.
+  let trafficTimer: ReturnType<typeof setInterval> | null = null;
+  let lastUpTotal = 0;
+  let lastDownTotal = 0;
+  let trafficWasRunning = false;
+
+  async function pollTraffic() {
+    // Refresh status here so the monitor reacts to start/stop from anywhere
+    // (dashboard, tray, auto-restore) without depending on a mounted page.
+    await fetchStatus();
+
+    if (!status.value.running) {
+      if (trafficWasRunning) {
+        uploadSpeed.value = 0;
+        downloadSpeed.value = 0;
+        totalUpload.value = 0;
+        totalDownload.value = 0;
+        lastUpTotal = 0;
+        lastDownTotal = 0;
+        trafficWasRunning = false;
+      }
+      return;
+    }
+
+    // Transition stopped → running: reset baseline and chart for a clean session.
+    if (!trafficWasRunning) {
+      lastUpTotal = 0;
+      lastDownTotal = 0;
+      clearTrafficHistory();
+      trafficWasRunning = true;
+    }
+
+    let up = 0;
+    let down = 0;
+    try {
+      const t = await invoke<{ upload: number; download: number }>("cmd_get_traffic_total");
+      up = t.upload;
+      down = t.download;
+    } catch {
+      // Keep last good values on a transient API hiccup.
+      return;
+    }
+
+    // Clamp negatives caused by a core counter reset.
+    const upDelta = up >= lastUpTotal ? up - lastUpTotal : up;
+    const downDelta = down >= lastDownTotal ? down - lastDownTotal : down;
+    lastUpTotal = up;
+    lastDownTotal = down;
+
+    uploadSpeed.value = upDelta;
+    downloadSpeed.value = downDelta;
+    totalUpload.value = up;
+    totalDownload.value = down;
+    addTrafficPoint(upDelta, downDelta);
+  }
+
+  function ensureTrafficPoller() {
+    if (trafficTimer) return;
+    pollTraffic();
+    trafficTimer = setInterval(pollTraffic, 1000);
+  }
+
+  // Immediately clear cumulative stats, live speed, the chart and the monitor's
+  // baseline. Called on every (re)start of the core so a new proxy session always
+  // begins counting from zero instead of inheriting the previous session's totals.
+  function resetTrafficStats() {
+    totalUpload.value = 0;
+    totalDownload.value = 0;
+    uploadSpeed.value = 0;
+    downloadSpeed.value = 0;
+    lastUpTotal = 0;
+    lastDownTotal = 0;
+    clearTrafficHistory();
+    // Align the monitor's running flag so its transition logic won't double-reset.
+    trafficWasRunning = status.value.running;
+  }
+
   async function fetchConfig() {
     config.value = await invoke<AppConfig>("cmd_get_app_config");
   }
@@ -422,6 +513,7 @@ export const useAppStore = defineStore("app", () => {
         await invoke("cmd_stop_singbox");
         await invoke("cmd_start_singbox");
         await fetchStatus();
+        resetTrafficStats();
         updateTrayTooltip();
       } catch (e) {
         error.value = String(e);
@@ -460,6 +552,9 @@ export const useAppStore = defineStore("app", () => {
       console.error("autostart reconcile failed:", e);
     }
     updateTrayTooltip();
+    // Start the app-lifetime traffic monitor so cumulative stats are tracked
+    // regardless of which page the user is viewing.
+    ensureTrafficPoller();
   }
 
   return {
@@ -468,6 +563,10 @@ export const useAppStore = defineStore("app", () => {
     nodes,
     config,
     trafficHistory,
+    totalUpload,
+    totalDownload,
+    uploadSpeed,
+    downloadSpeed,
     loading,
     error,
     activeNode,
@@ -490,6 +589,7 @@ export const useAppStore = defineStore("app", () => {
     activeNodeNow,
     refreshActiveNow,
     ensureActiveNowPoller,
+    ensureTrafficPoller,
     testGroupDelay,
     testNodeLatency,
     testNodeSpeed,

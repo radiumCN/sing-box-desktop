@@ -90,6 +90,24 @@ pub fn run() {
             sys_proxy_item: Mutex::new(None),
             tun_item:       Mutex::new(None),
         })
+        /* With the native title bar, the window's close button fires CloseRequested
+           directly. Honor the user's "close to tray" preference here so the behavior
+           matches the old self-drawn close button on every platform: hide instead of
+           quit when enabled, otherwise let the window close normally. */
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let close_to_tray = window
+                    .state::<AppState>()
+                    .app_config
+                    .lock()
+                    .unwrap()
+                    .close_to_tray;
+                if close_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .setup(|app| {
             // Copy bundled rule-set (.srs) files into the app data dir so the
             // generated sing-box config can reference them by absolute path.
@@ -314,6 +332,7 @@ pub fn run() {
             commands::cmd_save_app_config,
             commands::cmd_set_proxy_mode,
             commands::cmd_get_connections,
+            commands::cmd_get_traffic_total,
             commands::cmd_parse_subscription_from_text,
             commands::cmd_check_singbox_update,
             commands::cmd_get_installed_version,

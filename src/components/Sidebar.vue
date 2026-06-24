@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted } from "vue";
+import { ref, onMounted } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import {
   Home,
@@ -31,10 +31,6 @@ const navItems = [
 
 const isActive = (path: string) => route.path === path;
 
-const statusColor = computed(() =>
-  store.status.running ? "#107c10" : "#9e9e9e"
-);
-
 onMounted(() => {
   listen<{ version: string }>("singbox-update-available", (e) => {
     hasUpdate.value = true;
@@ -59,13 +55,13 @@ onMounted(() => {
     </div>
 
     <div class="sidebar-footer">
-      <!-- Proxy status (read-only; controlled from the dashboard switches) -->
+      <!-- Global proxy status (read-only; controlled from the dashboard switches) -->
       <div
         class="proxy-status"
         :class="store.status.running ? 'running' : 'stopped'"
         :title="store.status.running ? '代理运行中（在仪表盘控制开关）' : '代理已停止（在仪表盘控制开关）'"
       >
-        <div class="toggle-indicator" :style="{ background: statusColor }" />
+        <span class="status-dot" :class="{ running: store.status.running }" />
         <span>{{ store.status.running ? "运行中" : "已停止" }}</span>
       </div>
 
@@ -148,12 +144,21 @@ onMounted(() => {
   width: 100%;
 }
 .proxy-status.running { color: #107c10; }
-.toggle-indicator {
+.status-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
+  background: #9e9e9e;
   transition: background 0.3s;
+}
+.status-dot.running {
+  background: #107c10;
+  animation: status-pulse 2s infinite;
+}
+@keyframes status-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
 }
 .icon-wrap { position: relative; display: flex; align-items: center; }
 .update-dot {

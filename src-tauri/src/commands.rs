@@ -760,6 +760,57 @@ pub async fn cmd_get_connections(
         .map_err(|e| e.to_string())
 }
 
+/* Cumulative traffic counters reported by the Clash API, in bytes. The core keeps
+   these from the moment it starts, so they represent ALL traffic since the proxy
+   service started — independent of which UI page is open. They reset to zero each
+   time the core restarts. */
+#[derive(serde::Serialize, Default)]
+pub struct TrafficTotal {
+    pub upload: u64,
+    pub download: u64,
+}
+
+/// Returns total upload/download bytes since the sing-box core started by reading
+/// the top-level `uploadTotal`/`downloadTotal` of the Clash `/connections` endpoint.
+/// Returns zeros when the core is not running or the query fails.
+#[tauri::command]
+pub async fn cmd_get_traffic_total(
+    state: State<'_, AppState>,
+) -> Result<TrafficTotal, String> {
+    let (api_port, running) = {
+        let cfg = state.app_config.lock().unwrap();
+        let running = state.singbox_state.lock().unwrap().running;
+        (cfg.api_port, running)
+    };
+    if !running {
+        return Ok(TrafficTotal::default());
+    }
+
+    let url = format!("http://127.0.0.1:{}/connections", api_port);
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return Ok(TrafficTotal::default()),
+    };
+
+    /* Best-effort: a transient API hiccup should not surface as a hard error in the
+       UI — fall back to zeros so the poller simply keeps the last good display. */
+    let body: Value = match client.get(&url).send().await {
+        Ok(resp) => match resp.json().await {
+            Ok(v) => v,
+            Err(_) => return Ok(TrafficTotal::default()),
+        },
+        Err(_) => return Ok(TrafficTotal::default()),
+    };
+
+    Ok(TrafficTotal {
+        upload: body["uploadTotal"].as_u64().unwrap_or(0),
+        download: body["downloadTotal"].as_u64().unwrap_or(0),
+    })
+}
+
 #[tauri::command]
 pub fn cmd_parse_subscription_from_text(
     content: String,
