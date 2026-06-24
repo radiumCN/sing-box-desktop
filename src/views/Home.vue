@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, nextTick, onMounted, onUnmounted, computed } from "vue";
 import {
-  Play, Square, Wifi, WifiOff, ArrowUp, ArrowDown,
+  Wifi, WifiOff, ArrowUp, ArrowDown,
   Filter, Zap, Server, Clock, Globe, Shield
 } from "@lucide/vue";
 import { Line } from "vue-chartjs";
@@ -27,30 +27,29 @@ async function fetchSystemProxy() {
   systemProxyEnabled.value = await invoke<boolean>("cmd_get_system_proxy_status");
 }
 
+// The two mutually-exclusive connection switches. Each derives its on-state from
+// the actual runtime status so the UI always mirrors reality.
+const systemProxyOn = computed(
+  () => store.status.running && systemProxyEnabled.value && !store.config.tun_enabled
+);
+const tunOn = computed(() => store.status.running && store.config.tun_enabled);
+
+// What the proxy-status card shows as the active routing method.
+const connectionLabel = computed(() => {
+  if (!store.status.running) return "未运行";
+  if (store.config.tun_enabled) return "TUN 模式";
+  if (systemProxyEnabled.value) return "系统代理";
+  return "运行中";
+});
+
 async function toggleSystemProxy() {
-  const next = !systemProxyEnabled.value;
-  try {
-    if (next && !store.status.running) {
-      // Start sing-box first when user enables system proxy while it's stopped.
-      // startProxy() also calls cmd_set_system_proxy internally so we're done after this.
-      await store.startProxy();
-      await fetchSystemProxy();
-      return;
-    }
-    if (!next && store.status.running && !store.config.tun_enabled) {
-      // When disabling system proxy and TUN is also off, stop sing-box entirely
-      // so we don't leave an orphaned listener on the mixed port.
-      await store.stopProxy();
-      await fetchSystemProxy();
-      return;
-    }
-    // sing-box already in the desired state — just flip the system proxy flag
-    await invoke("cmd_set_system_proxy", { enabled: next });
-    systemProxyEnabled.value = next;
-    invoke("cmd_sync_tray_menu", { sysProxyEnabled: next, tunEnabled: store.config.tun_enabled ?? false }).catch(() => {});
-  } catch (e) {
-    store.error = String(e);
-  }
+  await store.setConnectionMode(systemProxyOn.value ? "off" : "system");
+  await fetchSystemProxy();
+}
+
+async function toggleTun() {
+  await store.setConnectionMode(tunOn.value ? "off" : "tun");
+  await fetchSystemProxy();
 }
 const uploadSpeed = ref(0);
 const downloadSpeed = ref(0);
@@ -176,21 +175,6 @@ const proxyModeLabel = computed(() => {
   return map[store.config.proxy_mode] ?? store.config.proxy_mode;
 });
 
-// When TUN mode is active and sing-box is running, system proxy is irrelevant.
-// TUN captures traffic at the network layer, no WinHTTP proxy needed.
-const tunProxying = computed(() =>
-  store.config.tun_enabled && store.status.running
-);
-
-async function toggleProxy() {
-  if (store.status.running) {
-    await store.stopProxy();
-  } else {
-    await store.startProxy();
-  }
-  await fetchSystemProxy();
-}
-
 onMounted(async () => {
   // Fetch the real state first, then enable transitions to avoid the initial "flash" animation.
   await fetchSystemProxy();
@@ -266,7 +250,7 @@ onUnmounted(() => {
 
     <!-- Quick Controls -->
     <div class="quick-grid">
-      <!-- Start/Stop Card -->
+      <!-- Proxy Status Card (driven by the two switches below) -->
       <div class="card control-card" :class="{ active: store.status.running }">
         <div class="control-info">
           <div class="control-icon" :class="store.status.running ? 'icon-green' : 'icon-gray'">
@@ -274,22 +258,13 @@ onUnmounted(() => {
           </div>
           <div>
             <div class="control-label">代理状态</div>
-            <div class="control-value">{{ store.status.running ? "运行中" : "未运行" }}</div>
+            <div class="control-value">{{ connectionLabel }}</div>
           </div>
         </div>
-        <button
-          class="btn"
-          :class="store.status.running ? 'btn-danger' : 'btn-primary'"
-          :disabled="store.loading"
-          @click="toggleProxy"
-        >
-          <component
-            :is="store.status.running ? Square : Play"
-            :size="14"
-            :class="{ spin: store.loading }"
-          />
-          {{ store.loading ? (store.status.running ? "停止中..." : "启动中...") : (store.status.running ? "停止" : "启动") }}
-        </button>
+        <span class="badge" :class="store.status.running ? 'badge-green' : 'badge-gray'">
+          <span class="dot" :class="store.status.running ? 'dot-green' : ''" />
+          {{ store.status.running ? "运行中" : "已停止" }}
+        </span>
       </div>
 
       <!-- Active Node -->
@@ -360,23 +335,24 @@ onUnmounted(() => {
         网络设置
       </div>
       <div class="net-settings-body">
-        <!-- System Proxy toggle -->
-        <div class="net-row" :class="{ 'row-dimmed': tunProxying }">
+        <!-- System Proxy toggle — starts/stops the proxy; mutually exclusive with TUN -->
+        <div class="net-row">
           <div class="net-row-left">
             <div class="net-row-icon icon-blue"><Globe :size="15" /></div>
             <div>
               <div class="net-row-label">系统代理</div>
               <div class="net-row-sub">
-                <template v-if="tunProxying">TUN 模式已接管，无需系统代理</template>
-                <template v-else>{{ systemProxyEnabled ? `127.0.0.1:${store.config.mixed_port}` : '未开启' }}</template>
+                <template v-if="systemProxyOn">{{ `127.0.0.1:${store.config.mixed_port}` }}</template>
+                <template v-else>开启即启动代理（与 TUN 互斥）</template>
               </div>
             </div>
           </div>
           <button
             class="toggle-btn"
-            :class="{ on: systemProxyEnabled && !tunProxying, 'no-anim': !systemProxyReady, 'toggle-disabled': tunProxying }"
-            @click="tunProxying ? undefined : toggleSystemProxy()"
-            :title="tunProxying ? 'TUN 模式已接管全部流量，系统代理不生效' : (systemProxyEnabled ? '关闭系统代理' : '开启系统代理')"
+            :class="{ on: systemProxyOn, 'no-anim': !systemProxyReady }"
+            :disabled="store.loading"
+            @click="toggleSystemProxy"
+            :title="systemProxyOn ? '关闭（停止代理）' : '开启系统代理并启动代理'"
           >
             <span class="toggle-knob" />
           </button>
@@ -406,19 +382,22 @@ onUnmounted(() => {
 
         <div class="net-divider" />
 
-        <!-- TUN Mode toggle -->
+        <!-- TUN Mode toggle — starts/stops the proxy; mutually exclusive with system proxy -->
         <div class="net-row">
           <div class="net-row-left">
             <div class="net-row-icon icon-orange"><Shield :size="15" /></div>
             <div>
               <div class="net-row-label">TUN 模式</div>
-              <div class="net-row-sub">{{ store.config.tun_enabled ? '虚拟网卡已启用' : '未启用，需管理员权限' }}</div>
+              <div class="net-row-sub">
+                {{ tunOn ? '虚拟网卡已启用，全局接管流量' : '开启即启动代理（需管理员，与系统代理互斥）' }}
+              </div>
             </div>
           </div>
           <button
             class="toggle-btn"
-            :class="{ on: store.config.tun_enabled }"
-            @click="async () => { const c = { ...store.config, tun_enabled: !store.config.tun_enabled }; await store.saveConfig(c); }"
+            :class="{ on: tunOn }"
+            :disabled="store.loading"
+            @click="toggleTun"
           >
             <span class="toggle-knob" />
           </button>

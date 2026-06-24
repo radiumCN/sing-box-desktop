@@ -9,7 +9,6 @@ import {
   ScrollText,
   Filter,
   Settings,
-  Power,
 } from "@lucide/vue";
 import { listen } from "@tauri-apps/api/event";
 import { useAppStore } from "../stores/app";
@@ -60,18 +59,15 @@ onMounted(() => {
     </div>
 
     <div class="sidebar-footer">
-      <!-- Quick proxy toggle -->
-      <button
-        class="proxy-toggle"
+      <!-- Proxy status (read-only; controlled from the dashboard switches) -->
+      <div
+        class="proxy-status"
         :class="store.status.running ? 'running' : 'stopped'"
-        :disabled="store.loading"
-        @click="store.status.running ? store.stopProxy() : store.startProxy()"
-        :title="store.status.running ? '停止代理' : '启动代理'"
+        :title="store.status.running ? '代理运行中（在仪表盘控制开关）' : '代理已停止（在仪表盘控制开关）'"
       >
         <div class="toggle-indicator" :style="{ background: statusColor }" />
         <span>{{ store.status.running ? "运行中" : "已停止" }}</span>
-        <Power :size="14" class="toggle-icon" />
-      </button>
+      </div>
 
       <button
         class="nav-item"
@@ -140,34 +136,24 @@ onMounted(() => {
   border-top: 1px solid var(--color-border);
   padding-top: 8px;
 }
-.proxy-toggle {
+.proxy-status {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
   border-radius: var(--radius-md);
-  border: none;
-  background: transparent;
   color: var(--color-text-secondary);
   font-size: 13px;
   font-weight: 500;
-  cursor: pointer;
   width: 100%;
-  transition: background 0.15s;
 }
-.proxy-toggle:hover { background: rgba(128,128,128,0.1); }
-.proxy-toggle:disabled { opacity: 0.6; cursor: wait; }
-.proxy-toggle.running { color: #107c10; }
+.proxy-status.running { color: #107c10; }
 .toggle-indicator {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
   transition: background 0.3s;
-}
-.toggle-icon {
-  margin-left: auto;
-  opacity: 0.6;
 }
 .icon-wrap { position: relative; display: flex; align-items: center; }
 .update-dot {

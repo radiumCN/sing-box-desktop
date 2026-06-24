@@ -121,6 +121,64 @@ pub async fn cmd_stop_singbox(
     Ok(())
 }
 
+/// Unified connection control shared by the tray menu (mirrors the dashboard's two
+/// mutually-exclusive switches). `mode` is one of:
+///   • "off"    → stop the core and clear the system proxy
+///   • "system" → run with the Windows system proxy (TUN forced off)
+///   • "tun"    → run in TUN mode (system proxy forced off)
+/// Restarts the core so the new config takes effect. On failure the TUN flag is
+/// rolled back so persisted state never diverges from what actually started.
+pub async fn apply_connection_mode(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+    mode: &str,
+) -> Result<(), String> {
+    if mode == "off" {
+        stop_singbox(state.singbox_state.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = proxy::set_system_proxy(false, 0);
+        {
+            let mut cfg = state.app_config.lock().unwrap();
+            cfg.last_proxy_running = false;
+            cfg.last_system_proxy = false;
+            let cfg_clone = cfg.clone();
+            drop(cfg);
+            let _ = config::save_app_config(&cfg_clone);
+        }
+        return Ok(());
+    }
+
+    let want_tun = mode == "tun";
+    // Persist the TUN flag first so the generated config matches the chosen mode.
+    let prev_tun = {
+        let mut cfg = state.app_config.lock().unwrap();
+        let prev = cfg.tun_enabled;
+        cfg.tun_enabled = want_tun;
+        let cfg_clone = cfg.clone();
+        drop(cfg);
+        let _ = config::save_app_config(&cfg_clone);
+        prev
+    };
+
+    // Restart the core so the new (TUN vs system) config takes effect.
+    let running = state.singbox_state.lock().unwrap().running;
+    if running {
+        let _ = stop_singbox(state.singbox_state.clone()).await;
+    }
+
+    // start_proxy_internal sets / clears the system proxy itself based on the flag.
+    if let Err(e) = start_proxy_internal(app_handle, state).await {
+        let mut cfg = state.app_config.lock().unwrap();
+        cfg.tun_enabled = prev_tun;
+        let cfg_clone = cfg.clone();
+        drop(cfg);
+        let _ = config::save_app_config(&cfg_clone);
+        return Err(e);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn cmd_get_singbox_status(
     state: State<'_, AppState>,

@@ -15,6 +15,20 @@ use tauri::menu::{CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder, Predefined
 use tauri::tray::TrayIconBuilder;
 use commands::{AppState, TrayState};
 
+/// Update both tray check items to reflect the real runtime state. The two are
+/// mutually exclusive: at most one is checked, and only while sing-box is running.
+fn sync_tray_checks(
+    app: &tauri::AppHandle,
+    sys_item: &tauri::menu::CheckMenuItem<tauri::Wry>,
+    tun_item: &tauri::menu::CheckMenuItem<tauri::Wry>,
+) {
+    let state = app.state::<AppState>();
+    let running = state.singbox_state.lock().unwrap().running;
+    let tun = state.app_config.lock().unwrap().tun_enabled;
+    let _ = sys_item.set_checked(running && !tun);
+    let _ = tun_item.set_checked(running && tun);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     config::ensure_dirs().expect("无法创建数据目录");
@@ -219,42 +233,30 @@ pub fn run() {
                             }
                         }
                         "system_proxy" => {
-                            // is_checked() reflects the NEW state after the click
+                            // is_checked() reflects the NEW state after the click.
                             let enabled = sys_proxy_item_c.is_checked().unwrap_or(false);
                             let app_c = app.clone();
-                            let sys_proxy_item_ref = sys_proxy_item_c.clone();
+                            let sys_item = sys_proxy_item_c.clone();
+                            let tun_it = tun_item_c.clone();
                             tauri::async_runtime::spawn(async move {
                                 let state = app_c.state::<AppState>();
-                                if enabled {
-                                    // TUN and system proxy are mutually exclusive. If TUN is on,
-                                    // refuse to enable system proxy and revert the checkbox.
-                                    if state.app_config.lock().unwrap().tun_enabled {
-                                        let _ = sys_proxy_item_ref.set_checked(false);
-                                        return;
-                                    }
-                                    let running = state.singbox_state.lock().unwrap().running;
-                                    if !running {
-                                        // sing-box not running: start it first (which also sets proxy)
-                                        if let Err(_) = crate::commands::start_proxy_internal(&app_c, &state).await {
-                                            // Start failed — revert the tray checkbox
-                                            let _ = sys_proxy_item_ref.set_checked(false);
-                                        }
-                                    } else {
-                                        // Already running — just enable system proxy
-                                        let port = state.app_config.lock().unwrap().mixed_port;
-                                        let _ = crate::proxy::set_system_proxy(true, port);
-                                    }
-                                } else {
-                                    let _ = crate::proxy::set_system_proxy(false, 0);
-                                }
+                                let mode = if enabled { "system" } else { "off" };
+                                let _ = crate::commands::apply_connection_mode(&app_c, &state, mode).await;
+                                sync_tray_checks(&app_c, &sys_item, &tun_it);
                             });
                         }
                         "tun_mode" => {
-                            let new_tun = tun_item_c.is_checked().unwrap_or(false);
-                            let state = app.state::<AppState>();
-                            let mut cfg = state.app_config.lock().unwrap();
-                            cfg.tun_enabled = new_tun;
-                            let _ = crate::config::save_app_config(&cfg);
+                            // is_checked() reflects the NEW state after the click.
+                            let enabled = tun_item_c.is_checked().unwrap_or(false);
+                            let app_c = app.clone();
+                            let sys_item = sys_proxy_item_c.clone();
+                            let tun_it = tun_item_c.clone();
+                            tauri::async_runtime::spawn(async move {
+                                let state = app_c.state::<AppState>();
+                                let mode = if enabled { "tun" } else { "off" };
+                                let _ = crate::commands::apply_connection_mode(&app_c, &state, mode).await;
+                                sync_tray_checks(&app_c, &sys_item, &tun_it);
+                            });
                         }
                         "quit" => {
                             // Stop sing-box and remove system proxy before exiting.

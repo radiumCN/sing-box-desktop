@@ -201,6 +201,58 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  /** Unified connection control. The dashboard exposes only two mutually-exclusive
+   *  switches — "system" proxy and "tun" — plus an implicit "off". Each call sets
+   *  the TUN flag, (re)starts the core so the matching config takes effect, and
+   *  enables/clears the Windows system proxy accordingly. On failure (e.g. TUN
+   *  without admin rights) the TUN flag is rolled back so the UI stays truthful. */
+  async function setConnectionMode(target: "system" | "tun" | "off") {
+    loading.value = true;
+    error.value = null;
+    const prevTun = config.value.tun_enabled;
+    try {
+      if (target === "off") {
+        await invoke("cmd_stop_singbox");
+        await fetchStatus();
+        activeNodeNow.value = null;
+        await invoke("cmd_set_system_proxy", { enabled: false }).catch(() => {});
+        syncTrayMenu(false, config.value.tun_enabled);
+        updateTrayTooltip();
+        return;
+      }
+
+      const wantTun = target === "tun";
+      // Persist the TUN flag first so the generated config matches the chosen mode.
+      if (config.value.tun_enabled !== wantTun) {
+        config.value.tun_enabled = wantTun;
+        await invoke("cmd_save_app_config", { newConfig: { ...config.value } });
+      }
+      // Restart the core so the new (TUN vs system) config takes effect.
+      if (status.value.running) {
+        await invoke("cmd_stop_singbox");
+        await fetchStatus();
+      }
+      await invoke("cmd_start_singbox"); // throws on failure (e.g. TUN needs admin)
+      await fetchStatus();
+
+      // System proxy and TUN are mutually exclusive routing paths.
+      await invoke("cmd_set_system_proxy", { enabled: !wantTun }).catch(() => {});
+      syncTrayMenu(!wantTun, wantTun);
+      updateTrayTooltip();
+      ensureActiveNowPoller();
+    } catch (e) {
+      error.value = String(e);
+      // Roll back the TUN flag if we changed it but couldn't start the core.
+      if (config.value.tun_enabled !== prevTun) {
+        config.value.tun_enabled = prevTun;
+        await invoke("cmd_save_app_config", { newConfig: { ...config.value } }).catch(() => {});
+      }
+      await fetchStatus();
+    } finally {
+      loading.value = false;
+    }
+  }
+
   async function fetchSubscriptions() {
     subscriptions.value = await invoke<Subscription[]>("cmd_get_subscriptions");
   }
@@ -423,6 +475,7 @@ export const useAppStore = defineStore("app", () => {
     fetchStatus,
     startProxy,
     stopProxy,
+    setConnectionMode,
     fetchSubscriptions,
     addSubscription,
     updateSubscription,
