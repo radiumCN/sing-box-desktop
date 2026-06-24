@@ -1,4 +1,4 @@
-# sing-box-win
+# sing-box-desktop
 
 基于 [sing-box](https://github.com/SagerNet/sing-box) 内核的跨平台（Windows / macOS）图形化代理客户端，使用 Tauri v2 + Vue 3 构建，原生标题栏、毛玻璃质感界面。
 
@@ -48,7 +48,7 @@
 ```bash
 # 1. 克隆仓库
 git clone https://github.com/radiumCN/sing-box-desktop.git
-cd sing-box-win
+cd sing-box-desktop
 
 # 2. 安装前端依赖
 npm install
@@ -68,7 +68,7 @@ npm run tauri build
 ## 项目结构
 
 ```
-sing-box-win/
+sing-box-desktop/
 ├── src/                      # Vue 3 前端
 │   ├── App.vue               # 根组件（侧栏 + 内容布局）
 │   ├── main.ts               # 入口

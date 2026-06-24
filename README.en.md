@@ -1,4 +1,4 @@
-# sing-box-win
+# sing-box-desktop
 
 A cross-platform (Windows / macOS) GUI proxy client powered by the [sing-box](https://github.com/SagerNet/sing-box) core, built with Tauri v2 + Vue 3, featuring a native title bar and a frosted-glass UI.
 
@@ -48,7 +48,7 @@ A cross-platform (Windows / macOS) GUI proxy client powered by the [sing-box](ht
 ```bash
 # 1. Clone the repository
 git clone https://github.com/radiumCN/sing-box-desktop.git
-cd sing-box-win
+cd sing-box-desktop
 
 # 2. Install frontend dependencies
 npm install
@@ -69,7 +69,7 @@ npm run tauri build
 ## Project Structure
 
 ```
-sing-box-win/
+sing-box-desktop/
 ├── src/                      # Vue 3 frontend
 │   ├── App.vue               # Root component (sidebar + content layout)
 │   ├── main.ts               # Entry point
