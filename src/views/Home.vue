@@ -197,6 +197,9 @@ onMounted(async () => {
   await nextTick();
   systemProxyReady.value = true;
 
+  // Shared poller keeps the active auto group's current node up to date.
+  store.ensureActiveNowPoller();
+
   // If proxy is already running on mount (e.g. restored from last session), connect immediately.
   if (store.status.running) connectTrafficWs();
 
@@ -228,6 +231,7 @@ onMounted(async () => {
 
     if (store.status.running) {
       memoryUsage.value = await invoke<number | null>("cmd_get_memory_usage").catch(() => null);
+      // The active auto group's current node is refreshed by the store's shared poller.
       // Traffic data (uploadSpeed / downloadSpeed / totals) are driven by the
       // WebSocket above — no polling needed here.
     } else {
@@ -296,9 +300,14 @@ onUnmounted(() => {
         <div class="stat-content">
           <div class="stat-label">当前节点</div>
           <div class="stat-value text-sm">
-            {{ store.activeNode?.name ?? "未选择" }}
+            {{ store.isAutoGroup ? "自动选优" : (store.activeNode?.name ?? "未选择") }}
           </div>
-          <div class="stat-sub">{{ store.activeNode?.server ?? "--" }}</div>
+          <div class="stat-sub">
+            <template v-if="store.isAutoGroup">
+              {{ store.activeNodeNow ? `→ ${store.activeNodeNow}` : "动态选择中…" }}
+            </template>
+            <template v-else>{{ store.activeNode?.server ?? "--" }}</template>
+          </div>
         </div>
       </div>
 

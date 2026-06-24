@@ -105,13 +105,14 @@ pub fn run() {
                 if cfg.restore_proxy_on_startup && cfg.last_proxy_running {
                     let handle = app.handle().clone();
                     let outbounds = app.state::<AppState>().outbounds.lock().unwrap().clone();
+                    let nodes = app.state::<AppState>().nodes.lock().unwrap().clone();
                     let active_tag = cfg.active_nodes.get("proxy").cloned();
                     let mixed_port = cfg.mixed_port;
                     let restore_sys_proxy = cfg.last_system_proxy;
                     let singbox_state = app.state::<AppState>().singbox_state.clone();
                     let config_path = crate::config::singbox_config_path();
                     let singbox_cfg = crate::subscription::build_singbox_config(
-                        &outbounds, &cfg, active_tag.as_deref(),
+                        &outbounds, &cfg, active_tag.as_deref(), &nodes,
                     );
                     let _ = std::fs::write(
                         &config_path,
@@ -303,8 +304,10 @@ pub fn run() {
             commands::cmd_get_nodes,
             commands::cmd_test_node_latency,
             commands::cmd_test_node_speed,
-            commands::cmd_auto_select_node,
             commands::cmd_set_active_node,
+            commands::cmd_set_auto_node,
+            commands::cmd_get_active_proxy_now,
+            commands::cmd_test_group_delay,
             commands::cmd_get_app_config,
             commands::cmd_save_app_config,
             commands::cmd_set_proxy_mode,

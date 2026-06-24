@@ -1,12 +1,17 @@
 <script setup lang="ts">
-import { ref, nextTick } from "vue";
+import { ref, nextTick, onMounted } from "vue";
 import {
-  Plus, RefreshCw, Trash2, QrCode, Clock, Server, AlertCircle, X, Copy, Check as CheckIcon
+  Plus, RefreshCw, Trash2, QrCode, Clock, Server, AlertCircle, X, Copy, Check as CheckIcon, Zap
 } from "@lucide/vue";
 import QRCode from "qrcode";
 import { useAppStore } from "../stores/app";
 
 const store = useAppStore();
+
+onMounted(() => {
+  // Shared poller keeps the active auto group's current node fresh for the badge below.
+  store.ensureActiveNowPoller();
+});
 
 const showAddDialog = ref(false);
 const newSubName = ref("");
@@ -235,6 +240,14 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
                 <Clock :size="11" />
                 {{ formatDate(sub.last_update) }}
               </span>
+              <span
+                v-if="store.activeProxyTag === `auto-${sub.id}`"
+                class="meta-item auto-hit"
+                title="本订阅自动选优组当前命中的节点"
+              >
+                <Zap :size="11" />
+                自动 → {{ store.activeNodeNow ?? "选择中…" }}
+              </span>
             </div>
             <div class="sub-url">{{ sub.url }}</div>
           </div>
@@ -395,6 +408,10 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
 .meta-item {
   display: flex; align-items: center; gap: 3px;
   font-size: 11px; color: var(--color-text-secondary);
+}
+.meta-item.auto-hit {
+  color: #f0c040; font-weight: 500;
+  background: rgba(240,192,64,0.12); padding: 1px 7px; border-radius: 10px;
 }
 .sub-url {
   font-size: 11px; color: var(--color-text-muted);

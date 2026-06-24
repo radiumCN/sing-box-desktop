@@ -32,6 +32,7 @@ pub async fn start_proxy_internal(
 ) -> Result<(), String> {
     let config = state.app_config.lock().unwrap().clone();
     let outbounds = state.outbounds.lock().unwrap().clone();
+    let nodes = state.nodes.lock().unwrap().clone();
     let active_tag = config.active_nodes.get("proxy").cloned();
 
     // TUN mode preconditions: requires elevated privileges (admin on Windows, root on
@@ -51,6 +52,7 @@ pub async fn start_proxy_internal(
         &outbounds,
         &config,
         active_tag.as_deref(),
+        &nodes,
     );
 
     let config_path = config::singbox_config_path();
@@ -444,86 +446,109 @@ async fn test_tcp_connect(server: &str, port: u16) -> Option<u32> {
     }
 }
 
-/// Test all nodes and return the id of the fastest one.
+/// Switch a *running* sing-box selector to `name` via the Clash API so the change
+/// takes effect immediately without restarting the core. Best-effort: callers
+/// persist the choice first, so a later restart still applies it even if this fails.
+async fn clash_select_proxy(api_port: u16, group: &str, name: &str) -> Result<(), String> {
+    let url = format!("http://127.0.0.1:{}/proxies/{}", api_port, group);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .put(&url)
+        .json(&serde_json::json!({ "name": name }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("Clash API 返回 {}", resp.status()))
+    }
+}
+
+/// Force an immediate latency re-test of every node in an auto (urltest) group via
+/// the Clash API. `group` is "auto" (all nodes) or "auto-<sub.id>" (one
+/// subscription). Testing each member updates the core's delay history, which the
+/// urltest group then uses to (re)select the fastest node. Best-effort per node.
 #[tauri::command]
-pub async fn cmd_auto_select_node(
+pub async fn cmd_test_group_delay(
+    group: String,
     state: State<'_, AppState>,
-) -> Result<String, String> {
-    let (node_ids, mixed_port, is_running) = {
-        let nodes = state.nodes.lock().unwrap();
+) -> Result<(), String> {
+    let (api_port, running, test_url, members) = {
         let cfg = state.app_config.lock().unwrap();
         let running = state.singbox_state.lock().unwrap().running;
-        let ids: Vec<(String, String, u16)> = nodes.iter()
-            .map(|n| (n.id.clone(), n.server.clone(), n.port))
-            .collect();
-        (ids, cfg.mixed_port, running)
+        let nodes = state.nodes.lock().unwrap();
+        let members: Vec<String> = if group == "auto" {
+            nodes.iter().map(|n| n.name.clone()).collect()
+        } else if let Some(sid) = group.strip_prefix("auto-") {
+            nodes.iter()
+                .filter(|n| n.subscription_id.as_deref() == Some(sid))
+                .map(|n| n.name.clone())
+                .collect()
+        } else {
+            vec![group.clone()]
+        };
+        let url = if cfg.auto_test_url.trim().is_empty() {
+            "https://www.gstatic.com/generate_204".to_string()
+        } else {
+            cfg.auto_test_url.trim().to_string()
+        };
+        (cfg.api_port, running, url, members)
     };
 
+    if !running {
+        return Err("代理未运行".to_string());
+    }
+    if members.is_empty() {
+        return Err("该分组没有可测试的节点".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+
     let mut tasks = Vec::new();
-    for (id, server, port) in node_ids {
-        let s = server.clone();
+    for tag in members {
+        let client = client.clone();
+        let url = test_url.clone();
         tasks.push(tokio::spawn(async move {
-            let ms = if is_running {
-                test_via_proxy(mixed_port).await
-            } else {
-                test_tcp_connect(&s, port).await
+            // Build the endpoint with path-segment encoding so node names containing
+            // spaces / unicode / slashes don't corrupt the request path.
+            let mut endpoint = match reqwest::Url::parse(&format!(
+                "http://127.0.0.1:{}/proxies",
+                api_port
+            )) {
+                Ok(u) => u,
+                Err(_) => return,
             };
-            (id, ms)
+            if let Ok(mut seg) = endpoint.path_segments_mut() {
+                seg.push(&tag).push("delay");
+            }
+            endpoint
+                .query_pairs_mut()
+                .append_pair("url", &url)
+                .append_pair("timeout", "5000");
+            let _ = client.get(endpoint).send().await;
         }));
     }
-
-    let mut best_id = None;
-    let mut best_ms = u32::MAX;
-
-    for task in tasks {
-        if let Ok((id, Some(ms))) = task.await {
-            // Update latency in state
-            {
-                let mut nodes = state.nodes.lock().unwrap();
-                if let Some(node) = nodes.iter_mut().find(|n| n.id == id) {
-                    node.latency = Some(ms);
-                }
-            }
-            if ms < best_ms {
-                best_ms = ms;
-                best_id = Some(id);
-            }
-        }
+    for t in tasks {
+        let _ = t.await;
     }
-
-    let best = best_id.ok_or_else(|| "所有节点均不可达".to_string())?;
-
-    // Set as active and persist both nodes and config
-    {
-        let tag = {
-            let mut nodes = state.nodes.lock().unwrap();
-            let mut found_tag = None;
-            for node in nodes.iter_mut() {
-                if node.id == best {
-                    node.is_active = true;
-                    found_tag = Some(node.name.clone());
-                } else {
-                    node.is_active = false;
-                }
-            }
-            let tag = found_tag.ok_or_else(|| "节点不存在".to_string())?;
-            config::save_nodes(&nodes).map_err(|e| e.to_string())?;
-            tag
-        };
-        let mut config = state.app_config.lock().unwrap();
-        config.active_nodes.insert("proxy".to_string(), tag);
-        crate::config::save_app_config(&config).map_err(|e| e.to_string())?;
-    }
-
-    Ok(best)
+    Ok(())
 }
 
 #[tauri::command]
-pub fn cmd_set_active_node(
+pub async fn cmd_set_active_node(
     node_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let tag = {
+    /* Collect everything that needs locks first, then drop the guards before any
+       `.await` — std Mutex guards are not Send and cannot be held across await. */
+    let (tag, api_port, running) = {
         let mut nodes = state.nodes.lock().unwrap();
         let mut found_tag = None;
         for node in nodes.iter_mut() {
@@ -536,14 +561,101 @@ pub fn cmd_set_active_node(
         }
         let tag = found_tag.ok_or_else(|| "节点不存在".to_string())?;
         config::save_nodes(&nodes).map_err(|e| e.to_string())?;
-        tag
+
+        let mut config = state.app_config.lock().unwrap();
+        config.active_nodes.insert("proxy".to_string(), tag.clone());
+        config::save_app_config(&config).map_err(|e| e.to_string())?;
+        let api_port = config.api_port;
+        let running = state.singbox_state.lock().unwrap().running;
+        (tag, api_port, running)
     };
 
-    let mut config = state.app_config.lock().unwrap();
-    config.active_nodes.insert("proxy".to_string(), tag);
-    config::save_app_config(&config).map_err(|e| e.to_string())?;
-
+    /* Apply live when the core is running so switching is instant (no restart). */
+    if running {
+        let _ = clash_select_proxy(api_port, "proxy", &tag).await;
+    }
     Ok(())
+}
+
+/// Switch the proxy group to a dynamic urltest selection. `group` defaults to the
+/// global "auto" group; pass "auto-<sub.id>" to use a per-subscription group. The
+/// core then continuously health-checks that group's nodes and routes via the
+/// fastest one.
+#[tauri::command]
+pub async fn cmd_set_auto_node(
+    group: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let group = group.unwrap_or_else(|| "auto".to_string());
+    let (api_port, running) = {
+        let mut nodes = state.nodes.lock().unwrap();
+        for node in nodes.iter_mut() {
+            node.is_active = false;
+        }
+        config::save_nodes(&nodes).map_err(|e| e.to_string())?;
+
+        let mut config = state.app_config.lock().unwrap();
+        config.active_nodes.insert("proxy".to_string(), group.clone());
+        config::save_app_config(&config).map_err(|e| e.to_string())?;
+        let api_port = config.api_port;
+        let running = state.singbox_state.lock().unwrap().running;
+        (api_port, running)
+    };
+
+    if running {
+        let _ = clash_select_proxy(api_port, "proxy", &group).await;
+    }
+    Ok(())
+}
+
+/// Resolve the concrete node the "proxy" group is currently routing through by
+/// following the selector → urltest chain via the Clash API. Returns `None` when
+/// the core is not running or the chain cannot be resolved. Used by the UI/tray to
+/// show which node an "auto" group actually picked.
+#[tauri::command]
+pub async fn cmd_get_active_proxy_now(
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let (api_port, running) = {
+        let cfg = state.app_config.lock().unwrap();
+        let running = state.singbox_state.lock().unwrap().running;
+        (cfg.api_port, running)
+    };
+    if !running {
+        return Ok(None);
+    }
+
+    let url = format!("http://127.0.0.1:{}/proxies", api_port);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let json: Value = resp.json().await.map_err(|e| e.to_string())?;
+    let proxies = match json.get("proxies") {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    /* Walk from "proxy" through any Selector/URLTest layers down to a real node.
+       The hop cap prevents an infinite loop on a malformed/cyclic response. */
+    let mut cur = "proxy".to_string();
+    for _ in 0..6 {
+        let node = match proxies.get(&cur) {
+            Some(n) => n,
+            None => break,
+        };
+        let typ = node.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if typ == "Selector" || typ == "URLTest" {
+            match node.get("now").and_then(|n| n.as_str()) {
+                Some(now) if !now.is_empty() => cur = now.to_string(),
+                _ => break,
+            }
+        } else {
+            break;
+        }
+    }
+    Ok(Some(cur))
 }
 
 // ─── Config ─────────────────────────────────────────────────────────

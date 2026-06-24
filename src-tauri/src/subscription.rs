@@ -589,13 +589,66 @@ pub fn build_singbox_config(
     outbounds: &[Value],
     config: &crate::types::AppConfig,
     active_tag: Option<&str>,
+    nodes: &[ProxyNode],
 ) -> Value {
-    let selector_outbounds: Vec<Value> = outbounds.iter()
+    /* Reserved tag for the auto-select (urltest) group. */
+    const AUTO_TAG: &str = "auto";
+
+    /* Concrete node tags — one per parsed outbound. */
+    let node_tags: Vec<Value> = outbounds.iter()
         .map(|ob| Value::String(ob["tag"].as_str().unwrap_or("").to_string()))
         .collect();
+    let has_nodes = !node_tags.is_empty();
 
-    let selected = active_tag
-        .unwrap_or_else(|| selector_outbounds.first().and_then(|v| v.as_str()).unwrap_or(""));
+    /* Per-subscription auto groups: map each subscription to the node tags that
+       both belong to it and actually exist as outbounds. Only subscriptions with at
+       least two usable nodes get a dedicated urltest group (a single-node group adds
+       no value). BTreeMap keeps group order deterministic across rebuilds. */
+    let outbound_tag_set: std::collections::HashSet<&str> = outbounds.iter()
+        .filter_map(|ob| ob["tag"].as_str())
+        .collect();
+    let mut per_sub: std::collections::BTreeMap<String, Vec<Value>> =
+        std::collections::BTreeMap::new();
+    for node in nodes {
+        if let Some(sid) = node.subscription_id.as_deref() {
+            if outbound_tag_set.contains(node.name.as_str()) {
+                per_sub.entry(sid.to_string())
+                    .or_default()
+                    .push(Value::String(node.name.clone()));
+            }
+        }
+    }
+    /* (group_tag, member_node_tags) for every subscription worth a group. */
+    let sub_groups: Vec<(String, Vec<Value>)> = per_sub.into_iter()
+        .filter(|(_, members)| members.len() >= 2)
+        .map(|(sid, members)| (format!("{}-{}", AUTO_TAG, sid), members))
+        .collect();
+
+    /* Selector options order: global "auto" → per-subscription autos → every node. */
+    let mut selector_outbounds: Vec<Value> = Vec::new();
+    if has_nodes {
+        selector_outbounds.push(Value::String(AUTO_TAG.to_string()));
+    }
+    for (tag, _) in &sub_groups {
+        selector_outbounds.push(Value::String(tag.clone()));
+    }
+    selector_outbounds.extend(node_tags.iter().cloned());
+
+    /* Default selection priority:
+         1. caller-supplied active_tag (a concrete node tag or "auto")
+         2. "auto" when nodes exist (best zero-config experience)
+         3. first available option */
+    let mut selected: String = match active_tag {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ if has_nodes => AUTO_TAG.to_string(),
+        _ => selector_outbounds.first().and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    };
+    /* Guard against a stale active_tag (e.g. the node was removed after it was last
+       selected): fall back to a valid option so sing-box never sees an unknown
+       default, which would abort startup. */
+    if !selector_outbounds.iter().any(|v| v.as_str() == Some(selected.as_str())) {
+        selected = if has_nodes { AUTO_TAG.to_string() } else { String::new() };
+    }
 
     // Sanitize proxy outbounds: remove any transport field whose type is "tcp"
     // (tcp is the default in sing-box ? the field must be absent, not explicitly set).
@@ -625,6 +678,37 @@ pub fn build_singbox_config(
         json!({ "type": "direct", "tag": "direct" }),
         json!({ "type": "block", "tag": "block" }),
     ];
+
+    /* URLTest groups: the core health-checks the member nodes and routes through the
+       lowest-latency one, re-evaluating on `interval`. This gives the app
+       Clash.Meta-style "Auto" behaviour and fixes the "locked to a slow node"
+       problem. Probe URL / interval / tolerance are user-configurable.
+         • global "auto"      → all nodes
+         • "auto-<sub.id>"    → only that subscription's nodes (multi-airport setups) */
+    let test_url = if config.auto_test_url.trim().is_empty() {
+        "https://www.gstatic.com/generate_204".to_string()
+    } else {
+        config.auto_test_url.trim().to_string()
+    };
+    let interval = format!("{}m", config.auto_test_interval.max(1));
+    let tolerance = config.auto_tolerance;
+    let urltest_group = |tag: &str, members: &[Value]| -> Value {
+        json!({
+            "type": "urltest",
+            "tag": tag,
+            "outbounds": members,
+            "url": test_url.clone(),
+            "interval": interval.clone(),
+            "tolerance": tolerance,
+            "idle_timeout": "30m"
+        })
+    };
+    if has_nodes {
+        all_outbounds.push(urltest_group(AUTO_TAG, &node_tags));
+    }
+    for (tag, members) in &sub_groups {
+        all_outbounds.push(urltest_group(tag, members));
+    }
     all_outbounds.extend_from_slice(&clean_outbounds);
 
     // ── Rule-sets ──────────────────────────────────────────────────────

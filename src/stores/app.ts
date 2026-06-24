@@ -61,6 +61,9 @@ export interface AppConfig {
   restore_proxy_on_startup: boolean;
   last_proxy_running: boolean;
   last_system_proxy: boolean;
+  auto_test_url: string;
+  auto_test_interval: number;
+  auto_tolerance: number;
 }
 
 export interface TrafficPoint {
@@ -94,17 +97,31 @@ export const useAppStore = defineStore("app", () => {
     restore_proxy_on_startup: false,
     last_proxy_running: false,
     last_system_proxy: false,
+    auto_test_url: "https://www.gstatic.com/generate_204",
+    auto_test_interval: 3,
+    auto_tolerance: 50,
   });
   const trafficHistory = ref<TrafficPoint[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
+  // Concrete node currently picked by the active auto (urltest) group.
+  const activeNodeNow = ref<string | null>(null);
+
+  // The proxy group's currently selected tag: a node name, "auto", or "auto-<subId>".
+  const activeProxyTag = computed(() => config.value.active_nodes["proxy"] ?? "");
+  // True when *any* dynamic auto group is selected (global or per-subscription).
+  const isAutoGroup = computed(
+    () => activeProxyTag.value === "auto" || activeProxyTag.value.startsWith("auto-")
+  );
+  // True only for the global "auto" group (kept for existing call sites).
+  const isAutoActive = computed(() => activeProxyTag.value === "auto");
 
   const activeNode = computed(() => {
     // Prefer the node flagged as active; fall back to matching by saved tag name.
     const byFlag = nodes.value.find((n) => n.is_active);
     if (byFlag) return byFlag;
-    const activeTag = config.value.active_nodes["proxy"];
-    if (!activeTag) return undefined;
+    const activeTag = activeProxyTag.value;
+    if (!activeTag || isAutoGroup.value) return undefined;
     return nodes.value.find((n) => n.name === activeTag);
   });
 
@@ -128,7 +145,9 @@ export const useAppStore = defineStore("app", () => {
   function updateTrayTooltip() {
     const modeMap: Record<string, string> = { rule: "规则", global: "全局", direct: "直连", tun: "TUN" };
     const mode = modeMap[config.value.proxy_mode] ?? config.value.proxy_mode;
-    const node = activeNode.value?.name ?? "未选择";
+    const node = isAutoGroup.value
+      ? (activeNodeNow.value ? `自动 → ${activeNodeNow.value}` : "自动选优")
+      : (activeNode.value?.name ?? "未选择");
     const state = status.value.running ? "● 运行中" : "○ 已停止";
     const tooltip = `sing-box-win\n${state}\n节点: ${node}\n模式: ${mode}`;
     invoke("cmd_update_tray_tooltip", { tooltip }).catch(() => {});
@@ -170,6 +189,7 @@ export const useAppStore = defineStore("app", () => {
     try {
       await invoke("cmd_stop_singbox");
       await fetchStatus();
+      activeNodeNow.value = null;
       updateTrayTooltip();
       // Always clear system proxy when stopping sing-box
       await invoke("cmd_set_system_proxy", { enabled: false }).catch(() => {});
@@ -224,8 +244,34 @@ export const useAppStore = defineStore("app", () => {
 
   async function setActiveNode(nodeId: string) {
     await invoke("cmd_set_active_node", { nodeId });
+    await fetchConfig();
     await fetchNodes();
     updateTrayTooltip();
+  }
+
+  // Switch to a dynamic urltest group: the core continuously picks the fastest
+  // node. `group` defaults to the global "auto"; pass "auto-<subId>" for a
+  // per-subscription group. Takes effect immediately when the proxy is running.
+  async function setAutoNode(group?: string) {
+    await invoke("cmd_set_auto_node", { group: group ?? null });
+    await fetchConfig();
+    await fetchNodes();
+    updateTrayTooltip();
+    await refreshActiveNow();
+  }
+
+  // The concrete node the auto group is currently routing through (resolved via the
+  // Clash API). Null when the proxy is stopped or not using an auto group.
+  async function refreshActiveNow() {
+    if (!status.value.running || !isAutoGroup.value) {
+      activeNodeNow.value = null;
+      return;
+    }
+    try {
+      activeNodeNow.value = await invoke<string | null>("cmd_get_active_proxy_now");
+    } catch {
+      activeNodeNow.value = null;
+    }
   }
 
   async function testNodeLatency(nodeId: string): Promise<number | null> {
@@ -262,16 +308,26 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
-  async function autoSelectNode(): Promise<string | null> {
+  // Force an immediate re-test of an auto group's nodes, then refresh which node it
+  // now routes through. `group` defaults to the global "auto".
+  async function testGroupDelay(group?: string) {
     try {
-      const bestId = await invoke<string>("cmd_auto_select_node");
-      // Refresh nodes from backend to get updated latencies + active flag
-      await fetchNodes();
-      return bestId;
+      await invoke("cmd_test_group_delay", { group: group ?? "auto" });
     } catch (e) {
       error.value = String(e);
-      return null;
     }
+    await refreshActiveNow();
+  }
+
+  // ── Single shared poller for the active auto group's current node ───────────
+  // One app-lifetime timer (idempotent) instead of per-page timers. refreshActiveNow
+  // self-noops when the proxy is stopped or no auto group is selected, so the timer
+  // does no network work unless it's actually needed.
+  let activeNowTimer: ReturnType<typeof setInterval> | null = null;
+  function ensureActiveNowPoller() {
+    if (activeNowTimer) return;
+    refreshActiveNow();
+    activeNowTimer = setInterval(refreshActiveNow, 3000);
   }
 
   async function fetchConfig() {
@@ -374,9 +430,16 @@ export const useAppStore = defineStore("app", () => {
     saveSubscriptionSettings,
     fetchNodes,
     setActiveNode,
+    setAutoNode,
+    isAutoActive,
+    isAutoGroup,
+    activeProxyTag,
+    activeNodeNow,
+    refreshActiveNow,
+    ensureActiveNowPoller,
+    testGroupDelay,
     testNodeLatency,
     testNodeSpeed,
-    autoSelectNode,
     fetchConfig,
     saveConfig,
     setProxyMode,

@@ -5,14 +5,13 @@ import { useAppStore } from "../stores/app";
 
 const store = useAppStore();
 const testingAll = ref(false);
-const autoSelecting = ref(false);
+const testingGroup = ref(false);
 const testingIds = ref<string[]>([]);
 const filterSubId = ref<string>(localStorage.getItem("nodes_filter_sub") ?? "all");
 const sortBy = ref<"none" | "latency" | "speed">(
   (localStorage.getItem("nodes_sort") as "none" | "latency" | "speed") ?? "none"
 );
 const search = ref("");
-const autoSelectedId = ref<string | null>(localStorage.getItem("auto_selected_node_id"));
 
 watch(sortBy, (v) => localStorage.setItem("nodes_sort", v));
 
@@ -27,19 +26,10 @@ function validateSubFilter() {
 // Re-validate when subscriptions load (async after mount)
 watch(() => store.subscriptions.length, validateSubFilter);
 
-// On mount, validate saved IDs still exist
 onMounted(() => {
   validateSubFilter();
-
-  // Validate auto-selected node — clear if the node no longer exists or is no longer active
-  const savedAutoId = localStorage.getItem("auto_selected_node_id");
-  if (savedAutoId) {
-    const node = store.nodes.find((n) => n.id === savedAutoId);
-    if (!node || !node.is_active) {
-      autoSelectedId.value = null;
-      localStorage.removeItem("auto_selected_node_id");
-    }
-  }
+  // Use the store's single shared poller for the active auto group's current node.
+  store.ensureActiveNowPoller();
 });
 
 const nodesForSub = computed(() => {
@@ -130,30 +120,36 @@ async function testOne(nodeId: string) {
 
 async function selectNode(nodeId: string) {
   await store.setActiveNode(nodeId);
-  // Manual selection clears the auto-select indicator
-  autoSelectedId.value = null;
-  localStorage.removeItem("auto_selected_node_id");
 }
 
-function clearAutoSelect() {
-  autoSelectedId.value = null;
-  localStorage.removeItem("auto_selected_node_id");
+// Switch to a dynamic urltest group (core continuously picks the fastest node).
+// No arg = global "auto"; pass a subscription id for that subscription's group.
+async function selectAuto(subId?: string) {
+  await store.setAutoNode(subId ? `auto-${subId}` : undefined);
 }
 
-async function autoSelect() {
-  autoSelecting.value = true;
-  autoSelectedId.value = null;
-  localStorage.removeItem("auto_selected_node_id");
+// Force an immediate re-test of the current view's auto group.
+async function retestGroup() {
+  if (testingGroup.value) return;
+  testingGroup.value = true;
   try {
-    const bestId = await store.autoSelectNode();
-    if (bestId) {
-      autoSelectedId.value = bestId;
-      localStorage.setItem("auto_selected_node_id", bestId);
-    }
+    await store.testGroupDelay(currentAutoTag.value);
   } finally {
-    autoSelecting.value = false;
+    testingGroup.value = false;
   }
 }
+
+// The auto group tag matching the current view (global vs per-subscription).
+const currentAutoTag = computed(() =>
+  filterSubId.value === "all" ? "auto" : `auto-${filterSubId.value}`
+);
+// Show a per-subscription auto card only when that subscription has ≥2 nodes
+// (matches the backend, which only builds a urltest group in that case).
+const showAutoCard = computed(() =>
+  filterSubId.value === "all" ? store.nodes.length > 0 : nodesForSub.value.length >= 2
+);
+// The node the active auto group is currently routing through (for display).
+const autoNowName = computed(() => store.activeNodeNow);
 </script>
 
 <template>
@@ -162,15 +158,6 @@ async function autoSelect() {
       <h1 class="page-title">节点列表</h1>
       <div class="header-actions">
         <span class="node-count">{{ store.nodes.length }} 个节点</span>
-        <button
-          class="btn btn-ghost auto-btn"
-          :disabled="autoSelecting"
-          @click="autoSelect"
-          title="测试所有节点并自动选择延迟最低的"
-        >
-          <Zap :size="14" :class="{ spin: autoSelecting }" />
-          {{ autoSelecting ? "选择中..." : "Auto 选择" }}
-        </button>
         <button class="btn btn-ghost" :disabled="testingAll" @click="testAll" title="测试所有节点的延迟和网速">
           <Gauge :size="14" :class="{ spin: testingAll }" />
           {{ testingAll ? "测试中..." : "全部测速" }}
@@ -192,13 +179,6 @@ async function autoSelect() {
           刷新
         </button>
       </div>
-    </div>
-
-    <!-- Auto-select result banner -->
-    <div v-if="autoSelectedId" class="auto-banner">
-      <Zap :size="13" />
-      已自动选择延迟最低节点：<strong>{{ store.nodes.find(n => n.id === autoSelectedId)?.name }}</strong>
-      <button class="banner-close" @click="clearAutoSelect">×</button>
     </div>
 
     <!-- Filters -->
@@ -241,20 +221,55 @@ async function autoSelect() {
 
     <!-- Node List -->
     <div class="node-list">
+      <!-- Dynamic auto-select (urltest) group — global or per-subscription -->
+      <div
+        v-if="showAutoCard"
+        class="card node-item auto-item"
+        :class="{ active: store.activeProxyTag === currentAutoTag }"
+        @click="selectAuto(filterSubId === 'all' ? undefined : filterSubId)"
+        title="动态自动选优：内核持续测速并自动切换到延迟最低的节点（Clash.Meta「Auto」）"
+      >
+        <div class="node-left">
+          <div class="active-indicator">
+            <Zap v-if="store.activeProxyTag === currentAutoTag" :size="16" class="auto-icon" />
+            <div v-else class="check-placeholder" />
+          </div>
+          <div class="node-info">
+            <div class="node-name">
+              {{ filterSubId === 'all' ? '自动选优（全部节点）' : '自动选优（本订阅）' }}
+            </div>
+            <div class="node-meta">
+              <span class="badge badge-gray protocol-badge">URLTest</span>
+              <span
+                v-if="store.activeProxyTag === currentAutoTag && autoNowName"
+                class="node-server auto-now"
+              >当前命中：{{ autoNowName }}</span>
+              <span v-else class="node-server">内核持续测速，自动切换最快节点</span>
+            </div>
+          </div>
+        </div>
+        <div class="node-right">
+          <button
+            class="btn btn-ghost icon-btn"
+            :disabled="testingGroup || !store.status.running"
+            @click.stop="retestGroup"
+            :title="store.status.running ? '立即重测本组所有节点并刷新最优' : '需先启动代理'"
+          >
+            <RefreshCw :size="13" :class="{ spin: testingGroup }" />
+          </button>
+        </div>
+      </div>
+
       <div
         v-for="node in filtered"
         :key="node.id"
         class="card node-item"
-        :class="{
-          active: node.is_active,
-          'auto-selected': node.id === autoSelectedId,
-        }"
+        :class="{ active: node.is_active }"
         @click="selectNode(node.id)"
       >
         <div class="node-left">
           <div class="active-indicator">
-            <Zap v-if="node.id === autoSelectedId && node.is_active" :size="16" class="auto-icon" />
-            <CheckCircle v-else-if="node.is_active" :size="16" class="check-icon" />
+            <CheckCircle v-if="node.is_active" :size="16" class="check-icon" />
             <div v-else class="check-placeholder" />
           </div>
           <div class="node-info">
@@ -304,21 +319,6 @@ async function autoSelect() {
 .page-title { font-size: 20px; font-weight: 600; }
 .header-actions { display: flex; align-items: center; gap: 8px; }
 .node-count { font-size: 12px; color: var(--color-text-secondary); }
-
-.auto-btn { color: #f0c040 !important; }
-.auto-btn:hover:not(:disabled) { background: rgba(240,192,64,0.12) !important; }
-
-.auto-banner {
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px 14px; border-radius: 8px;
-  background: rgba(240,192,64,0.12); border: 1px solid rgba(240,192,64,0.3);
-  font-size: 13px; color: #f0c040;
-}
-.auto-banner strong { color: var(--color-text-primary); }
-.banner-close {
-  margin-left: auto; background: transparent; border: none;
-  color: var(--color-text-muted); cursor: pointer; font-size: 16px; padding: 0 4px;
-}
 
 .filters { display: flex; flex-direction: column; gap: 10px; }
 .search-input { max-width: 340px; }
@@ -370,10 +370,12 @@ async function autoSelect() {
   border-color: rgba(0,120,212,0.4);
   background: rgba(0,120,212,0.04);
 }
-.node-item.auto-selected {
-  border-color: rgba(240,192,64,0.5);
-  background: rgba(240,192,64,0.05);
+.auto-item.active {
+  border-color: rgba(240,192,64,0.6);
+  background: rgba(240,192,64,0.08);
 }
+.auto-item .auto-icon { color: #f0c040; }
+.auto-item .auto-now { color: #f0c040; font-weight: 500; }
 .node-left { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
 .active-indicator { flex-shrink: 0; }
 .check-icon { color: var(--color-primary); }
