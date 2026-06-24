@@ -135,6 +135,62 @@ const HEADER_SVG = `
 </svg>
 `;
 
+/**
+ * macOS menu-bar tray icon — TEMPLATE image.
+ * Transparent background + solid black glyph. macOS uses only the alpha channel
+ * and auto-inverts it for light/dark menu bars, so a single asset stays visible
+ * in both modes (the previous dark app icon was invisible on a dark menu bar).
+ * 44×44 px = 2× of the 22 pt menu-bar height.
+ */
+const TRAY_TEMPLATE_SVG = `
+<svg width="44" height="44" xmlns="http://www.w3.org/2000/svg">
+  <polygon points="22,5 35,12.5 35,31.5 22,39 9,31.5 9,12.5"
+           fill="none" stroke="black" stroke-width="3.2"/>
+  <path d="M15,22 L27,22 M22,16 L29,22 L22,28"
+        fill="none" stroke="black" stroke-width="3.2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
+`;
+
+/**
+ * macOS DMG background.
+ * IMPORTANT: drawn in the SAME coordinate space as tauri.conf.json `windowSize`
+ * (660 × 400 points) and aligned to `appPosition` (180,200) /
+ * `applicationFolderPosition` (480,200). Rendered at 144 dpi → 1320 × 800 px so
+ * Finder maps it back to 660 × 400 points (crisp on Retina, no cropping).
+ */
+const DMG_SVG = `
+<svg width="660" height="400" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="dbg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%"   stop-color="#f6f9ff"/>
+      <stop offset="100%" stop-color="#e8f0fb"/>
+    </linearGradient>
+    <linearGradient id="darrow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%"   stop-color="#5aa7ff"/>
+      <stop offset="100%" stop-color="#2f7bf6"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="660" height="400" fill="url(#dbg)"/>
+
+  <!-- Title -->
+  <text x="330" y="64"
+        font-family="-apple-system,'PingFang SC','Helvetica Neue',Arial,sans-serif"
+        font-size="20" font-weight="600" fill="#1f2d4d" text-anchor="middle">将 sing-box 拖入「应用程序」完成安装</text>
+
+  <!-- Curved arrow from the app icon (180,200) toward Applications (480,200) -->
+  <path d="M252,208 C300,180 360,180 400,198"
+        fill="none" stroke="url(#darrow)" stroke-width="8" stroke-linecap="round"/>
+  <path d="M400,198 l-16,-9 l4,9 l-4,9 z" fill="#2f7bf6"/>
+
+  <!-- Footer branding -->
+  <text x="330" y="372"
+        font-family="-apple-system,'PingFang SC',Arial,sans-serif"
+        font-size="11" fill="#9aa7bd" text-anchor="middle">by Radium</text>
+</svg>
+`;
+
 // SVG tasks: rendered at 2× then resized to target BMP size for sharpness
 const TASKS = [
   {
@@ -218,6 +274,27 @@ function writeBmp(dest, pixels, width, height) {
       .toBuffer({ resolveWithObject: true });
 
     writeBmp(dest, data, width, height);
+  }
+
+  // ── macOS tray template icon (PNG, transparent, alpha-only) ────────────
+  {
+    const dest = `${root}/src-tauri/icons/tray-template.png`;
+    await sharp(Buffer.from(TRAY_TEMPLATE_SVG))
+      .png()
+      .toFile(dest);
+    console.log(`  ✓  ${dest.replace(root, "")}`);
+  }
+
+  // ── macOS DMG background (PNG, 1320×800 @144dpi → 660×400 pt) ───────────
+  {
+    const dest = `${root}/src-tauri/installer/dmg-background.png`;
+    // density:144 rasterizes the 660×400 SVG at 2× (1320×800 px); the embedded
+    // 144 dpi makes Finder treat it as 660×400 points (matches windowSize).
+    await sharp(Buffer.from(DMG_SVG), { density: 144 })
+      .withMetadata({ density: 144 })
+      .png()
+      .toFile(dest);
+    console.log(`  ✓  ${dest.replace(root, "")}`);
   }
 
   console.log("Done.\n");

@@ -116,6 +116,16 @@ pub struct AppConfig {
     /// Last known system proxy enabled state (written on start/stop)
     #[serde(default)]
     pub last_system_proxy: bool,
+    /// URLTest probe URL for the auto-select (urltest) groups.
+    #[serde(default = "default_auto_test_url")]
+    pub auto_test_url: String,
+    /// URLTest re-evaluation interval, in minutes.
+    #[serde(default = "default_auto_test_interval")]
+    pub auto_test_interval: u32,
+    /// URLTest tolerance, in milliseconds: only switch when the new best beats the
+    /// current node by more than this margin (avoids flapping between close nodes).
+    #[serde(default = "default_auto_tolerance")]
+    pub auto_tolerance: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -129,6 +139,18 @@ pub enum ProxyMode {
 
 fn default_update_channel() -> String {
     "stable".to_string()
+}
+
+fn default_auto_test_url() -> String {
+    "https://www.gstatic.com/generate_204".to_string()
+}
+
+fn default_auto_test_interval() -> u32 {
+    3
+}
+
+fn default_auto_tolerance() -> u32 {
+    50
 }
 
 impl Default for AppConfig {
@@ -155,6 +177,9 @@ impl Default for AppConfig {
             restore_proxy_on_startup: false,
             last_proxy_running: false,
             last_system_proxy: false,
+            auto_test_url: default_auto_test_url(),
+            auto_test_interval: default_auto_test_interval(),
+            auto_tolerance: default_auto_tolerance(),
         }
     }
 }

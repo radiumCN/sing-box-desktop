@@ -3,7 +3,7 @@ import { ref, watch, onMounted, onUnmounted, computed } from "vue";
 import {
   Shield, Globe, Cpu, Monitor, Download,
   RefreshCw, CheckCircle, AlertCircle, Package, ExternalLink,
-  ShieldCheck, ShieldAlert, Check, Rocket
+  ShieldCheck, ShieldAlert, Check, Rocket, Zap
 } from "@lucide/vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -699,6 +699,58 @@ onUnmounted(() => {
               </div>
             </div>
           </template>
+        </div>
+      </div>
+    </section>
+
+    <!-- Auto-select (URLTest) -->
+    <section class="settings-section">
+      <div class="section-header">
+        <Zap :size="15" />
+        <span>自动选优（URLTest）</span>
+      </div>
+      <div class="card settings-card">
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">测速 URL</div>
+            <div class="setting-desc">用于探测各节点延迟的地址，建议使用返回 204 的轻量端点</div>
+          </div>
+          <input
+            class="input"
+            type="text"
+            v-model="localConfig.auto_test_url"
+            placeholder="https://www.gstatic.com/generate_204"
+            style="width: 260px"
+          />
+        </div>
+        <div class="setting-divider" />
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">检测间隔（分钟）</div>
+            <div class="setting-desc">内核每隔多久重新测速并切换到更快的节点</div>
+          </div>
+          <input
+            class="input port-input"
+            type="number"
+            v-model.number="localConfig.auto_test_interval"
+            min="1" max="1440"
+          />
+        </div>
+        <div class="setting-divider" />
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">容差（毫秒）</div>
+            <div class="setting-desc">仅当新节点比当前节点快出此差值才切换，避免在相近节点间频繁抖动</div>
+          </div>
+          <input
+            class="input port-input"
+            type="number"
+            v-model.number="localConfig.auto_tolerance"
+            min="0" max="2000"
+          />
+        </div>
+        <div class="kernel-hint">
+          修改后需重新启动代理才会生效。该设置同时作用于「全部节点」与各订阅的自动选优组。
         </div>
       </div>
     </section>

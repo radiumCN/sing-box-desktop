@@ -18,9 +18,17 @@ pub fn subscriptions_dir() -> PathBuf {
     app_data_dir().join("subscriptions")
 }
 
+/// Directory holding the locally-bundled sing-box rule-set (.srs) files.
+/// These are copied from the app resources on startup so the generated config
+/// can reference them by absolute path even where the remote CDN is blocked.
+pub fn rule_sets_dir() -> PathBuf {
+    app_data_dir().join("rule-sets")
+}
+
 pub fn ensure_dirs() -> Result<()> {
     fs::create_dir_all(app_data_dir())?;
     fs::create_dir_all(subscriptions_dir())?;
+    fs::create_dir_all(rule_sets_dir())?;
     Ok(())
 }
 

@@ -61,6 +61,9 @@ export interface AppConfig {
   restore_proxy_on_startup: boolean;
   last_proxy_running: boolean;
   last_system_proxy: boolean;
+  auto_test_url: string;
+  auto_test_interval: number;
+  auto_tolerance: number;
 }
 
 export interface TrafficPoint {
@@ -94,17 +97,37 @@ export const useAppStore = defineStore("app", () => {
     restore_proxy_on_startup: false,
     last_proxy_running: false,
     last_system_proxy: false,
+    auto_test_url: "https://www.gstatic.com/generate_204",
+    auto_test_interval: 3,
+    auto_tolerance: 50,
   });
   const trafficHistory = ref<TrafficPoint[]>([]);
+  // Cumulative bytes since the core started (authoritative, from the Clash API).
+  const totalUpload = ref(0);
+  const totalDownload = ref(0);
+  // Live speed in bytes/s, derived from the per-second delta of the totals above.
+  const uploadSpeed = ref(0);
+  const downloadSpeed = ref(0);
   const loading = ref(false);
   const error = ref<string | null>(null);
+  // Concrete node currently picked by the active auto (urltest) group.
+  const activeNodeNow = ref<string | null>(null);
+
+  // The proxy group's currently selected tag: a node name, "auto", or "auto-<subId>".
+  const activeProxyTag = computed(() => config.value.active_nodes["proxy"] ?? "");
+  // True when *any* dynamic auto group is selected (global or per-subscription).
+  const isAutoGroup = computed(
+    () => activeProxyTag.value === "auto" || activeProxyTag.value.startsWith("auto-")
+  );
+  // True only for the global "auto" group (kept for existing call sites).
+  const isAutoActive = computed(() => activeProxyTag.value === "auto");
 
   const activeNode = computed(() => {
     // Prefer the node flagged as active; fall back to matching by saved tag name.
     const byFlag = nodes.value.find((n) => n.is_active);
     if (byFlag) return byFlag;
-    const activeTag = config.value.active_nodes["proxy"];
-    if (!activeTag) return undefined;
+    const activeTag = activeProxyTag.value;
+    if (!activeTag || isAutoGroup.value) return undefined;
     return nodes.value.find((n) => n.name === activeTag);
   });
 
@@ -128,7 +151,9 @@ export const useAppStore = defineStore("app", () => {
   function updateTrayTooltip() {
     const modeMap: Record<string, string> = { rule: "规则", global: "全局", direct: "直连", tun: "TUN" };
     const mode = modeMap[config.value.proxy_mode] ?? config.value.proxy_mode;
-    const node = activeNode.value?.name ?? "未选择";
+    const node = isAutoGroup.value
+      ? (activeNodeNow.value ? `自动 → ${activeNodeNow.value}` : "自动选优")
+      : (activeNode.value?.name ?? "未选择");
     const state = status.value.running ? "● 运行中" : "○ 已停止";
     const tooltip = `sing-box-win\n${state}\n节点: ${node}\n模式: ${mode}`;
     invoke("cmd_update_tray_tooltip", { tooltip }).catch(() => {});
@@ -145,6 +170,7 @@ export const useAppStore = defineStore("app", () => {
     try {
       await invoke("cmd_start_singbox");
       await fetchStatus();
+      resetTrafficStats();
       updateTrayTooltip();
       // Only enable Windows system proxy when TUN is NOT active.
       // TUN mode captures traffic at the network layer — system proxy is redundant and
@@ -170,12 +196,66 @@ export const useAppStore = defineStore("app", () => {
     try {
       await invoke("cmd_stop_singbox");
       await fetchStatus();
+      activeNodeNow.value = null;
       updateTrayTooltip();
       // Always clear system proxy when stopping sing-box
       await invoke("cmd_set_system_proxy", { enabled: false }).catch(() => {});
       syncTrayMenu(false);
     } catch (e) {
       error.value = String(e);
+    } finally {
+      loading.value = false;
+    }
+  }
+
+  /** Unified connection control. The dashboard exposes only two mutually-exclusive
+   *  switches — "system" proxy and "tun" — plus an implicit "off". Each call sets
+   *  the TUN flag, (re)starts the core so the matching config takes effect, and
+   *  enables/clears the Windows system proxy accordingly. On failure (e.g. TUN
+   *  without admin rights) the TUN flag is rolled back so the UI stays truthful. */
+  async function setConnectionMode(target: "system" | "tun" | "off") {
+    loading.value = true;
+    error.value = null;
+    const prevTun = config.value.tun_enabled;
+    try {
+      if (target === "off") {
+        await invoke("cmd_stop_singbox");
+        await fetchStatus();
+        activeNodeNow.value = null;
+        await invoke("cmd_set_system_proxy", { enabled: false }).catch(() => {});
+        syncTrayMenu(false, config.value.tun_enabled);
+        updateTrayTooltip();
+        return;
+      }
+
+      const wantTun = target === "tun";
+      // Persist the TUN flag first so the generated config matches the chosen mode.
+      if (config.value.tun_enabled !== wantTun) {
+        config.value.tun_enabled = wantTun;
+        await invoke("cmd_save_app_config", { newConfig: { ...config.value } });
+      }
+      // Restart the core so the new (TUN vs system) config takes effect.
+      if (status.value.running) {
+        await invoke("cmd_stop_singbox");
+        await fetchStatus();
+      }
+      await invoke("cmd_start_singbox"); // throws on failure (e.g. TUN needs admin)
+      await fetchStatus();
+      resetTrafficStats();
+
+      // System proxy and TUN are mutually exclusive routing paths.
+      await invoke("cmd_set_system_proxy", { enabled: !wantTun }).catch(() => {});
+      syncTrayMenu(!wantTun, wantTun);
+      updateTrayTooltip();
+      ensureActiveNowPoller();
+    } catch (e) {
+      error.value = String(e);
+      // Roll back the TUN flag if we changed it but couldn't start the core.
+      if (config.value.tun_enabled !== prevTun) {
+        config.value.tun_enabled = prevTun;
+        await invoke("cmd_save_app_config", { newConfig: { ...config.value } }).catch(() => {});
+      }
+      await fetchStatus();
     } finally {
       loading.value = false;
     }
@@ -224,8 +304,34 @@ export const useAppStore = defineStore("app", () => {
 
   async function setActiveNode(nodeId: string) {
     await invoke("cmd_set_active_node", { nodeId });
+    await fetchConfig();
     await fetchNodes();
     updateTrayTooltip();
+  }
+
+  // Switch to a dynamic urltest group: the core continuously picks the fastest
+  // node. `group` defaults to the global "auto"; pass "auto-<subId>" for a
+  // per-subscription group. Takes effect immediately when the proxy is running.
+  async function setAutoNode(group?: string) {
+    await invoke("cmd_set_auto_node", { group: group ?? null });
+    await fetchConfig();
+    await fetchNodes();
+    updateTrayTooltip();
+    await refreshActiveNow();
+  }
+
+  // The concrete node the auto group is currently routing through (resolved via the
+  // Clash API). Null when the proxy is stopped or not using an auto group.
+  async function refreshActiveNow() {
+    if (!status.value.running || !isAutoGroup.value) {
+      activeNodeNow.value = null;
+      return;
+    }
+    try {
+      activeNodeNow.value = await invoke<string | null>("cmd_get_active_proxy_now");
+    } catch {
+      activeNodeNow.value = null;
+    }
   }
 
   async function testNodeLatency(nodeId: string): Promise<number | null> {
@@ -262,16 +368,109 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
-  async function autoSelectNode(): Promise<string | null> {
+  // Force an immediate re-test of an auto group's nodes, then refresh which node it
+  // now routes through. `group` defaults to the global "auto".
+  async function testGroupDelay(group?: string) {
     try {
-      const bestId = await invoke<string>("cmd_auto_select_node");
-      // Refresh nodes from backend to get updated latencies + active flag
-      await fetchNodes();
-      return bestId;
+      await invoke("cmd_test_group_delay", { group: group ?? "auto" });
     } catch (e) {
       error.value = String(e);
-      return null;
     }
+    await refreshActiveNow();
+  }
+
+  // ── Single shared poller for the active auto group's current node ───────────
+  // One app-lifetime timer (idempotent) instead of per-page timers. refreshActiveNow
+  // self-noops when the proxy is stopped or no auto group is selected, so the timer
+  // does no network work unless it's actually needed.
+  let activeNowTimer: ReturnType<typeof setInterval> | null = null;
+  function ensureActiveNowPoller() {
+    if (activeNowTimer) return;
+    refreshActiveNow();
+    activeNowTimer = setInterval(refreshActiveNow, 3000);
+  }
+
+  // ── Global traffic monitor ─────────────────────────────────────────────────
+  // The cumulative totals come straight from the core (Clash API /connections
+  // totals), so they count ALL traffic since the proxy service started and keep
+  // counting no matter which page is open — fixing the old behaviour where totals
+  // only accrued while the dashboard was visible. Live speed is the per-second
+  // delta. The core resets its counters on restart, so a drop in the cumulative
+  // value is treated as a fresh baseline rather than a (nonsensical) negative speed.
+  let trafficTimer: ReturnType<typeof setInterval> | null = null;
+  let lastUpTotal = 0;
+  let lastDownTotal = 0;
+  let trafficWasRunning = false;
+
+  async function pollTraffic() {
+    // Refresh status here so the monitor reacts to start/stop from anywhere
+    // (dashboard, tray, auto-restore) without depending on a mounted page.
+    await fetchStatus();
+
+    if (!status.value.running) {
+      if (trafficWasRunning) {
+        uploadSpeed.value = 0;
+        downloadSpeed.value = 0;
+        totalUpload.value = 0;
+        totalDownload.value = 0;
+        lastUpTotal = 0;
+        lastDownTotal = 0;
+        trafficWasRunning = false;
+      }
+      return;
+    }
+
+    // Transition stopped → running: reset baseline and chart for a clean session.
+    if (!trafficWasRunning) {
+      lastUpTotal = 0;
+      lastDownTotal = 0;
+      clearTrafficHistory();
+      trafficWasRunning = true;
+    }
+
+    let up = 0;
+    let down = 0;
+    try {
+      const t = await invoke<{ upload: number; download: number }>("cmd_get_traffic_total");
+      up = t.upload;
+      down = t.download;
+    } catch {
+      // Keep last good values on a transient API hiccup.
+      return;
+    }
+
+    // Clamp negatives caused by a core counter reset.
+    const upDelta = up >= lastUpTotal ? up - lastUpTotal : up;
+    const downDelta = down >= lastDownTotal ? down - lastDownTotal : down;
+    lastUpTotal = up;
+    lastDownTotal = down;
+
+    uploadSpeed.value = upDelta;
+    downloadSpeed.value = downDelta;
+    totalUpload.value = up;
+    totalDownload.value = down;
+    addTrafficPoint(upDelta, downDelta);
+  }
+
+  function ensureTrafficPoller() {
+    if (trafficTimer) return;
+    pollTraffic();
+    trafficTimer = setInterval(pollTraffic, 1000);
+  }
+
+  // Immediately clear cumulative stats, live speed, the chart and the monitor's
+  // baseline. Called on every (re)start of the core so a new proxy session always
+  // begins counting from zero instead of inheriting the previous session's totals.
+  function resetTrafficStats() {
+    totalUpload.value = 0;
+    totalDownload.value = 0;
+    uploadSpeed.value = 0;
+    downloadSpeed.value = 0;
+    lastUpTotal = 0;
+    lastDownTotal = 0;
+    clearTrafficHistory();
+    // Align the monitor's running flag so its transition logic won't double-reset.
+    trafficWasRunning = status.value.running;
   }
 
   async function fetchConfig() {
@@ -314,6 +513,7 @@ export const useAppStore = defineStore("app", () => {
         await invoke("cmd_stop_singbox");
         await invoke("cmd_start_singbox");
         await fetchStatus();
+        resetTrafficStats();
         updateTrayTooltip();
       } catch (e) {
         error.value = String(e);
@@ -352,6 +552,9 @@ export const useAppStore = defineStore("app", () => {
       console.error("autostart reconcile failed:", e);
     }
     updateTrayTooltip();
+    // Start the app-lifetime traffic monitor so cumulative stats are tracked
+    // regardless of which page the user is viewing.
+    ensureTrafficPoller();
   }
 
   return {
@@ -360,6 +563,10 @@ export const useAppStore = defineStore("app", () => {
     nodes,
     config,
     trafficHistory,
+    totalUpload,
+    totalDownload,
+    uploadSpeed,
+    downloadSpeed,
     loading,
     error,
     activeNode,
@@ -367,6 +574,7 @@ export const useAppStore = defineStore("app", () => {
     fetchStatus,
     startProxy,
     stopProxy,
+    setConnectionMode,
     fetchSubscriptions,
     addSubscription,
     updateSubscription,
@@ -374,9 +582,17 @@ export const useAppStore = defineStore("app", () => {
     saveSubscriptionSettings,
     fetchNodes,
     setActiveNode,
+    setAutoNode,
+    isAutoActive,
+    isAutoGroup,
+    activeProxyTag,
+    activeNodeNow,
+    refreshActiveNow,
+    ensureActiveNowPoller,
+    ensureTrafficPoller,
+    testGroupDelay,
     testNodeLatency,
     testNodeSpeed,
-    autoSelectNode,
     fetchConfig,
     saveConfig,
     setProxyMode,

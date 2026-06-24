@@ -2,7 +2,6 @@
 import { onMounted, watch } from "vue";
 import { RouterView } from "vue-router";
 import Sidebar from "./components/Sidebar.vue";
-import Titlebar from "./components/Titlebar.vue";
 import { useAppStore } from "./stores/app";
 
 const store = useAppStore();
@@ -29,30 +28,21 @@ onMounted(async () => {
 
 <template>
   <div class="app-shell">
-    <Titlebar />
-    <div class="app-body">
-      <Sidebar />
-      <main class="app-content">
-        <RouterView v-slot="{ Component }">
-          <Transition name="page" mode="out-in">
-            <component :is="Component" :key="$route.path" />
-          </Transition>
-        </RouterView>
-      </main>
-    </div>
+    <Sidebar />
+    <main class="app-content">
+      <RouterView v-slot="{ Component }">
+        <Transition name="page" mode="out-in">
+          <component :is="Component" :key="$route.path" />
+        </Transition>
+      </RouterView>
+    </main>
   </div>
 </template>
 
 <style scoped>
 .app-shell {
   display: flex;
-  flex-direction: column;
   height: 100vh;
-  overflow: hidden;
-}
-.app-body {
-  display: flex;
-  flex: 1;
   overflow: hidden;
 }
 .app-content {
