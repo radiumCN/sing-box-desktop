@@ -20,35 +20,55 @@ import { useAppStore } from "../stores/app";
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip);
 
 const store = useAppStore();
-const systemProxyEnabled = ref(false);
 const systemProxyReady = ref(false);
 
+// System proxy state now lives in the store (refreshed globally). Keep a thin local
+// wrapper so existing call sites read through to the store.
+const systemProxyEnabled = computed(() => store.systemProxyEnabled);
 async function fetchSystemProxy() {
-  systemProxyEnabled.value = await invoke<boolean>("cmd_get_system_proxy_status");
+  await store.refreshSystemProxy();
 }
 
-// The two mutually-exclusive connection switches. Each derives its on-state from
-// the actual runtime status so the UI always mirrors reality.
-const systemProxyOn = computed(
-  () => store.status.running && systemProxyEnabled.value && !store.config.tun_enabled
-);
-const tunOn = computed(() => store.status.running && store.config.tun_enabled);
-
-// What the proxy-status card shows as the active routing method.
-const connectionLabel = computed(() => {
-  if (!store.status.running) return "未运行";
-  if (store.config.tun_enabled) return "TUN 模式";
-  if (systemProxyEnabled.value) return "系统代理";
-  return "运行中";
+// The two mutually-exclusive connection switches. While a switch is being applied
+// (store.connecting), reflect the target optimistically so the toggle flips instantly;
+// otherwise derive on-state from the actual runtime status so the UI mirrors reality.
+const systemProxyOn = computed(() => {
+  if (store.connecting === "system") return true;
+  if (store.connecting === "tun" || store.connecting === "off") return false;
+  return store.status.running && systemProxyEnabled.value && !store.config.tun_enabled;
+});
+const tunOn = computed(() => {
+  if (store.connecting === "tun") return true;
+  if (store.connecting === "system" || store.connecting === "off") return false;
+  return store.status.running && store.config.tun_enabled;
 });
 
+// What the proxy-status card shows as the active routing method. With the persistent
+// core, base this on whether we're actually proxying — not on whether the core is up.
+const connectionLabel = computed(() => {
+  if (tunOn.value) return "TUN 模式";
+  if (systemProxyOn.value) return "系统代理";
+  return "未连接";
+});
+
+// Remember which switch initiated an "off" transition so the sub-label can show
+// "断开中…" on the correct row while the core stops.
+const wasSystem = ref(false);
+const wasTun = ref(false);
+
 async function toggleSystemProxy() {
-  await store.setConnectionMode(systemProxyOn.value ? "off" : "system");
+  const turningOff = systemProxyOn.value;
+  wasSystem.value = turningOff;
+  wasTun.value = false;
+  await store.setConnectionMode(turningOff ? "off" : "system");
   await fetchSystemProxy();
 }
 
 async function toggleTun() {
-  await store.setConnectionMode(tunOn.value ? "off" : "tun");
+  const turningOff = tunOn.value;
+  wasTun.value = turningOff;
+  wasSystem.value = false;
+  await store.setConnectionMode(turningOff ? "off" : "tun");
   await fetchSystemProxy();
 }
 // Live speed and cumulative totals are tracked globally by the store's traffic
@@ -147,17 +167,17 @@ onMounted(async () => {
   store.ensureActiveNowPoller();
   store.ensureTrafficPoller();
 
-  let lastRunning = store.status.running;
+  let lastProxying = store.proxying;
 
   pollTimer = setInterval(async () => {
     // Always sync system proxy — avoids the timing race where the watcher fired
     // before the backend finished setting the proxy on auto-restore startup.
     fetchSystemProxy();
 
-    // React to proxy start/stop transitions (tray tooltip only — traffic/totals
+    // React to proxy connect/disconnect transitions (tray tooltip only — traffic/totals
     // are handled by the store's global traffic monitor).
-    if (store.status.running !== lastRunning) {
-      lastRunning = store.status.running;
+    if (store.proxying !== lastProxying) {
+      lastProxying = store.proxying;
       store.updateTrayTooltip();
     }
 
@@ -187,10 +207,10 @@ onUnmounted(() => {
     <!-- Quick Controls -->
     <div class="quick-grid">
       <!-- Proxy Status Card (driven by the two switches below) -->
-      <div class="card control-card" :class="{ active: store.status.running }">
+      <div class="card control-card" :class="{ active: store.proxying }">
         <div class="control-info">
-          <div class="control-icon" :class="store.status.running ? 'icon-green' : 'icon-gray'">
-            <component :is="store.status.running ? Wifi : WifiOff" :size="22" />
+          <div class="control-icon" :class="store.proxying ? 'icon-green' : 'icon-gray'">
+            <component :is="store.proxying ? Wifi : WifiOff" :size="22" />
           </div>
           <div>
             <div class="control-label">代理状态</div>
@@ -274,7 +294,9 @@ onUnmounted(() => {
             <div>
               <div class="net-row-label">系统代理</div>
               <div class="net-row-sub">
-                <template v-if="systemProxyOn">{{ `127.0.0.1:${store.config.mixed_port}` }}</template>
+                <template v-if="store.connecting === 'system'">连接中…</template>
+                <template v-else-if="store.connecting === 'off' && wasSystem">断开中…</template>
+                <template v-else-if="systemProxyOn">{{ `127.0.0.1:${store.config.mixed_port}` }}</template>
                 <template v-else>开启即启动代理（与 TUN 互斥）</template>
               </div>
             </div>
@@ -321,7 +343,9 @@ onUnmounted(() => {
             <div>
               <div class="net-row-label">TUN 模式</div>
               <div class="net-row-sub">
-                {{ tunOn ? '虚拟网卡已启用，全局接管流量' : '开启即启动代理（需管理员，与系统代理互斥）' }}
+                <template v-if="store.connecting === 'tun'">连接中…</template>
+                <template v-else-if="store.connecting === 'off' && wasTun">断开中…</template>
+                <template v-else>{{ tunOn ? '虚拟网卡已启用，全局接管流量' : '开启即启动代理（需管理员，与系统代理互斥）' }}</template>
               </div>
             </div>
           </div>

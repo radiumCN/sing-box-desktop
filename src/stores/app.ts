@@ -110,6 +110,32 @@ export const useAppStore = defineStore("app", () => {
   const downloadSpeed = ref(0);
   const loading = ref(false);
   const error = ref<string | null>(null);
+  // The connection target currently being applied, for optimistic UI. The dashboard
+  // toggles reflect this immediately (flip + "连接中…") while the core (re)starts in
+  // the background, then reconcile to the real runtime state on completion.
+  const connecting = ref<null | "system" | "tun" | "off">(null);
+  // Whether the Windows system proxy registry toggle is currently on. Kept in the store
+  // (refreshed by the global traffic poller) so any view can derive `proxying`.
+  const systemProxyEnabled = ref(false);
+
+  // With the persistent-core model the core is almost always running while the app is
+  // open, so "core running" no longer means "actively proxying". `proxying` is the real
+  // signal the UI should use for status: the core is up AND a routing path is active
+  // (system proxy registry on, or TUN mode on). While a switch is being applied we honor
+  // the optimistic target so indicators flip instantly.
+  const proxying = computed(() => {
+    if (connecting.value === "system" || connecting.value === "tun") return true;
+    if (connecting.value === "off") return false;
+    return status.value.running && (config.value.tun_enabled || systemProxyEnabled.value);
+  });
+
+  async function refreshSystemProxy() {
+    try {
+      systemProxyEnabled.value = await invoke<boolean>("cmd_get_system_proxy_status");
+    } catch {
+      /* keep last value on a transient error */
+    }
+  }
   // Concrete node currently picked by the active auto (urltest) group.
   const activeNodeNow = ref<string | null>(null);
 
@@ -154,7 +180,7 @@ export const useAppStore = defineStore("app", () => {
     const node = isAutoGroup.value
       ? (activeNodeNow.value ? `自动 → ${activeNodeNow.value}` : "自动选优")
       : (activeNode.value?.name ?? "未选择");
-    const state = status.value.running ? "● 运行中" : "○ 已停止";
+    const state = proxying.value ? "● 已连接" : "○ 未连接";
     const tooltip = `sing-box-win\n${state}\n节点: ${node}\n模式: ${mode}`;
     invoke("cmd_update_tray_tooltip", { tooltip }).catch(() => {});
   }
@@ -213,51 +239,36 @@ export const useAppStore = defineStore("app", () => {
    *  the TUN flag, (re)starts the core so the matching config takes effect, and
    *  enables/clears the Windows system proxy accordingly. On failure (e.g. TUN
    *  without admin rights) the TUN flag is rolled back so the UI stays truthful. */
+  // Unified connection control. The backend (cmd_set_connection_mode → apply_connection_mode)
+  // owns all the lifecycle logic for the persistent-core model: it keeps the core running,
+  // toggling only the system proxy for "system"/"off" (instant) and rebuilding + restarting
+  // for "tun". The store just invokes it, then refreshes the reactive state.
   async function setConnectionMode(target: "system" | "tun" | "off") {
     loading.value = true;
+    connecting.value = target;
     error.value = null;
-    const prevTun = config.value.tun_enabled;
     try {
-      if (target === "off") {
-        await invoke("cmd_stop_singbox");
-        await fetchStatus();
-        activeNodeNow.value = null;
-        await invoke("cmd_set_system_proxy", { enabled: false }).catch(() => {});
-        syncTrayMenu(false, config.value.tun_enabled);
-        updateTrayTooltip();
-        return;
-      }
-
-      const wantTun = target === "tun";
-      // Persist the TUN flag first so the generated config matches the chosen mode.
-      if (config.value.tun_enabled !== wantTun) {
-        config.value.tun_enabled = wantTun;
-        await invoke("cmd_save_app_config", { newConfig: { ...config.value } });
-      }
-      // Restart the core so the new (TUN vs system) config takes effect.
-      if (status.value.running) {
-        await invoke("cmd_stop_singbox");
-        await fetchStatus();
-      }
-      await invoke("cmd_start_singbox"); // throws on failure (e.g. TUN needs admin)
+      await invoke("cmd_set_connection_mode", { mode: target });
+      // Reconcile reactive state with reality (tun_enabled may have changed).
+      await fetchConfig();
       await fetchStatus();
-      resetTrafficStats();
-
-      // System proxy and TUN are mutually exclusive routing paths.
-      await invoke("cmd_set_system_proxy", { enabled: !wantTun }).catch(() => {});
-      syncTrayMenu(!wantTun, wantTun);
+      await refreshSystemProxy();
+      if (target === "off") {
+        activeNodeNow.value = null;
+      } else {
+        resetTrafficStats();
+        ensureActiveNowPoller();
+      }
+      syncTrayMenu(systemProxyEnabled.value, config.value.tun_enabled);
       updateTrayTooltip();
-      ensureActiveNowPoller();
     } catch (e) {
       error.value = String(e);
-      // Roll back the TUN flag if we changed it but couldn't start the core.
-      if (config.value.tun_enabled !== prevTun) {
-        config.value.tun_enabled = prevTun;
-        await invoke("cmd_save_app_config", { newConfig: { ...config.value } }).catch(() => {});
-      }
+      await fetchConfig();
       await fetchStatus();
+      await refreshSystemProxy();
     } finally {
       loading.value = false;
+      connecting.value = null;
     }
   }
 
@@ -403,11 +414,16 @@ export const useAppStore = defineStore("app", () => {
   let trafficWasRunning = false;
 
   async function pollTraffic() {
-    // Refresh status here so the monitor reacts to start/stop from anywhere
+    // Refresh status + system proxy here so the monitor reacts to changes from anywhere
     // (dashboard, tray, auto-restore) without depending on a mounted page.
     await fetchStatus();
+    await refreshSystemProxy();
 
-    if (!status.value.running) {
+    // With the persistent core, "proxying" — not "core running" — is what gates traffic.
+    const proxyingNow =
+      status.value.running && (config.value.tun_enabled || systemProxyEnabled.value);
+
+    if (!proxyingNow) {
       if (trafficWasRunning) {
         uploadSpeed.value = 0;
         downloadSpeed.value = 0;
@@ -420,7 +436,7 @@ export const useAppStore = defineStore("app", () => {
       return;
     }
 
-    // Transition stopped → running: reset baseline and chart for a clean session.
+    // Transition not-proxying → proxying: reset baseline and chart for a clean session.
     if (!trafficWasRunning) {
       lastUpTotal = 0;
       lastDownTotal = 0;
@@ -469,8 +485,8 @@ export const useAppStore = defineStore("app", () => {
     lastUpTotal = 0;
     lastDownTotal = 0;
     clearTrafficHistory();
-    // Align the monitor's running flag so its transition logic won't double-reset.
-    trafficWasRunning = status.value.running;
+    // Align the monitor's flag so its transition logic won't double-reset.
+    trafficWasRunning = proxying.value;
   }
 
   async function fetchConfig() {
@@ -504,22 +520,17 @@ export const useAppStore = defineStore("app", () => {
   }
 
   async function setProxyMode(mode: string) {
-    await invoke("cmd_set_proxy_mode", { mode });
+    // Optimistic: reflect the new mode in the UI immediately. The backend applies it
+    // live via the Clash API (no core restart), so the switch is effectively instant.
+    const prev = config.value.proxy_mode;
     config.value.proxy_mode = mode as AppConfig["proxy_mode"];
-    // Restart sing-box so the new mode config takes effect immediately
-    if (status.value.running) {
-      loading.value = true;
-      try {
-        await invoke("cmd_stop_singbox");
-        await invoke("cmd_start_singbox");
-        await fetchStatus();
-        resetTrafficStats();
-        updateTrayTooltip();
-      } catch (e) {
-        error.value = String(e);
-      } finally {
-        loading.value = false;
-      }
+    try {
+      await invoke("cmd_set_proxy_mode", { mode });
+      updateTrayTooltip();
+    } catch (e) {
+      // Roll back on failure so the UI never lies.
+      config.value.proxy_mode = prev;
+      error.value = String(e);
     }
   }
 
@@ -569,6 +580,10 @@ export const useAppStore = defineStore("app", () => {
     downloadSpeed,
     loading,
     error,
+    connecting,
+    systemProxyEnabled,
+    proxying,
+    refreshSystemProxy,
     activeNode,
     nodesByGroup,
     fetchStatus,

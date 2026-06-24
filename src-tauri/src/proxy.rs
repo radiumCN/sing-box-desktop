@@ -12,7 +12,43 @@ pub fn set_system_proxy(enabled: bool, port: u16) -> Result<()> {
     if enabled {
         key.set_value("ProxyEnable", &1u32)?;
         key.set_value("ProxyServer", &format!("127.0.0.1:{}", port))?;
-        key.set_value("ProxyOverride", &"localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*;<local>")?;
+        // ProxyOverride — addresses/domains in this list bypass the proxy entirely.
+        //
+        // Why Tencent/WeChat domains are listed here:
+        // WeChat's screenshot-translation and other CN-API features use WinHTTP,
+        // which respects the system proxy. When those requests are tunnelled through
+        // sing-box (even when sing-box routes them "direct"), Tencent's servers can
+        // detect the HTTP-CONNECT proxy intermediary via connection metadata and
+        // return empty / error responses. Listing the domains here makes WinHTTP
+        // open a direct TCP socket to Tencent without going through sing-box at all,
+        // which is the most reliable fix for WeChat screenshot translation and
+        // similar CN-service features that break under a local proxy.
+        key.set_value("ProxyOverride", &concat!(
+            // ── Local / private ranges ──────────────────────────────────
+            "localhost;127.*;",
+            "10.*;",
+            "172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;",
+            "172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;",
+            "192.168.*;",
+            "<local>;",
+            // ── Tencent / WeChat ─────────────────────────────────────────
+            // WeChat PC screenshot translation calls these domains directly.
+            "*.qq.com;*.weixin.qq.com;",
+            "*.tencent.com;*.tencentcloudapi.com;",
+            "*.qcloud.com;*.myqcloud.com;",
+            "*.wechat.com;*.weixin.com;",
+            "*.gtimg.cn;*.qpic.cn;*.tenpay.com;",
+            // ── Other major CN services ───────────────────────────────────
+            "*.taobao.com;*.tmall.com;*.alicdn.com;*.alipay.com;",
+            "*.alibaba.com;*.aliyun.com;*.aliyuncs.com;",
+            "*.baidu.com;*.bdstatic.com;",
+            "*.163.com;*.126.net;*.netease.com;",
+            "*.bilibili.com;*.bilivideo.com;",
+            "*.jd.com;*.jdcdn.com;",
+            "*.weibo.com;*.sina.com;",
+            "*.bytedance.com;*.douyin.com;*.toutiao.com;",
+            "*.feishu.cn;*.feishu.com"
+        ))?;
     } else {
         key.set_value("ProxyEnable", &0u32)?;
     }

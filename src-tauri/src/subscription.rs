@@ -633,6 +633,12 @@ pub fn build_singbox_config(
         selector_outbounds.push(Value::String(tag.clone()));
     }
     selector_outbounds.extend(node_tags.iter().cloned());
+    /* With no nodes configured yet the selector would otherwise be empty, which makes
+       sing-box reject the config. Fall back to "direct" so a persistent idle core can
+       still start (and "proxy" simply means direct until the user adds nodes). */
+    if selector_outbounds.is_empty() {
+        selector_outbounds.push(Value::String("direct".to_string()));
+    }
 
     /* Default selection priority:
          1. caller-supplied active_tag (a concrete node tag or "auto")
@@ -647,7 +653,7 @@ pub fn build_singbox_config(
        selected): fall back to a valid option so sing-box never sees an unknown
        default, which would abort startup. */
     if !selector_outbounds.iter().any(|v| v.as_str() == Some(selected.as_str())) {
-        selected = if has_nodes { AUTO_TAG.to_string() } else { String::new() };
+        selected = if has_nodes { AUTO_TAG.to_string() } else { "direct".to_string() };
     }
 
     // Sanitize proxy outbounds: remove any transport field whose type is "tcp"
@@ -756,25 +762,162 @@ pub fn build_singbox_config(
 
     // DNS routing rules (order matters — first match wins):
     //   1. proxy node hostnames  → real IP (so the dialer can reach the node)
-    //   2. CN domains            → real IP via the local resolver (direct, fast)
-    //   3. EVERYTHING ELSE A/AAAA → fake IP, so the EXIT node performs the real
+    //   2. explicit domestic domains (Tencent/WeChat/Alibaba/etc.) → real IP
+    //      This acts as a reliable fallback even when geosite-cn.srs is missing
+    //      (e.g. first launch before the file is downloaded). Without this rule,
+    //      WeChat screenshot translation and similar CN-API callers would receive
+    //      a fake IP and be proxied through a foreign exit node, causing Tencent
+    //      servers to reject the request due to IP geo-checking.
+    //   3. user-defined direct rules with domain matchers → real IP
+    //   4. CN domains via geosite-cn rule set → real IP via the local resolver
+    //   5. EVERYTHING ELSE A/AAAA → fake IP, so the EXIT node performs the real
     //      lookup (correct CDN edge ⇒ full node speed, no per-connection DoT).
     // Non-A/AAAA queries (HTTPS/SVCB/PTR…) fall through to `final: dns_local`.
-    //
-    // The previous design only handed a fake IP to domains explicitly present in
-    // the geosite-geolocation-noncn list, so any foreign domain NOT in that list
-    // (e.g. proof.its-paris.scaleway.com) fell back to the China resolver, got a
-    // wrong/unreachable IP and could not be opened. A catch-all fake-ip rule
-    // ("not CN ⇒ fake IP") removes that whole class of failures.
+    let cn_core_domains: Vec<Value> = vec![
+        // Tencent / WeChat — screenshot translation, WeChat API, Tencent Cloud OCR
+        "qq.com", "wechat.com", "weixin.com", "weixin.qq.com",
+        "tencent.com", "tencentcloudapi.com", "qcloud.com",
+        "gtimg.cn", "qpic.cn", "myqcloud.com", "tenpay.com",
+        // Alibaba
+        "taobao.com", "tmall.com", "alicdn.com", "tbcdn.cn",
+        "alipay.com", "alibaba.com", "aliyun.com", "aliyuncs.com",
+        "amap.com", "autonavi.com", "dingtalk.com",
+        // Baidu
+        "baidu.com", "bdstatic.com", "bcebos.com",
+        // ByteDance
+        "bytedance.com", "toutiao.com", "douyin.com",
+        "feishu.cn", "feishu.com",
+        // Other major CN services
+        "bilibili.com", "bilivideo.com", "hdslb.com",
+        "weibo.com", "sinaimg.cn", "sina.com",
+        "163.com", "126.net", "netease.com",
+        "zhihu.com", "zhimg.com",
+        "jd.com", "jdcdn.com",
+        "meituan.com", "meituan.net",
+        "xiaohongshu.com", "pinduoduo.com",
+        "iqiyi.com", "youku.com", "sohu.com", "mgtv.com",
+        "xiaomi.com", "mi.com", "miui.com",
+        "huawei.com", "hicloud.com",
+        "12306.cn",
+    ].into_iter().map(|s| Value::String(s.to_string())).collect();
+
+    // Build domain_suffix entries from user-defined DIRECT rules so that those
+    // domains are also resolved via dns_local (real IP), not fakeip.
+    let user_rules = crate::rules::load_rules();
+    let mut user_direct_domain_suffixes: Vec<Value> = Vec::new();
+    let mut user_direct_domains: Vec<Value> = Vec::new();
+    for rule in user_rules.iter().filter(|r| r.enabled && r.action == crate::rules::RuleAction::Direct) {
+        for d in &rule.domain_suffix {
+            user_direct_domain_suffixes.push(Value::String(d.clone()));
+        }
+        for d in &rule.domain {
+            user_direct_domains.push(Value::String(d.clone()));
+        }
+    }
+
     let mut dns_rules: Vec<Value> = Vec::new();
     if !server_domains.is_empty() {
         dns_rules.push(json!({ "domain": server_domains, "server": "dns_local" }));
+    }
+    // Explicit CN core domains — reliable even without geosite-cn.srs
+    dns_rules.push(json!({ "domain_suffix": cn_core_domains, "server": "dns_local" }));
+    // User-defined direct rules
+    if !user_direct_domain_suffixes.is_empty() || !user_direct_domains.is_empty() {
+        let mut entry = serde_json::Map::new();
+        if !user_direct_domain_suffixes.is_empty() {
+            entry.insert("domain_suffix".into(), json!(user_direct_domain_suffixes));
+        }
+        if !user_direct_domains.is_empty() {
+            entry.insert("domain".into(), json!(user_direct_domains));
+        }
+        entry.insert("server".into(), json!("dns_local"));
+        dns_rules.push(Value::Object(entry));
     }
     dns_rules.push(json!({ "rule_set": "geosite-cn", "server": "dns_local" }));
     dns_rules.push(json!({
         "query_type": ["A", "AAAA"],
         "server": "dns_fakeip"
     }));
+
+    // ── Route rules ────────────────────────────────────────────────────
+    // Build the route.rules array programmatically so we can inject:
+    //   a) explicit CN-core domain_suffix rules (Tencent/WeChat etc.) as a
+    //      safety net before geosite-cn — they work even when geosite-cn.srs
+    //      is not yet available (e.g. first launch or missing file).
+    //   b) user-defined routing rules from rules.json (domain/keyword/process
+    //      entries only — geosite/geoip references need rule-set files and are
+    //      already covered by the catch-all geosite-cn/geoip-cn entries below).
+    let mut route_rules: Vec<Value> = vec![
+        json!({ "action": "sniff" }),
+        json!({ "protocol": ["dns"], "action": "hijack-dns" }),
+        json!({ "ip_is_private": true, "outbound": "direct" }),
+        json!({ "clash_mode": "Direct", "outbound": "direct" }),
+        json!({ "clash_mode": "Global", "outbound": "proxy" }),
+        // WeChat process — route ALL WeChat traffic direct in TUN mode so that
+        // screenshot translation, voice messages and other CN-API features work
+        // without being affected by proxy routing or fake-ip DNS assignment.
+        // process_name is only evaluated in TUN mode (ignored for mixed-inbound).
+        json!({
+            "process_name": ["WeChat.exe", "WeChatApp.exe", "WeChatWeb.exe"],
+            "outbound": "direct"
+        }),
+        // Explicit CN-core domains — reliable direct path regardless of geosite-cn.srs
+        json!({ "domain_suffix": cn_core_domains.clone(), "outbound": "direct" }),
+    ];
+
+    // Inject user-defined routing rules (domain/keyword/process matchers only).
+    for rule in user_rules.iter().filter(|r| r.enabled) {
+        let mut obj = serde_json::Map::new();
+        if !rule.domain.is_empty() {
+            obj.insert("domain".into(), json!(rule.domain));
+        }
+        if !rule.domain_suffix.is_empty() {
+            obj.insert("domain_suffix".into(), json!(rule.domain_suffix));
+        }
+        if !rule.domain_keyword.is_empty() {
+            obj.insert("domain_keyword".into(), json!(rule.domain_keyword));
+        }
+        if !rule.process_name.is_empty() {
+            obj.insert("process_name".into(), json!(rule.process_name));
+        }
+        // Port rules
+        if !rule.port.is_empty() {
+            let ports: Vec<Value> = rule.port.iter()
+                .flat_map(|p| {
+                    if p.contains('-') {
+                        let parts: Vec<&str> = p.split('-').collect();
+                        if parts.len() == 2 {
+                            if let (Ok(s), Ok(e)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>()) {
+                                return (s..=e).map(|n| json!(n)).collect::<Vec<_>>();
+                            }
+                        }
+                        vec![]
+                    } else if let Ok(n) = p.parse::<u16>() {
+                        vec![json!(n)]
+                    } else {
+                        vec![]
+                    }
+                })
+                .collect();
+            if !ports.is_empty() {
+                obj.insert("port".into(), json!(ports));
+            }
+        }
+        if !obj.is_empty() {
+            let outbound = match rule.action {
+                crate::rules::RuleAction::Proxy => "proxy",
+                crate::rules::RuleAction::Direct => "direct",
+                crate::rules::RuleAction::Block => "block",
+                crate::rules::RuleAction::Dns => continue, // handled by hijack-dns
+            };
+            obj.insert("outbound".into(), json!(outbound));
+            route_rules.push(Value::Object(obj));
+        }
+    }
+
+    // Broad CN catch-alls (geosite/geoip rule sets)
+    route_rules.push(json!({ "rule_set": ["geosite-cn"], "outbound": "direct" }));
+    route_rules.push(json!({ "rule_set": ["geoip-cn"], "outbound": "direct" }));
 
     let mut cfg = json!({
         "log": { "level": config.log_level, "timestamp": true },
@@ -808,15 +951,7 @@ pub fn build_singbox_config(
         "outbounds": all_outbounds,
         "route": {
             "default_domain_resolver": "dns_local",
-            "rules": [
-                { "action": "sniff" },
-                { "protocol": ["dns"], "action": "hijack-dns" },
-                { "ip_is_private": true, "outbound": "direct" },
-                { "clash_mode": "Direct", "outbound": "direct" },
-                { "clash_mode": "Global", "outbound": "proxy" },
-                { "rule_set": ["geosite-cn"], "outbound": "direct" },
-                { "rule_set": ["geoip-cn"], "outbound": "direct" }
-            ],
+            "rules": route_rules,
             "rule_set": [ geosite_cn_rs, geoip_cn_rs ],
             "final": "proxy",
             "auto_detect_interface": true
@@ -825,7 +960,15 @@ pub fn build_singbox_config(
             "clash_api": {
                 "external_controller": format!("127.0.0.1:{}", config.api_port),
                 "external_ui": "ui",
-                "secret": ""
+                "secret": "",
+                // Startup routing mode. Switching rule/global/direct at runtime is done
+                // live via `PATCH /configs` (no core restart) and persisted to the cache
+                // file; this only sets the mode for a fresh start with no cached value.
+                "default_mode": match config.proxy_mode {
+                    crate::types::ProxyMode::Global => "Global",
+                    crate::types::ProxyMode::Direct => "Direct",
+                    _ => "Rule",
+                }
             },
             /* Persist routing/fake-ip state across restarts. store_fakeip keeps the
                domain↔fake-IP mapping stable so long-lived connections survive a

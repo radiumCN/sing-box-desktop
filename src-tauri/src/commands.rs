@@ -23,21 +23,31 @@ pub struct TrayState {
     pub tun_item:       Mutex<Option<tauri::menu::CheckMenuItem<tauri::Wry>>>,
 }
 
-// ─── Sing-box Control ───────────────────────────────────────────────
+// ─── Sing-box Control (persistent-core model) ───────────────────────
+//
+// The core runs persistently while the app is open: it is started (idle, with only the
+// local mixed inbound) on launch and stopped on exit. An idle core intercepts nothing —
+// the mixed inbound just listens on a local port and triggers no DNS lookups until a
+// client actually uses it — so leaving it running has no effect on the system network.
+//
+// "Proxying" is therefore decoupled from "core running":
+//   • System proxy on/off = a pure Windows registry toggle pointing at the (already
+//     running) mixed port. Instant, no core restart.
+//   • TUN cannot run idle (its adapter captures all traffic the moment it is up), so a
+//     TUN switch still rebuilds the config and restarts the core. Turning TUN off drops
+//     the core back to the idle mixed-only state.
 
-/// Core start logic shared by the Tauri command and the tray menu handler.
-pub async fn start_proxy_internal(
+/// Ensure the core is running in the requested TUN mode. Builds the matching config and
+/// (re)starts the core only when needed — when it is not running, or when the running
+/// instance was started in a different TUN mode. Does NOT touch the system proxy.
+/// Returns once the core is up (or immediately if it was already in the right mode).
+pub async fn ensure_core(
     app_handle: &tauri::AppHandle,
     state: &AppState,
+    want_tun: bool,
 ) -> Result<(), String> {
-    let config = state.app_config.lock().unwrap().clone();
-    let outbounds = state.outbounds.lock().unwrap().clone();
-    let nodes = state.nodes.lock().unwrap().clone();
-    let active_tag = config.active_nodes.get("proxy").cloned();
-
-    // TUN mode preconditions: requires elevated privileges (admin on Windows, root on
-    // macOS/Linux). On Windows it additionally needs the WinTun driver.
-    if config.tun_enabled {
+    // TUN preconditions: elevated privileges (+ WinTun driver on Windows).
+    if want_tun {
         if !crate::tun::is_elevated() {
             return Err("TUN 模式需要管理员/root 权限。请在「设置 → TUN 模式」中点击「以管理员身份重启」后再启动。".to_string());
         }
@@ -45,8 +55,34 @@ pub async fn start_proxy_internal(
         if !crate::tun::wintun_available() {
             return Err("TUN 模式需要 WinTun 驱动。请在「设置 → TUN 模式」中点击「下载 WinTun」后再启动。".to_string());
         }
+    }
+
+    let (running, current_tun) = {
+        let s = state.singbox_state.lock().unwrap();
+        (s.running, s.tun_mode)
+    };
+    // Already running in the desired mode → nothing to do.
+    if running && current_tun == want_tun {
+        return Ok(());
+    }
+
+    // Persist the TUN flag first so the generated config matches the chosen mode.
+    {
+        let mut cfg = state.app_config.lock().unwrap();
+        cfg.tun_enabled = want_tun;
+        let cfg_clone = cfg.clone();
+        drop(cfg);
+        let _ = config::save_app_config(&cfg_clone);
+    }
+
+    if want_tun {
         crate::tun::cleanup_stale_tun_adapter().await;
     }
+
+    let config = state.app_config.lock().unwrap().clone();
+    let outbounds = state.outbounds.lock().unwrap().clone();
+    let nodes = state.nodes.lock().unwrap().clone();
+    let active_tag = config.active_nodes.get("proxy").cloned();
 
     let singbox_cfg = subscription::build_singbox_config(
         &outbounds,
@@ -54,39 +90,47 @@ pub async fn start_proxy_internal(
         active_tag.as_deref(),
         &nodes,
     );
-
     let config_path = config::singbox_config_path();
     config::ensure_dirs().map_err(|e| e.to_string())?;
     std::fs::write(&config_path, serde_json::to_string_pretty(&singbox_cfg).unwrap())
         .map_err(|e| e.to_string())?;
 
-    start_singbox(app_handle, &config_path, state.singbox_state.clone())
+    // Restart: the running instance uses the PREVIOUS tun setting, so a graceful
+    // (adapter-cleanup) shutdown is only needed when it was previously in TUN mode.
+    if running {
+        let _ = stop_singbox(state.singbox_state.clone(), current_tun).await;
+    }
+
+    start_singbox(app_handle, &config_path, state.singbox_state.clone(), config.api_port, want_tun)
         .await
         .map_err(|e| e.to_string())?;
 
-    // System proxy and TUN are mutually exclusive routing paths.
-    // When TUN is on it captures traffic at the network layer, so a WinINet
-    // system proxy would create a conflicting double-proxy path — skip it.
-    let enable_sys_proxy = !config.tun_enabled && config.proxy_mode != ProxyMode::Tun;
-    if enable_sys_proxy {
-        proxy::set_system_proxy(true, config.mixed_port)
-            .map_err(|e| e.to_string())?;
-    } else {
-        // Ensure any stale system proxy is cleared so it never coexists with TUN.
-        let _ = proxy::set_system_proxy(false, 0);
-    }
-
-    // Persist last running state for restore-on-startup
-    {
-        let mut cfg = state.app_config.lock().unwrap();
-        cfg.last_proxy_running = true;
-        cfg.last_system_proxy = enable_sys_proxy;
-        let cfg_clone = cfg.clone();
-        drop(cfg);
-        let _ = config::save_app_config(&cfg_clone);
+    // Make app config the source of truth for routing mode (the core may have a stale
+    // value cached from a previous session).
+    if let Some(m) = clash_mode_str(&config.proxy_mode) {
+        let _ = clash_set_mode(config.api_port, m).await;
     }
 
     Ok(())
+}
+
+fn clash_mode_str(mode: &ProxyMode) -> Option<&'static str> {
+    match mode {
+        ProxyMode::Global => Some("Global"),
+        ProxyMode::Direct => Some("Direct"),
+        ProxyMode::Rule => Some("Rule"),
+        ProxyMode::Tun => None,
+    }
+}
+
+/// Start the persistent core in its idle state (mixed inbound only, no TUN, no system
+/// proxy). Called on app launch when there is no proxy state to restore. Idempotent:
+/// no-op if the core is already running in non-TUN mode.
+pub async fn start_idle_core(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    ensure_core(app_handle, state, false).await
 }
 
 #[tauri::command]
@@ -94,21 +138,22 @@ pub async fn cmd_start_singbox(
     app_handle: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    start_proxy_internal(&app_handle, &state).await
+    // Map the legacy "start" entry point onto the persistent model: enable the proxy
+    // in the mode implied by the saved config (TUN if configured, else system proxy).
+    let want_tun = state.app_config.lock().unwrap().tun_enabled;
+    apply_connection_mode(&app_handle, &state, if want_tun { "tun" } else { "system" }).await
 }
 
 #[tauri::command]
 pub async fn cmd_stop_singbox(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    stop_singbox(state.singbox_state.clone())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    proxy::set_system_proxy(false, 0)
-        .map_err(|e| e.to_string())?;
-
-    // Persist last running state
+    // "Stop" in the dashboard sense = turn proxying off. The core keeps running idle so
+    // re-enabling is instant; full teardown happens only on app exit (see lib.rs).
+    // Clearing the system proxy is enough for a system-proxy session; a TUN session
+    // additionally needs the core rebuilt to idle, which the dashboard does via
+    // setConnectionMode("off") → apply_connection_mode. Here we just clear + persist.
+    let _ = proxy::set_system_proxy(false, 0);
     {
         let mut cfg = state.app_config.lock().unwrap();
         cfg.last_proxy_running = false;
@@ -117,66 +162,95 @@ pub async fn cmd_stop_singbox(
         drop(cfg);
         let _ = config::save_app_config(&cfg_clone);
     }
-
     Ok(())
 }
 
-/// Unified connection control shared by the tray menu (mirrors the dashboard's two
-/// mutually-exclusive switches). `mode` is one of:
-///   • "off"    → stop the core and clear the system proxy
-///   • "system" → run with the Windows system proxy (TUN forced off)
-///   • "tun"    → run in TUN mode (system proxy forced off)
-/// Restarts the core so the new config takes effect. On failure the TUN flag is
-/// rolled back so persisted state never diverges from what actually started.
+/// Unified connection control shared by the dashboard and the tray menu. `mode` is one of:
+///   • "off"    → clear the system proxy; if in TUN, drop the core back to idle. The core
+///                keeps running (idle) so the next enable is instant.
+///   • "system" → ensure an idle (non-TUN) core, then point the Windows system proxy at it.
+///   • "tun"    → rebuild + restart the core with the TUN inbound; clear the system proxy.
+/// On failure the TUN flag is rolled back so persisted state never diverges from reality.
 pub async fn apply_connection_mode(
     app_handle: &tauri::AppHandle,
     state: &AppState,
     mode: &str,
 ) -> Result<(), String> {
     if mode == "off" {
-        stop_singbox(state.singbox_state.clone())
-            .await
-            .map_err(|e| e.to_string())?;
         let _ = proxy::set_system_proxy(false, 0);
-        {
-            let mut cfg = state.app_config.lock().unwrap();
-            cfg.last_proxy_running = false;
-            cfg.last_system_proxy = false;
-            let cfg_clone = cfg.clone();
-            drop(cfg);
-            let _ = config::save_app_config(&cfg_clone);
+        // If TUN is active, return the core to the idle mixed-only state.
+        let in_tun = {
+            let s = state.singbox_state.lock().unwrap();
+            s.running && s.tun_mode
+        };
+        if in_tun {
+            // Best-effort: failing to rebuild idle still leaves us with proxy cleared.
+            let _ = ensure_core(app_handle, state, false).await;
         }
+        let mut cfg = state.app_config.lock().unwrap();
+        cfg.last_proxy_running = false;
+        cfg.last_system_proxy = false;
+        let cfg_clone = cfg.clone();
+        drop(cfg);
+        let _ = config::save_app_config(&cfg_clone);
         return Ok(());
     }
 
     let want_tun = mode == "tun";
-    // Persist the TUN flag first so the generated config matches the chosen mode.
-    let prev_tun = {
-        let mut cfg = state.app_config.lock().unwrap();
-        let prev = cfg.tun_enabled;
-        cfg.tun_enabled = want_tun;
-        let cfg_clone = cfg.clone();
-        drop(cfg);
-        let _ = config::save_app_config(&cfg_clone);
-        prev
-    };
+    let prev_tun = state.app_config.lock().unwrap().tun_enabled;
 
-    // Restart the core so the new (TUN vs system) config takes effect.
-    let running = state.singbox_state.lock().unwrap().running;
-    if running {
-        let _ = stop_singbox(state.singbox_state.clone()).await;
-    }
-
-    // start_proxy_internal sets / clears the system proxy itself based on the flag.
-    if let Err(e) = start_proxy_internal(app_handle, state).await {
-        let mut cfg = state.app_config.lock().unwrap();
-        cfg.tun_enabled = prev_tun;
-        let cfg_clone = cfg.clone();
-        drop(cfg);
-        let _ = config::save_app_config(&cfg_clone);
+    // Ensure the core is up in the right mode (instant when only the system proxy changes).
+    if let Err(e) = ensure_core(app_handle, state, want_tun).await {
+        // Roll back the TUN flag if ensure_core changed it but couldn't start.
+        if state.app_config.lock().unwrap().tun_enabled != prev_tun {
+            let mut cfg = state.app_config.lock().unwrap();
+            cfg.tun_enabled = prev_tun;
+            let cfg_clone = cfg.clone();
+            drop(cfg);
+            let _ = config::save_app_config(&cfg_clone);
+        }
         return Err(e);
     }
+
+    // Apply the routing path: system proxy ON for "system", cleared for "tun".
+    let enable_sys_proxy = !want_tun;
+    if enable_sys_proxy {
+        let port = state.app_config.lock().unwrap().mixed_port;
+        proxy::set_system_proxy(true, port).map_err(|e| e.to_string())?;
+    } else {
+        let _ = proxy::set_system_proxy(false, 0);
+    }
+
+    {
+        let mut cfg = state.app_config.lock().unwrap();
+        cfg.last_proxy_running = true;
+        cfg.last_system_proxy = enable_sys_proxy;
+        let cfg_clone = cfg.clone();
+        drop(cfg);
+        let _ = config::save_app_config(&cfg_clone);
+    }
     Ok(())
+}
+
+/// Dashboard / unified entry point for switching the connection mode. Delegates to
+/// `apply_connection_mode` so the dashboard and the tray menu share identical logic.
+#[tauri::command]
+pub async fn cmd_set_connection_mode(
+    app_handle: tauri::AppHandle,
+    mode: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    apply_connection_mode(&app_handle, &state, &mode).await
+}
+
+/// Full teardown of the core for app exit. Stops the process and clears the system proxy.
+pub async fn shutdown_core(state: &AppState) {
+    let graceful = {
+        let s = state.singbox_state.lock().unwrap();
+        s.running && s.tun_mode
+    };
+    let _ = stop_singbox(state.singbox_state.clone(), graceful).await;
+    let _ = proxy::set_system_proxy(false, 0);
 }
 
 #[tauri::command]
@@ -733,20 +807,64 @@ pub fn cmd_save_app_config(
     Ok(())
 }
 
+/// Switch the running core's Clash routing mode live via `PATCH /configs`. This takes
+/// effect immediately with NO core restart (sing-box re-evaluates routing per the
+/// clash_mode rules) and is persisted by the core to its cache file. Best-effort:
+/// callers persist the choice to app config first, so a later restart still applies it
+/// through `default_mode` even if this live call fails.
+async fn clash_set_mode(api_port: u16, mode: &str) -> Result<(), String> {
+    let url = format!("http://127.0.0.1:{}/configs", api_port);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .patch(&url)
+        .json(&serde_json::json!({ "mode": mode }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        Err(format!("Clash API 返回 {}", resp.status()))
+    }
+}
+
 #[tauri::command]
-pub fn cmd_set_proxy_mode(
+pub async fn cmd_set_proxy_mode(
     mode: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let mut config = state.app_config.lock().unwrap();
-    config.proxy_mode = match mode.as_str() {
+    let proxy_mode = match mode.as_str() {
         "rule" => ProxyMode::Rule,
         "global" => ProxyMode::Global,
         "direct" => ProxyMode::Direct,
         "tun" => ProxyMode::Tun,
         _ => return Err(format!("未知模式: {}", mode)),
     };
-    config::save_app_config(&config).map_err(|e| e.to_string())?;
+
+    let (api_port, running) = {
+        let mut config = state.app_config.lock().unwrap();
+        config.proxy_mode = proxy_mode.clone();
+        config::save_app_config(&config).map_err(|e| e.to_string())?;
+        let running = state.singbox_state.lock().unwrap().running;
+        (config.api_port, running)
+    };
+
+    // Apply live so the switch is instant (no restart). rule/global/direct map to the
+    // core's clash_mode; "tun" is a connection mode, not a routing mode, so skip it.
+    if running {
+        let clash_mode = match proxy_mode {
+            ProxyMode::Global => Some("Global"),
+            ProxyMode::Direct => Some("Direct"),
+            ProxyMode::Rule => Some("Rule"),
+            ProxyMode::Tun => None,
+        };
+        if let Some(m) = clash_mode {
+            let _ = clash_set_mode(api_port, m).await;
+        }
+    }
     Ok(())
 }
 

@@ -18,6 +18,10 @@ pub struct SingboxState {
     pub start_time: Option<Instant>,
     pub version: Option<String>,
     pub logs: Vec<String>,
+    /// Whether the currently-running core was started with the TUN inbound. Used to
+    /// decide whether a mode switch needs a config rebuild + restart (TUN) or can be
+    /// applied without touching the core (system-proxy toggle on a persistent core).
+    pub tun_mode: bool,
 }
 
 impl Default for SingboxState {
@@ -28,6 +32,7 @@ impl Default for SingboxState {
             start_time: None,
             version: None,
             logs: Vec::new(),
+            tun_mode: false,
         }
     }
 }
@@ -89,22 +94,58 @@ pub async fn get_version(binary_path: &std::path::Path) -> Result<String> {
 
 /// Kill any orphaned sing-box.exe processes left over from a previous run or app update.
 /// Uses process-name kill (not PID) so it catches instances started by any previous app version.
+///
+/// Only sleeps to let the OS release the bound ports when an orphan was actually found
+/// and killed — the common case (no orphan) returns immediately, saving ~400ms on every start.
 #[cfg(target_os = "windows")]
 async fn kill_orphan_singbox() {
-    // taskkill /F /IM sing-box.exe — returns error if no matching process; we ignore it.
-    let _ = TokioCommand::new("taskkill")
+    // taskkill /F /IM sing-box.exe exits 0 when it killed at least one process,
+    // and non-zero (128) when no matching process exists.
+    let killed = TokioCommand::new("taskkill")
         .args(["/F", "/IM", "sing-box.exe"])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
-        .await;
-    // Give the OS ~400ms to fully release the bound ports before we try to rebind.
-    tokio::time::sleep(Duration::from_millis(400)).await;
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if killed {
+        // Give the OS a moment to fully release the bound ports before we rebind.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
 async fn kill_orphan_singbox() {
-    let _ = TokioCommand::new("pkill").args(["-f", "sing-box"]).output().await;
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    let killed = TokioCommand::new("pkill")
+        .args(["-f", "sing-box"])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if killed {
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// Poll the Clash API control port until it accepts a TCP connection, signalling that
+/// sing-box has finished starting up. Returns as soon as the port is reachable (typically
+/// ~100-200ms) instead of blocking on a fixed delay. Caps out after ~2s so a config that
+/// never binds the port doesn't hang the caller indefinitely.
+async fn wait_until_ready(api_port: u16) {
+    let addr = format!("127.0.0.1:{}", api_port);
+    for _ in 0..40 {
+        if tokio::time::timeout(
+            Duration::from_millis(200),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 /// Start sing-box with the given config file
@@ -112,6 +153,8 @@ pub async fn start_singbox(
     app_handle: &tauri::AppHandle,
     config_path: &std::path::Path,
     state: SharedState,
+    api_port: u16,
+    tun_mode: bool,
 ) -> Result<()> {
     {
         let s = state.lock().unwrap();
@@ -150,6 +193,7 @@ pub async fn start_singbox(
             s.running = true;
             s.pid = pid;
             s.start_time = Some(Instant::now());
+            s.tun_mode = tun_mode;
         }
 
         // Read stderr for logs
@@ -172,18 +216,26 @@ pub async fn start_singbox(
         s.running = false;
         s.pid = None;
         s.start_time = None;
+        s.tun_mode = false;
     });
 
-    // Wait briefly for startup
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Return as soon as the control port is up instead of a fixed 500ms wait.
+    wait_until_ready(api_port).await;
 
     Ok(())
 }
 
 /// Stop sing-box.
-/// On Windows, first send a graceful Ctrl+Break so sing-box (and WinTun) can clean up
-/// the TUN adapter properly. If the process is still alive after 3 seconds, force-kill it.
-pub async fn stop_singbox(state: SharedState) -> Result<()> {
+///
+/// `graceful` should be true only when the running instance is in TUN mode: a graceful
+/// shutdown gives sing-box time to call WintunDeleteAdapter() and tear down the TUN driver
+/// cleanly. For plain system-proxy / mixed-inbound runs there is no adapter to clean up, so
+/// we force-kill immediately — that path is near-instant.
+///
+/// Liveness is detected by polling the in-memory `running` flag, which the background waiter
+/// task flips to false the moment `child.wait()` returns. This avoids spawning a slow
+/// `tasklist` process on every poll (the old approach cost up to ~3s).
+pub async fn stop_singbox(state: SharedState, graceful: bool) -> Result<()> {
     let pid = {
         let s = state.lock().unwrap();
         s.pid
@@ -192,42 +244,51 @@ pub async fn stop_singbox(state: SharedState) -> Result<()> {
     if let Some(pid) = pid {
         #[cfg(target_os = "windows")]
         {
-            // Graceful shutdown: taskkill without /F sends WM_CLOSE / Ctrl+Break,
-            // giving sing-box time to call WintunDeleteAdapter() and clean up the TUN driver.
-            let _ = TokioCommand::new("taskkill")
-                .args(["/PID", &pid.to_string()])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-                .await;
+            let mut exited = false;
 
-            // Wait up to 3 seconds for the process to exit gracefully.
-            for _ in 0..6 {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                let alive = TokioCommand::new("tasklist")
-                    .args(["/FI", &format!("PID eq {}", pid), "/NH"])
+            if graceful {
+                // Graceful shutdown: taskkill without /F asks the process to close so it can
+                // run its TUN cleanup before exiting.
+                let _ = TokioCommand::new("taskkill")
+                    .args(["/PID", &pid.to_string()])
                     .creation_flags(CREATE_NO_WINDOW)
                     .output()
-                    .await
-                    .map(|o| String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
-                    .unwrap_or(false);
-                if !alive {
-                    break;
+                    .await;
+
+                // Poll the shared state (no process spawn) up to ~1.5s for a clean exit.
+                for _ in 0..30 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    if !state.lock().unwrap().running {
+                        exited = true;
+                        break;
+                    }
                 }
             }
 
-            // Force-kill if still running (e.g. process ignores Ctrl+Break).
-            let _ = TokioCommand::new("taskkill")
-                .args(["/PID", &pid.to_string(), "/F"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .output()
-                .await;
+            // Force-kill if not already gone (or whenever a graceful wait wasn't requested).
+            if !exited {
+                let _ = TokioCommand::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/F"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output()
+                    .await;
+            }
         }
         #[cfg(not(target_os = "windows"))]
         {
-            TokioCommand::new("kill")
-                .args(["-SIGTERM", &pid.to_string()])
+            let signal = if graceful { "-SIGTERM" } else { "-SIGKILL" };
+            let _ = TokioCommand::new("kill")
+                .args([signal, &pid.to_string()])
                 .output()
-                .await?;
+                .await;
+            if graceful {
+                for _ in 0..30 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    if !state.lock().unwrap().running {
+                        break;
+                    }
+                }
+            }
         }
     }
 
