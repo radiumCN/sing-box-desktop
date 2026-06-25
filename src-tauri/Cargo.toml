@@ -1,6 +1,6 @@
 [package]
 name = "skylark"
-version = "0.2.8"
+version = "0.2.9"
 description = "Skylark — cross-platform (Windows / macOS) GUI proxy client powered by sing-box"
 authors = ["radium"]
 edition = "2021"
@@ -40,7 +40,7 @@ tar = "0.4"
 futures-util = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-winapi = { version = "0.3", features = ["processthreadsapi", "securitybaseapi", "winnt", "shellapi", "winuser", "psapi", "handleapi", "wininet"] }
+winapi = { version = "0.3", features = ["processthreadsapi", "securitybaseapi", "winnt", "shellapi", "winuser", "psapi", "handleapi", "wininet", "wincon", "consoleapi"] }
 winreg = "0.52"
 
 [target.'cfg(unix)'.dependencies]

@@ -20,6 +20,45 @@ fn open_daily_log_file() -> Option<std::fs::File> {
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Ask sing-box to shut down **gracefully** by delivering a console Ctrl+C, which Go maps
+/// to `os.Interrupt`/SIGINT — triggering sing-box's own shutdown path, including TUN
+/// teardown (`WintunDeleteAdapter`) and `strict_route` route cleanup. A hard `taskkill /F`
+/// skips all of that and orphans the TUN adapter + routes, which later surfaces as
+/// "TUN on, but no network" after a restart.
+///
+/// How it works: the core is spawned with `CREATE_NO_WINDOW`, so it owns a hidden console
+/// we can attach to. Because we attach to that console, the broadcast Ctrl+C would also hit
+/// this GUI process — so we first install a NULL "ignore" handler on ourselves, fire
+/// `CTRL_C_EVENT` to the whole attached console group, then detach and restore our handler.
+///
+/// IMPORTANT: the core must NOT be started with `CREATE_NEW_PROCESS_GROUP`, since new
+/// process groups have Ctrl+C disabled by default — it is intentionally absent at spawn.
+///
+/// Returns `false` if attaching/sending failed (process already gone, or no console), in
+/// which case the caller should fall back to a force kill.
+#[cfg(target_os = "windows")]
+fn send_ctrl_c(pid: u32) -> bool {
+    use winapi::um::consoleapi::SetConsoleCtrlHandler;
+    use winapi::um::wincon::{AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, CTRL_C_EVENT};
+
+    unsafe {
+        // Detach from any console we might already own; a GUI build normally has none, and
+        // AttachConsole fails with ERROR_ACCESS_DENIED if we are already attached elsewhere.
+        FreeConsole();
+        if AttachConsole(pid) == 0 {
+            return false;
+        }
+        // Disable Ctrl+C handling for OURSELVES so the broadcast below doesn't terminate the
+        // GUI process along with the core.
+        SetConsoleCtrlHandler(None, 1);
+        let sent = GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) != 0;
+        // Leave the core's console and re-enable normal Ctrl handling for ourselves.
+        FreeConsole();
+        SetConsoleCtrlHandler(None, 0);
+        sent
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SingboxState {
     pub running: bool,
@@ -296,20 +335,20 @@ pub async fn stop_singbox(state: SharedState, graceful: bool) -> Result<()> {
             let mut exited = false;
 
             if graceful {
-                // Graceful shutdown: taskkill without /F asks the process to close so it can
-                // run its TUN cleanup before exiting.
-                let _ = TokioCommand::new("taskkill")
-                    .args(["/PID", &pid.to_string()])
-                    .creation_flags(CREATE_NO_WINDOW)
-                    .output()
-                    .await;
-
-                // Poll the shared state (no process spawn) up to ~1.5s for a clean exit.
-                for _ in 0..30 {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    if !state.lock().unwrap().running {
-                        exited = true;
-                        break;
+                // Graceful shutdown: deliver a real Ctrl+C (→ SIGINT) so sing-box runs its
+                // own TUN teardown (WintunDeleteAdapter) and strict_route cleanup before
+                // exiting — the previous `taskkill` (no /F) sent WM_CLOSE, which a windowless
+                // console process never receives, so it always fell through to a force kill
+                // and orphaned the TUN adapter/routes.
+                if send_ctrl_c(pid) {
+                    // TUN driver teardown can take a beat; poll the shared state (no process
+                    // spawn) up to ~3s, returning as soon as the core has actually exited.
+                    for _ in 0..60 {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        if !state.lock().unwrap().running {
+                            exited = true;
+                            break;
+                        }
                     }
                 }
             }

@@ -207,6 +207,17 @@ pub fn run() {
                         } else {
                             "system"
                         };
+                        // Restoring TUN right after an app upgrade is the one case where a
+                        // previous, force-killed core may have left a stale TUN adapter and
+                        // strict routes behind (a pre-fix old version won't have cleaned up
+                        // during its update teardown). Proactively remove the leftover and
+                        // let Windows settle before re-creating TUN, so the restored tunnel
+                        // doesn't layer onto dying routes and black-hole all traffic. This is
+                        // a once-per-launch cold path, so it doesn't affect toggle latency.
+                        if mode == "tun" {
+                            crate::tun::cleanup_stale_tun_adapter().await;
+                            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                        }
                         // Fall back to an idle core if restoring the saved mode fails
                         // (e.g. TUN without admin rights this session).
                         if crate::commands::apply_connection_mode(&handle, state.inner(), mode)

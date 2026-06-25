@@ -654,7 +654,23 @@ pub async fn download_and_install_app(
     {
         use tauri::Manager;
         let state = app_handle.state::<crate::commands::AppState>();
+        // Capture TUN status BEFORE teardown. The graceful `taskkill` (no /F) can't reach
+        // sing-box — a windowless console process — so the core is always force-killed,
+        // which skips its WintunDeleteAdapter() + strict_route route cleanup. That leaves
+        // the TUN adapter and its strict routes behind. If the upgraded app then restores
+        // TUN on top of that stale adapter, traffic is black-holed → "TUN on, no network".
+        let was_tun = {
+            let s = state.singbox_state.lock().unwrap();
+            s.running && s.tun_mode
+        };
         crate::commands::shutdown_core(state.inner()).await;
+        // Deterministically remove the leftover TUN adapter NOW, while this (still elevated)
+        // process is alive. The subsequent install runs for several seconds, giving Windows
+        // ample time to settle the routing table before the relaunched app re-creates TUN —
+        // breaking the rapid-restart race that the new app's own cleanup can't win on its own.
+        if was_tun {
+            crate::tun::cleanup_stale_tun_adapter().await;
+        }
     }
 
     // Launch the installer.

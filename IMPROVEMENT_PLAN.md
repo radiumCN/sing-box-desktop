@@ -223,6 +223,27 @@
 - **影响文件**：`src-tauri/src/lib.rs`、`src/stores/app.ts`。
 - **验证**：`cargo check` 无警告、`vue-tsc` 通过。
 
+### F7. 更新重启后 TUN「已连接但无网络」✅ 已完成（2026-06-25）
+- **复现**：TUN 模式下载更新 → 不关 TUN 直接安装 → 重启后自动恢复 TUN，但无真实速率、代理不生效（UI 显示已连接）。
+- **根因**：TUN inbound 用 `auto_route + strict_route`。`stop_singbox` 的 graceful 路径用 `taskkill /PID`（不带 `/F`）发 `WM_CLOSE`，但 sing-box 是 `CREATE_NO_WINDOW` 的无窗口控制台进程收不到 → 超时后强杀 `/F`，**跳过 WintunDeleteAdapter + strict_route 路由清理**，残留 TUN 网卡与强制路由。更新时安装器秒级重启 App，新 App 的 `cleanup_stale_tun_adapter`→建新 TUN 在极短窗口内连续发生，OS 路由表来不及收敛，新 `strict_route` 叠加在残留路由上 → 流量黑洞。`wait_until_ready` 只探测 Clash API 端口、不校验 TUN 路由，故"启动成功"假象。
+- **修复**：
+  - `updater.rs`：更新拆除阶段在 `shutdown_core` 后、安装器重启前，于**仍提权的旧进程**内显式 `cleanup_stale_tun_adapter()`（仅当先前为 TUN）；安装耗时即成为 OS 路由收敛缓冲，破除竞态。
+  - `lib.rs`：启动恢复 TUN 前主动清理残留网卡 + 800ms 收敛等待（冷路径，每次启动仅一次，不影响运行时切换延迟），使「从无此修复的旧版本升级」与崩溃重启场景也能自愈。
+- **影响文件**：`src-tauri/src/updater.rs`、`src-tauri/src/lib.rs`。
+- **验证**：`cargo check` 无警告。
+
+#### F7+. 真正优雅退出 sing-box（从源头消除残留）✅ 已完成（2026-06-25）
+- **背景**：F7 的根因之一是 graceful 停止对无窗口控制台进程无效——`taskkill /PID`（无 `/F`）发 `WM_CLOSE`，sing-box（`CREATE_NO_WINDOW` 的无窗口控制台进程）收不到，超时后强杀，跳过自身 TUN/路由清理。
+- **实现**：改为投递**真正的 Ctrl+C**（→ Go `os.Interrupt`/SIGINT），触发 sing-box 自身的 `WintunDeleteAdapter` + `strict_route` 清理。
+  - `singbox.rs` 新增 `send_ctrl_c(pid)`（Windows）：`FreeConsole → AttachConsole(pid)`（核心由 `CREATE_NO_WINDOW` 启动，拥有可附加的隐藏 console）→ `SetConsoleCtrlHandler(NULL, TRUE)`（自身忽略，避免连带杀掉 GUI）→ `GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)` → `FreeConsole` + 恢复 handler。
+  - `stop_singbox` 的 graceful 分支用 `send_ctrl_c` 替代无效的 `taskkill`，轮询最多 ~3s 等待核心自行退出，仍未退出再 `/F` 兜底。
+  - **关键约束**：核心**不得**用 `CREATE_NEW_PROCESS_GROUP` 启动（新进程组默认禁用 Ctrl+C）——保持现有启动 flag 不变。
+  - `Cargo.toml`：winapi 增加 `wincon`、`consoleapi` features。
+- **效果**：TUN 停止/重启/更新拆除时核心都能自清理，网卡/路由不再常驻；F7 的清理与收敛等待降级为兜底防御。
+- **影响文件**：`src-tauri/src/singbox.rs`、`src-tauri/Cargo.toml`。
+- **验证**：`cargo check` 无警告、`cargo test --lib` 37 passed。
+- **跨平台**：macOS/Linux 原本即用 `SIGTERM` 优雅停止，行为一致。
+
 ---
 
 ## 建议执行顺序
