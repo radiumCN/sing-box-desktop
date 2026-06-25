@@ -92,33 +92,30 @@ jobs:
       # first run without a proxy. We download the binary matching the BUILD TARGET (not
       # the runner arch — macOS Intel is cross-compiled on an arm64 runner), name it with
       # the Rust target triple Tauri expects, and place it in src-tauri/binaries/.
-      # Pin with the SING_BOX_VERSION env below, or leave empty to track latest stable.
+      # The version is pinned for reproducible releases — bump SING_BOX_VERSION to upgrade.
       - name: Bundle sing-box kernel (sidecar)
         shell: bash
         env:
-          SING_BOX_VERSION: ''
+          SING_BOX_VERSION: '1.13.14'
         run: |
-          set -euo pipefail
-          if [ -n "${SING_BOX_VERSION}" ]; then
-            SB_VER="${SING_BOX_VERSION}"
-          else
-            SB_TAG=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest \
-              | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)
-            SB_VER="${SB_TAG#v}"
-          fi
+          set -eu
+          SB_VER="${SING_BOX_VERSION}"
+          DIR="sing-box-${SB_VER}-${{ matrix.sb_os }}-${{ matrix.sb_arch }}"
           echo "Bundling sing-box v${SB_VER} for ${{ matrix.sb_os }}-${{ matrix.sb_arch }} (${{ matrix.sb_triple }})"
           mkdir -p src-tauri/binaries
-          DIR="sing-box-${SB_VER}-${{ matrix.sb_os }}-${{ matrix.sb_arch }}"
+          rm -rf sb_tmp && mkdir sb_tmp
           if [ "${{ matrix.sb_os }}" = "windows" ]; then
-            EXT="zip"; BIN="sing-box.exe"; OUT="sing-box-${{ matrix.sb_triple }}.exe"
+            curl -fL --retry 3 -o sb.zip "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/${DIR}.zip"
+            # Git-bash's tar is GNU tar and cannot read zip; use PowerShell, which is always present.
+            powershell -Command "Expand-Archive -Path sb.zip -DestinationPath sb_tmp -Force"
+            mv "sb_tmp/${DIR}/sing-box.exe" "src-tauri/binaries/sing-box-${{ matrix.sb_triple }}.exe"
           else
-            EXT="tar.gz"; BIN="sing-box"; OUT="sing-box-${{ matrix.sb_triple }}"
+            curl -fL --retry 3 -o sb.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/${DIR}.tar.gz"
+            tar -xzf sb.tar.gz -C sb_tmp
+            mv "sb_tmp/${DIR}/sing-box" "src-tauri/binaries/sing-box-${{ matrix.sb_triple }}"
+            chmod +x "src-tauri/binaries/sing-box-${{ matrix.sb_triple }}"
           fi
-          curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/${DIR}.${EXT}" -o "sb.${EXT}"
-          # bsdtar (Windows/macOS runners) extracts zip; GNU/bsd tar (Linux) extracts tar.gz.
-          tar -xf "sb.${EXT}" --strip-components=1 -C src-tauri/binaries "${DIR}/${BIN}"
-          mv "src-tauri/binaries/${BIN}" "src-tauri/binaries/${OUT}"
-          [ "${{ matrix.sb_os }}" = "windows" ] || chmod +x "src-tauri/binaries/${OUT}"
+          rm -rf sb_tmp
           ls -l src-tauri/binaries
 
       - name: Build and publish release
