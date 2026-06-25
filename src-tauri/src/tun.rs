@@ -163,9 +163,9 @@ pub fn tun_service_installed() -> bool {
 #[cfg(target_os = "macos")]
 pub fn install_tun_service() -> Result<()> {
     let user = current_username().ok_or_else(|| anyhow!("无法确定当前用户"))?;
-    let src = crate::updater::singbox_binary_path();
+    let src = crate::updater::resolved_singbox_path();
     if !src.exists() {
-        return Err(anyhow!("请先在「设置」中下载 sing-box 内核，再安装 TUN 服务"));
+        return Err(anyhow!("未找到 sing-box 内核，无法安装 TUN 服务，请重新安装应用或在「设置」中下载内核"));
     }
     let src_str = src.to_string_lossy().to_string();
 
@@ -277,7 +277,7 @@ pub async fn cleanup_stale_tun_adapter() {}
 /// so we always report it as available.
 #[cfg(target_os = "windows")]
 pub fn wintun_available() -> bool {
-    let bin_dir = crate::updater::singbox_binary_path()
+    let bin_dir = crate::updater::resolved_singbox_path()
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));

@@ -20,24 +20,36 @@ jobs:
             args: '--bundles nsis'
             rust_targets: ''
             name: Windows x64
+            sb_triple: x86_64-pc-windows-msvc
+            sb_os: windows
+            sb_arch: amd64
 
           # macOS Apple Silicon — DMG (.dmg aarch64)
           - platform: macos-15
             args: '--target aarch64-apple-darwin --bundles dmg'
             rust_targets: 'aarch64-apple-darwin'
             name: macOS Apple Silicon
+            sb_triple: aarch64-apple-darwin
+            sb_os: darwin
+            sb_arch: arm64
 
           # macOS Intel — DMG (.dmg x86_64)，在 Apple Silicon runner 上交叉编译
           - platform: macos-15
             args: '--target x86_64-apple-darwin --bundles dmg'
             rust_targets: 'x86_64-apple-darwin'
             name: macOS Intel
+            sb_triple: x86_64-apple-darwin
+            sb_os: darwin
+            sb_arch: amd64
 
           # Linux x64 — AppImage + deb
           - platform: ubuntu-22.04
             args: '--bundles appimage,deb'
             rust_targets: ''
             name: Linux x64
+            sb_triple: x86_64-unknown-linux-gnu
+            sb_os: linux
+            sb_arch: amd64
 
     runs-on: ${{ matrix.platform }}
     name: Build (${{ matrix.name }})
@@ -76,6 +88,39 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      # Bundle the sing-box kernel as a Tauri sidecar (externalBin) so the app works on
+      # first run without a proxy. We download the binary matching the BUILD TARGET (not
+      # the runner arch — macOS Intel is cross-compiled on an arm64 runner), name it with
+      # the Rust target triple Tauri expects, and place it in src-tauri/binaries/.
+      # Pin with the SING_BOX_VERSION env below, or leave empty to track latest stable.
+      - name: Bundle sing-box kernel (sidecar)
+        shell: bash
+        env:
+          SING_BOX_VERSION: ''
+        run: |
+          set -euo pipefail
+          if [ -n "${SING_BOX_VERSION}" ]; then
+            SB_VER="${SING_BOX_VERSION}"
+          else
+            SB_TAG=$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest \
+              | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)
+            SB_VER="${SB_TAG#v}"
+          fi
+          echo "Bundling sing-box v${SB_VER} for ${{ matrix.sb_os }}-${{ matrix.sb_arch }} (${{ matrix.sb_triple }})"
+          mkdir -p src-tauri/binaries
+          DIR="sing-box-${SB_VER}-${{ matrix.sb_os }}-${{ matrix.sb_arch }}"
+          if [ "${{ matrix.sb_os }}" = "windows" ]; then
+            EXT="zip"; BIN="sing-box.exe"; OUT="sing-box-${{ matrix.sb_triple }}.exe"
+          else
+            EXT="tar.gz"; BIN="sing-box"; OUT="sing-box-${{ matrix.sb_triple }}"
+          fi
+          curl -fsSL "https://github.com/SagerNet/sing-box/releases/download/v${SB_VER}/${DIR}.${EXT}" -o "sb.${EXT}"
+          # bsdtar (Windows/macOS runners) extracts zip; GNU/bsd tar (Linux) extracts tar.gz.
+          tar -xf "sb.${EXT}" --strip-components=1 -C src-tauri/binaries "${DIR}/${BIN}"
+          mv "src-tauri/binaries/${BIN}" "src-tauri/binaries/${OUT}"
+          [ "${{ matrix.sb_os }}" = "windows" ] || chmod +x "src-tauri/binaries/${OUT}"
+          ls -l src-tauri/binaries
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -94,7 +139,7 @@ jobs:
             | Linux (AppImage) | `*.AppImage` |
             | Linux (Debian/Ubuntu) | `*.deb` |
 
-            > **注意**：首次运行需要自行下载 [sing-box 内核](https://github.com/SagerNet/sing-box/releases/latest)。
+            > 安装包已内置 sing-box 内核，开箱即用，无需手动下载。如需升级内核，可在「设置」页面单独下载新版本。
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}

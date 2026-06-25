@@ -454,19 +454,45 @@ fn extract_binary_from_tar_gz(data: &[u8], dest: &PathBuf) -> Result<()> {
     Err(anyhow!("压缩包中未找到 {}", target))
 }
 
-/// Get sing-box binary path
+/// Path of the user-downloaded sing-box binary in the app data dir. A user-downloaded
+/// build always wins over the bundled one, so people can self-upgrade the kernel.
 pub fn singbox_binary_path() -> PathBuf {
     crate::config::app_data_dir().join("bin").join(singbox_binary_name())
 }
 
-/// Check if sing-box binary exists
+/// Path of the sing-box kernel shipped with the app as a Tauri sidecar (`externalBin`).
+/// At bundle time Tauri strips the target-triple suffix and places the binary right next
+/// to the main executable, so the sidecar lives in the running app's own directory:
+///   • Windows/Linux → alongside the app exe
+///   • macOS         → `Skylark.app/Contents/MacOS/sing-box`
+pub fn bundled_singbox_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(singbox_binary_name())
+}
+
+/// The sing-box binary actually used at runtime: a user-downloaded build takes priority,
+/// otherwise the bundled sidecar that ships inside the installer — so the app works on
+/// first run without needing a proxy to download the kernel (the chicken-and-egg case).
+pub fn resolved_singbox_path() -> PathBuf {
+    let user = singbox_binary_path();
+    if user.exists() {
+        user
+    } else {
+        bundled_singbox_path()
+    }
+}
+
+/// Check if a usable sing-box binary exists (user-downloaded or bundled sidecar).
 pub fn singbox_exists() -> bool {
-    singbox_binary_path().exists()
+    resolved_singbox_path().exists()
 }
 
 /// Get current installed version by running sing-box version
 pub async fn get_installed_version() -> Option<String> {
-    let path = singbox_binary_path();
+    let path = resolved_singbox_path();
     if !path.exists() {
         return None;
     }

@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 use serde_json::Value;
-use tauri::{Manager, Emitter};
+use tauri::Emitter;
 use tokio::process::Command as TokioCommand;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -92,33 +92,15 @@ pub fn new_shared_state() -> SharedState {
 }
 
 /// Get the sing-box binary path.
-/// Priority: user-downloaded binary in app data dir > bundled sidecar
-pub fn singbox_binary_path(app_handle: &tauri::AppHandle) -> Result<std::path::PathBuf> {
-    // 1. User-downloaded binary takes priority
-    let user_path = crate::updater::singbox_binary_path();
-    if user_path.exists() {
-        return Ok(user_path);
-    }
-
-    // 2. Fall back to bundled sidecar
-    let resource_path = app_handle
-        .path()
-        .resource_dir()
-        .map_err(|e| anyhow!("无法获取资源目录: {}", e))?;
-
-    #[cfg(target_os = "windows")]
-    let binary = "binaries/sing-box.exe";
-    #[cfg(not(target_os = "windows"))]
-    let binary = "binaries/sing-box";
-
-    let path = resource_path.join(binary);
+/// Priority: user-downloaded binary in app data dir > bundled sidecar shipped with the app.
+pub fn singbox_binary_path() -> Result<std::path::PathBuf> {
+    let path = crate::updater::resolved_singbox_path();
     if path.exists() {
         return Ok(path);
     }
-
     Err(anyhow!(
-        "未找到 sing-box 可执行文件。请在设置页面下载。\n检查路径: {:?}",
-        user_path
+        "未找到 sing-box 可执行文件。请在设置页面下载，或重新安装应用。\n检查路径: {:?}",
+        path
     ))
 }
 
@@ -229,7 +211,7 @@ pub async fn start_singbox(
     // This prevents "address already in use" errors on the mixed/http/socks ports.
     kill_orphan_singbox().await;
 
-    let binary = singbox_binary_path(app_handle)?;
+    let binary = singbox_binary_path()?;
     let config_path = config_path.to_path_buf();
     let state_clone = state.clone();
     let app_log = app_handle.clone();
