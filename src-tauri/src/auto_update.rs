@@ -113,7 +113,7 @@ async fn do_update_subscription(
 ) -> anyhow::Result<usize> {
     let resp = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
-        .user_agent("ClashForWindows/0.20.39")
+        .user_agent(crate::config::subscription_user_agent())
         .build()?
         .get(url)
         .send()

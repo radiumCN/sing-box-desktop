@@ -79,6 +79,7 @@ export interface AppConfig {
   enable_ipv6: boolean;
   dns_local: string;
   log_to_file: boolean;
+  subscription_user_agent: string;
 }
 
 export interface TrafficPoint {
@@ -119,6 +120,7 @@ export const useAppStore = defineStore("app", () => {
     enable_ipv6: false,
     dns_local: "223.5.5.5",
     log_to_file: false,
+    subscription_user_agent: "v2rayN/6.45",
   });
   const trafficHistory = ref<TrafficPoint[]>([]);
   // Cumulative bytes since the core started (authoritative, from the Clash API).

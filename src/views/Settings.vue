@@ -685,6 +685,32 @@ onUnmounted(() => {
     </section>
 
     <!-- DNS / 网络 -->
+    <!-- Subscription -->
+    <section class="settings-section">
+      <div class="section-header">
+        <RefreshCw :size="15" />
+        <span>订阅</span>
+      </div>
+      <div class="card settings-card">
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">订阅 User-Agent</div>
+            <div class="setting-desc">
+              拉取订阅时发送的客户端标识。部分机场按 UA 返回不同内容——旧版 Clash 标识可能只返回「请更换客户端」占位节点。
+              常用：<code>v2rayN/6.45</code>、<code>clash-verge/v2.0.0</code>、<code>ClashMetaForAndroid/2.10</code>、<code>sing-box/1.12</code>。留空恢复默认。
+            </div>
+          </div>
+          <input
+            class="input"
+            type="text"
+            v-model.trim="localConfig.subscription_user_agent"
+            placeholder="v2rayN/6.45"
+            style="width:220px"
+          />
+        </div>
+      </div>
+    </section>
+
     <section class="settings-section">
       <div class="section-header">
         <Globe :size="15" />

@@ -4,6 +4,28 @@ use anyhow::Result;
 use serde_json::Value;
 use crate::types::{AppConfig, Subscription, ProxyNode};
 
+/// User-Agent used when fetching subscriptions. Many airports gate the returned content
+/// on the client UA: a legacy "Clash" identifier (e.g. `ClashForWindows`) makes
+/// protocol-rich airports (vless-reality / hysteria2 / tuic) serve a "please switch
+/// client" placeholder config (fake `ss` nodes on 127.0.0.1) instead of the real nodes,
+/// because the original Clash core cannot handle those protocols. A modern, widely
+/// whitelisted client identifier makes them return the universal Base64 node list (or a
+/// Clash.Meta YAML), both of which the parser fully supports. Our core is sing-box, which
+/// supports every protocol these airports serve.
+pub const SUBSCRIPTION_USER_AGENT: &str = "v2rayN/6.45";
+
+/// Effective subscription User-Agent: the user-configured value, or the built-in default
+/// when it is unset/blank. Read fresh from the persisted config so a settings change takes
+/// effect on the next fetch without restarting.
+pub fn subscription_user_agent() -> String {
+    let ua = load_app_config().subscription_user_agent;
+    if ua.trim().is_empty() {
+        SUBSCRIPTION_USER_AGENT.to_string()
+    } else {
+        ua
+    }
+}
+
 pub fn app_data_dir() -> PathBuf {
     let base = dirs_next::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."));

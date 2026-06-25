@@ -3,7 +3,7 @@
 > 基于对当前代码库（Rust 后端 + Vue 3 前端 + Tauri v2）的完整审阅整理。
 > 目标：先修确定性 Bug，再还工程债，最后补功能。每项均含「问题 / 根因 / 方案 / 影响文件 / 风险 / 验证」。
 
-> **进度更新（2026-06-25）**：P0 批次（B1 / B2 / B3）、B4、Q2、F1、S1、Q3、Q4、F3 已完成；Q1 巨型函数已拆为 5 个纯函数并补至 25 个测试；F2 完成 SS 健壮性批次（base64 修复 + plugin）；全量改名为品牌 `Skylark` 并同步远端仓库 `radiumCN/skylark`；F4 完成配置导入/导出（备份）批次，并核实节点搜索/批量测速本已存在、TUN mtu 9000 为内核默认。F2 批次 2 完成 Clash YAML 的 SS plugin/plugin-opts 映射；F4 全部完成（配置备份 + 日志可选落盘/事件增量推送）。后端 `cargo test --lib` 28 passed、前端 `vue-tsc` 均通过。仅剩 F2 WireGuard（暂缓，需 1.12 endpoint 模型）与 vmess/vless 字段查漏。
+> **进度更新（2026-06-25）**：P0 批次（B1 / B2 / B3）、B4、Q2、F1、S1、Q3、Q4、F3 已完成；Q1 巨型函数已拆为 5 个纯函数并补至 25 个测试；F2 完成 SS 健壮性批次（base64 修复 + plugin）；全量改名为品牌 `Skylark` 并同步远端仓库 `radiumCN/skylark`；F4 完成配置导入/导出（备份）批次，并核实节点搜索/批量测速本已存在、TUN mtu 9000 为内核默认。F2 批次 2/3 完成 Clash YAML 的 SS plugin 映射、hysteria2 健壮性（端口跳跃/pinSHA256/salamander/alpn）、vmess `scy` + vless `packet_encoding` + alpn 查漏；F4 全部完成（配置备份 + 日志可选落盘/事件增量推送）；F5 修复订阅获取健壮性（UA 默认值+可配置、节点名 percent-decode 乱码）。后端 `cargo test --lib` 37 passed、前端 `vue-tsc` 均通过。仅剩 F2 WireGuard（暂缓，需 1.12 endpoint 模型）。
 
 ## 优先级总览
 
@@ -114,7 +114,7 @@
 - **影响文件**：`commands.rs`、`types.rs`、`auto_update.rs`（自动更新路径同样解析）、`src/views/Subscriptions.vue`、`stores/app.ts`
 - **风险**：低；字段缺失需容错。
 
-### F2. 协议覆盖不全 🟡 SS 健壮性 + Clash SS plugin 已完成（批次 1 + 2）
+### F2. 协议覆盖不全 🟡 批次 1-3 已完成（SS 健壮性 / Clash SS plugin / hysteria2+vmess+vless 查漏），仅 WireGuard 暂缓
 - **问题**：SS 链接 `plugin`（obfs / v2ray-plugin）未支持、带 plugin 的 SS 被静默降级；标准 SIP002 base64 userinfo 解析错误（Q1 测出）。
   - `src-tauri/src/subscription.rs`（各 `parse_*` 与 `clash_yaml_proxy_to_singbox`）
 - **本次完成（批次 1：SS 链接健壮性）**：
@@ -128,8 +128,13 @@
   - 测试 +3：obfs 映射、v2ray-plugin 映射、无 plugin 不带 plugin 字段（`cargo test --lib` 28 passed）。
 - **不可行（已确认）**：**SSR** — sing-box 内核无 `shadowsocksr` 出站类型，解析后无法生成有效配置，故不支持。
 - **WireGuard（暂缓，附理由）**：本项目目标内核为 **sing-box ≥ 1.12**（配置已用 1.12 新 DNS `servers[].type`、route `action: sniff/hijack-dns`、`default_domain_resolver`）。自 1.11 起 WireGuard 已**从 `outbound` 迁移为 `endpoint`**，需新增顶层 `endpoints` 数组、并改动 `build_proxy_outbounds`/选择器/`parse_subscription` 的数据模型（区分 outbound 与 endpoint，且 endpoint tag 仍要可被选择器引用）。该改动体量大、schema 版本敏感，且无法在当前环境对真实内核验证；为避免生成内核拒绝的配置，单列为独立任务，待确认内核版本后实现。
-- **仍待办（查漏）**：vmess/vless 缺失字段（alpn / packet-encoding）。
+- **本次完成（批次 3：hysteria2 健壮性 + vmess/vless 字段查漏）**：
+  - **hysteria2**（实测 liangxin 订阅驱动）：新增 `hysteria2_server_ports()` 把 `mport=60000-65530` / 多段 `443,8443-8500` 转为 sing-box 冒号格式 `["60000:65530"]`（已核对 sing-quic 统一为冒号、`server_port` 在 `server_ports` 存在时被忽略，保留基础端口不报错）；`pinSHA256`（sing-box 无指纹校验等价）→ `tls.insecure: true` 以保连通；salamander `obfs`+`obfs-password`（仅在 type=salamander 且有密码时生成，避免内核 `unknown obfs type` / `missing obfs password`）；`alpn`、`up`/`down` mbps（`parse_mbps` 容错单位）。
+  - **vless**：新增 `packet_encoding`（xudp/packetaddr）与 `tls.alpn`。
+  - **vmess**：新增 `scy` 加密方式（覆盖原写死的 `auto`）与 `tls.alpn`。
+  - 测试 +7（hysteria2 端口跳跃/多段/pinSHA256/salamander/缺密码丢弃、vless packet_encoding+alpn、vmess scy）：`cargo test --lib` 37 passed。
 - **影响文件**：`src-tauri/src/subscription.rs`。
+- **剩余**：仅 WireGuard（暂缓，见上）。
 
 ### F3. IPv6 关闭、DNS 写死 ✅ 已完成（2026-06-25）
 - **问题**：DNS `strategy: "ipv4_only"` + fakeip 仅 `inet4_range`，纯 IPv6 资源不可达；DNS 服务器写死 `223.5.5.5`，不支持 DoH/DoT 与自定义。
@@ -196,6 +201,16 @@
   - 前端：`Settings.vue`「系统行为」新增「日志写入文件」开关；`stores/app.ts` 接口与默认值同步。
 - **影响文件**：`types.rs`、`singbox.rs`、`commands.rs`（既有 `cmd_export_logs`）、`src/views/Logs.vue`、`src/views/Settings.vue`、`src/stores/app.ts`。
 - **验证**：`cargo check` 无警告、`cargo test --lib` 28 passed、`vue-tsc` 通过。
+
+### F5. 订阅获取健壮性（用户实测发现）✅ 已完成（2026-06-25）
+- **问题 1（显示「不支持」占位节点）**：拉订阅的 User-Agent 写死为 `ClashForWindows/0.20.39`（老版 Clash，不支持 vless-reality / hysteria2）。V2board 类机场按 UA 返回「请更换客户端」占位配置（一堆 `ss 127.0.0.1:65535`）而非真实节点。
+  - **根因**：机场按客户端 UA 分发不同订阅模板；旧 Clash 标识被判为不支持现代协议。我们的内核是 sing-box，全协议支持。
+  - **修复**：默认 UA 改为 `v2rayN/6.45`（机场白名单内、返回通用 base64 节点列表），并**做成可配置项**——`AppConfig.subscription_user_agent`（`serde(default)`，空值回退默认）；`config::subscription_user_agent()` 实时读取，`fetch_url` 与 `auto_update` 共用；`Settings.vue` 新增「订阅」区输入框 + 常用预设。
+- **问题 2（节点名乱码）**：`Url::fragment()` 返回**未解码**的百分号编码串，6 个 `parse_*`（vless/ss/trojan/hysteria2/tuic/anytls）直接使用，导致节点名显示为 `%E5%89%A9...`。
+  - **修复**：新增无依赖 `percent_decode()` + `node_name_from_fragment()`，统一对 fragment 名 percent-decode（UTF-8，残缺转义原样保留）；6 处统一替换。
+- **测试 +2**：percent-decode UTF-8/容错、vless fragment 名解码（`cargo test --lib` 30 passed）。
+- **影响文件**：`types.rs`、`config.rs`、`commands.rs`、`auto_update.rs`、`subscription.rs`、`src/stores/app.ts`、`src/views/Settings.vue`。
+- **次要遗留**：~~hysteria2 链接的端口跳跃 `mport` 与 `pinSHA256` 证书指纹暂未映射~~ → 已在 F2 批次 3 完成（mport→`server_ports`、pinSHA256→`insecure`、salamander obfs）。
 
 ---
 

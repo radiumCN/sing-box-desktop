@@ -135,6 +135,12 @@ pub struct AppConfig {
     /// arrive, so they survive a crash. Default off (in-memory ring buffer only).
     #[serde(default)]
     pub log_to_file: bool,
+    /// User-Agent sent when fetching subscriptions. Airports gate the returned content on
+    /// the client UA; a legacy "Clash" UA can yield a "switch client" placeholder instead
+    /// of real nodes. Defaults to a modern, widely whitelisted client identifier. An empty
+    /// value falls back to that default (see `config::subscription_user_agent`).
+    #[serde(default = "default_subscription_user_agent")]
+    pub subscription_user_agent: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -164,6 +170,10 @@ fn default_auto_tolerance() -> u32 {
 
 fn default_dns_local() -> String {
     "223.5.5.5".to_string()
+}
+
+fn default_subscription_user_agent() -> String {
+    crate::config::SUBSCRIPTION_USER_AGENT.to_string()
 }
 
 impl Default for AppConfig {
@@ -196,6 +206,7 @@ impl Default for AppConfig {
             enable_ipv6: false,
             dns_local: default_dns_local(),
             log_to_file: false,
+            subscription_user_agent: default_subscription_user_agent(),
         }
     }
 }

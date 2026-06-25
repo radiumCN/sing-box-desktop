@@ -5,6 +5,47 @@ use serde_yaml::Value as YamlValue;
 use url::Url;
 use crate::types::{ProxyNode, SubType};
 
+/// Map a single hex ASCII byte to its nibble value, or `None` if it is not `0-9a-fA-F`.
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Percent-decode a URL component into a (lossy) UTF-8 string. `url::Url::fragment()`
+/// returns the *raw* percent-encoded text, so node names like `#%E5%89%A9...%EF%BC%9A`
+/// must be decoded for display. An incomplete / invalid `%XX` sequence is left verbatim.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Node display name from the URL fragment (percent-decoded UTF-8), falling back to the
+/// server host when there is no fragment. Shared by every `parse_*` that derives the node
+/// name from the `#…` fragment (vless / ss / trojan / hysteria2 / tuic / anytls).
+fn node_name_from_fragment(url: &Url, fallback: &str) -> String {
+    match url.fragment() {
+        Some(f) if !f.is_empty() => percent_decode(f),
+        _ => fallback.to_string(),
+    }
+}
+
 /// Detect subscription type from content or URL
 pub fn detect_sub_type(content: &str, url: &str) -> SubType {
     let content_trimmed = content.trim();
@@ -149,6 +190,28 @@ fn param_insecure(params: &std::collections::HashMap<String, String>) -> bool {
         .or_else(|| params.get("insecure"))
         .map(|v| v == "1" || v == "true")
         .unwrap_or(false)
+}
+
+/** Convert a Hysteria2 share-link `mport` value (e.g. `"443,8443-8500"`) into the
+sing-box `server_ports` list. sing-box (sing-quic) expects colon-separated ranges
+like `"8443:8500"`; single ports stay as-is. Empty / malformed entries are dropped. */
+fn hysteria2_server_ports(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|seg| seg.trim())
+        .filter(|seg| !seg.is_empty())
+        .map(|seg| seg.replace('-', ":"))
+        .collect()
+}
+
+/** Parse an Mbps hint that may be a bare number (`"100"`) or carry a unit/suffix
+(`"100 Mbps"`); returns the leading integer, or 0 when nothing usable is found. */
+fn parse_mbps(raw: &str) -> u64 {
+    raw.trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0)
 }
 
 /// Convert a Clash `ss` proxy's structured `plugin` / `plugin-opts` into the sing-box
@@ -457,6 +520,9 @@ fn parse_vmess(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
     let network = v["net"].as_str().unwrap_or("tcp").to_string();
     let tls = v["tls"].as_str().map(|s| s == "tls").unwrap_or(false);
     let sni = v["sni"].as_str().or(v["host"].as_str()).unwrap_or("").to_string();
+    // Encryption method: vmess links carry it as `scy` (auto / aes-128-gcm /
+    // chacha20-poly1305 / none). Fall back to "auto" when absent or empty.
+    let security = v["scy"].as_str().filter(|s| !s.is_empty()).unwrap_or("auto").to_string();
 
     let mut outbound = json!({
         "type": "vmess",
@@ -465,7 +531,7 @@ fn parse_vmess(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
         "server_port": port,
         "uuid": uuid,
         "alter_id": alter_id,
-        "security": "auto"
+        "security": security
     });
     // Only set transport when it's not plain TCP
     if network != "tcp" && !network.is_empty() {
@@ -486,7 +552,14 @@ fn parse_vmess(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
             .or_else(|| v["allowInsecure"].as_str().map(|s| s == "1" || s == "true"))
             .or_else(|| v["allowInsecure"].as_u64().map(|n| n == 1))
             .unwrap_or(false);
-        outbound["tls"] = json!({ "enabled": true, "server_name": sni, "insecure": insecure });
+        let mut tls_obj = json!({ "enabled": true, "server_name": sni, "insecure": insecure });
+        if let Some(alpn) = v["alpn"].as_str() {
+            let list: Vec<&str> = alpn.split(',').filter(|s| !s.is_empty()).collect();
+            if !list.is_empty() {
+                tls_obj["alpn"] = json!(list);
+            }
+        }
+        outbound["tls"] = tls_obj;
     }
 
     let node = ProxyNode {
@@ -513,7 +586,7 @@ fn parse_vless(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
     let params: std::collections::HashMap<String, String> = url.query_pairs()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    let name = url.fragment().unwrap_or(&server).to_string();
+    let name = node_name_from_fragment(&url, &server);
     let network = params.get("type").map(|s| s.as_str()).unwrap_or("tcp").to_string();
     let security = params.get("security").map(|s| s.as_str()).unwrap_or("none").to_string();
     let sni = params.get("sni").cloned().unwrap_or_else(|| server.clone());
@@ -527,6 +600,14 @@ fn parse_vless(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
         "uuid": uuid,
         "flow": flow
     });
+    // UDP packet encoding: VLESS links advertise `packetEncoding` (xudp / packetaddr);
+    // sing-box accepts the same values on the `packet_encoding` field.
+    if let Some(pe) = params.get("packetEncoding")
+        .or_else(|| params.get("packet_encoding"))
+        .filter(|p| !p.is_empty())
+    {
+        outbound["packet_encoding"] = json!(pe);
+    }
     // Only add transport for non-TCP networks
     if network != "tcp" && !network.is_empty() {
         let path = params.get("path").cloned().unwrap_or_else(|| "/".to_string());
@@ -562,6 +643,12 @@ fn parse_vless(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
         } else {
             // Plain TLS: verify by default; honor an explicit allowInsecure param.
             tls["insecure"] = json!(param_insecure(&params));
+        }
+        if let Some(alpn) = params.get("alpn") {
+            let list: Vec<&str> = alpn.split(',').filter(|s| !s.is_empty()).collect();
+            if !list.is_empty() {
+                tls["alpn"] = json!(list);
+            }
         }
         outbound["tls"] = tls;
     }
@@ -622,7 +709,7 @@ fn parse_ss(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
     let url = Url::parse(link)?;
     let server = url.host_str().unwrap_or("").to_string();
     let port = url.port().unwrap_or(8388);
-    let name = url.fragment().unwrap_or(&server).to_string();
+    let name = node_name_from_fragment(&url, &server);
     let params: std::collections::HashMap<String, String> = url.query_pairs()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
@@ -678,7 +765,7 @@ fn parse_trojan(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
     let password = url.username().to_string();
     let server = url.host_str().unwrap_or("").to_string();
     let port = url.port().unwrap_or(443);
-    let name = url.fragment().unwrap_or(&server).to_string();
+    let name = node_name_from_fragment(&url, &server);
     let params: std::collections::HashMap<String, String> = url.query_pairs()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
@@ -716,21 +803,69 @@ fn parse_hysteria2(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
     let password = url.username().to_string();
     let server = url.host_str().unwrap_or("").to_string();
     let port = url.port().unwrap_or(443);
-    let name = url.fragment().unwrap_or(&server).to_string();
+    let name = node_name_from_fragment(&url, &server);
     let params: std::collections::HashMap<String, String> = url.query_pairs()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     let sni = params.get("sni").cloned().unwrap_or_else(|| server.clone());
-    let insecure = param_insecure(&params);
+    // sing-box has no per-connection certificate-pin equivalent for Hysteria2's
+    // `pinSHA256`; such nodes commonly use a fake SNI whose CA chain will not
+    // validate, so fall back to skipping verification to keep them connectable.
+    let has_pin = params.contains_key("pinSHA256")
+        || params.contains_key("pinsha256")
+        || params.contains_key("pin_sha256");
+    let insecure = param_insecure(&params) || has_pin;
 
-    let outbound = json!({
+    let mut tls = json!({ "enabled": true, "server_name": sni, "insecure": insecure });
+    if let Some(alpn) = params.get("alpn") {
+        let list: Vec<&str> = alpn.split(',').filter(|s| !s.is_empty()).collect();
+        if !list.is_empty() {
+            tls["alpn"] = json!(list);
+        }
+    }
+
+    let mut outbound = json!({
         "type": "hysteria2",
         "tag": name,
         "server": server,
         "server_port": port,
         "password": password,
-        "tls": { "enabled": true, "server_name": sni, "insecure": insecure }
+        "tls": tls
     });
+
+    // Port hopping: `mport` (v2rayN) or `ports` (some panels). Keep `server_port`
+    // as the base port — sing-box ignores it once `server_ports` is present.
+    if let Some(mport) = params.get("mport").or_else(|| params.get("ports")) {
+        let ranges = hysteria2_server_ports(mport);
+        if !ranges.is_empty() {
+            outbound["server_ports"] = json!(ranges);
+            if let Some(hop) = params.get("hop_interval").or_else(|| params.get("hopInterval")) {
+                outbound["hop_interval"] = json!(hop);
+            }
+        }
+    }
+
+    // Salamander obfuscation: sing-box only accepts type `salamander` and requires
+    // a password, so emit the block only when both conditions hold.
+    let obfs_type = params.get("obfs").map(|s| s.to_lowercase());
+    if obfs_type.as_deref() == Some("salamander") {
+        if let Some(pw) = params.get("obfs-password")
+            .or_else(|| params.get("obfs_password"))
+            .filter(|p| !p.is_empty())
+        {
+            outbound["obfs"] = json!({ "type": "salamander", "password": pw });
+        }
+    }
+
+    // Optional bandwidth hints used by Hysteria2's Brutal congestion control.
+    if let Some(up) = params.get("up").or_else(|| params.get("upmbps")) {
+        let v = parse_mbps(up);
+        if v > 0 { outbound["up_mbps"] = json!(v); }
+    }
+    if let Some(down) = params.get("down").or_else(|| params.get("downmbps")) {
+        let v = parse_mbps(down);
+        if v > 0 { outbound["down_mbps"] = json!(v); }
+    }
 
     let node = ProxyNode {
         id: uuid::Uuid::new_v4().to_string(),
@@ -754,7 +889,7 @@ fn parse_tuic(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
     let password = url.password().unwrap_or("").to_string();
     let server = url.host_str().unwrap_or("").to_string();
     let port = url.port().unwrap_or(443);
-    let name = url.fragment().unwrap_or(&server).to_string();
+    let name = node_name_from_fragment(&url, &server);
     let params: std::collections::HashMap<String, String> = url.query_pairs()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
@@ -811,7 +946,7 @@ fn parse_anytls(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
     };
     let server = url.host_str().unwrap_or("").to_string();
     let port = url.port().unwrap_or(443);
-    let name = url.fragment().unwrap_or(&server).to_string();
+    let name = node_name_from_fragment(&url, &server);
     let params: std::collections::HashMap<String, String> = url.query_pairs()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
@@ -1426,9 +1561,9 @@ pub fn build_singbox_config(
     // we resolve dual-stack (prefer IPv4) and hand out fake IPv6 addresses too.
     let dns_local_entry = dns_local_server(&config.dns_local);
     let mut dns_fakeip = json!({
-        "type": "fakeip",
-        "tag": "dns_fakeip",
-        "inet4_range": "198.18.0.0/15"
+                    "type": "fakeip",
+                    "tag": "dns_fakeip",
+                    "inet4_range": "198.18.0.0/15"
     });
     if config.enable_ipv6 {
         dns_fakeip["inet6_range"] = json!("fc00::/18");
@@ -1617,6 +1752,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_vless_maps_packet_encoding_and_alpn() {
+        let link = "vless://uuid-1@v.example.com:443?security=tls&sni=s.com&packetEncoding=xudp&alpn=h2,http/1.1#VL";
+        let (_node, ob) = parse_vless(link, "s").unwrap();
+        assert_eq!(ob["packet_encoding"], "xudp");
+        assert_eq!(ob["tls"]["alpn"], json!(["h2", "http/1.1"]));
+    }
+
+    #[test]
+    fn parse_vmess_honours_scy_encryption() {
+        // scy=chacha20-poly1305 should override the default "auto".
+        let raw = serde_json::json!({
+            "v": "2", "ps": "VM", "add": "v.example.com", "port": "443",
+            "id": "uuid-2", "aid": "0", "net": "tcp", "scy": "chacha20-poly1305"
+        }).to_string();
+        let link = format!("vmess://{}", general_purpose::STANDARD.encode(raw));
+        let (_node, ob) = parse_vmess(&link, "s").unwrap();
+        assert_eq!(ob["security"], "chacha20-poly1305");
+    }
+
+    #[test]
     fn parse_trojan_honours_allow_insecure() {
         let link = "trojan://mypassword@trojan.example.com:443?sni=sni.example.com&allowInsecure=1#TR";
         let (node, ob) = parse_trojan(link, "s").unwrap();
@@ -1640,6 +1795,52 @@ mod tests {
         assert_eq!(ob["tls"]["server_name"], "sni.example.com");
         // No allowInsecure param → verification stays on.
         assert_eq!(ob["tls"]["insecure"], false);
+        // No port hopping / obfs params → those fields are absent.
+        assert!(ob.get("server_ports").is_none());
+        assert!(ob.get("obfs").is_none());
+    }
+
+    #[test]
+    fn parse_hysteria2_port_hopping_uses_colon_ranges() {
+        let link = "hysteria2://pw@hy.example.com:60000?sni=s.com&mport=60000-65530&hop_interval=20s#HY";
+        let (_node, ob) = parse_hysteria2(link, "s").unwrap();
+
+        // Base port preserved; sing-box expects colon-separated ranges.
+        assert_eq!(ob["server_port"], 60000);
+        assert_eq!(ob["server_ports"], json!(["60000:65530"]));
+        assert_eq!(ob["hop_interval"], "20s");
+    }
+
+    #[test]
+    fn parse_hysteria2_multi_range_ports() {
+        let link = "hysteria2://pw@hy.example.com:443?mport=443,8443-8500#HY";
+        let (_node, ob) = parse_hysteria2(link, "s").unwrap();
+        assert_eq!(ob["server_ports"], json!(["443", "8443:8500"]));
+    }
+
+    #[test]
+    fn parse_hysteria2_pin_sha256_forces_insecure() {
+        // pinSHA256 has no sing-box equivalent → skip cert verification to stay connectable.
+        let link = "hysteria2://pw@hy.example.com:443?sni=fake.apple.com&pinSHA256=AA:BB#HY";
+        let (_node, ob) = parse_hysteria2(link, "s").unwrap();
+        assert_eq!(ob["tls"]["insecure"], true);
+    }
+
+    #[test]
+    fn parse_hysteria2_salamander_obfs_mapped() {
+        let link = "hysteria2://pw@hy.example.com:443?obfs=salamander&obfs-password=secret&alpn=h3#HY";
+        let (_node, ob) = parse_hysteria2(link, "s").unwrap();
+        assert_eq!(ob["obfs"]["type"], "salamander");
+        assert_eq!(ob["obfs"]["password"], "secret");
+        assert_eq!(ob["tls"]["alpn"], json!(["h3"]));
+    }
+
+    #[test]
+    fn parse_hysteria2_obfs_without_password_dropped() {
+        // Missing obfs password would make sing-box reject the outbound → omit the block.
+        let link = "hysteria2://pw@hy.example.com:443?obfs=salamander#HY";
+        let (_node, ob) = parse_hysteria2(link, "s").unwrap();
+        assert!(ob.get("obfs").is_none());
     }
 
     #[test]
@@ -1891,6 +2092,28 @@ mod tests {
         );
         let ob = clash_yaml_proxy_to_singbox(&p, "X").expect("ss outbound");
         assert!(ob.get("plugin").is_none(), "plain SS must not carry a plugin");
+    }
+
+    #[test]
+    fn percent_decode_handles_utf8_and_invalid() {
+        // Real liangxin-style name: "剩余流量：1000 GB"
+        assert_eq!(
+            percent_decode("%E5%89%A9%E4%BD%99%E6%B5%81%E9%87%8F%EF%BC%9A1000%20GB"),
+            "剩余流量：1000 GB"
+        );
+        // Plain ASCII passes through untouched.
+        assert_eq!(percent_decode("Tokyo-01"), "Tokyo-01");
+        // A dangling/invalid percent escape is left verbatim rather than dropped.
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("a%ZZb"), "a%ZZb");
+    }
+
+    #[test]
+    fn parse_vless_decodes_fragment_name() {
+        let link = "vless://11111111-1111-1111-1111-111111111111@example.com:443?type=tcp&security=reality&pbk=KEY&sid=ab12&sni=www.apple.com&flow=xtls-rprx-vision#%F0%9F%87%AF%F0%9F%87%B5%E6%97%A5%E6%9C%AC";
+        let (node, ob) = parse_vless(link, "s").unwrap();
+        assert_eq!(node.name, "🇯🇵日本");
+        assert_eq!(ob["tag"], "🇯🇵日本");
     }
 
     #[test]

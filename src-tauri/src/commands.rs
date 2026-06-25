@@ -1531,7 +1531,7 @@ pub(crate) fn parse_userinfo(header: &str) -> SubUserinfo {
 async fn fetch_url(url: &str) -> Result<(String, SubUserinfo), anyhow::Error> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .user_agent("ClashForWindows/0.20.39")
+        .user_agent(config::subscription_user_agent())
         .build()?;
     let resp = client.get(url).send().await?;
     if !resp.status().is_success() {
