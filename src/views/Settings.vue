@@ -1211,8 +1211,8 @@ onUnmounted(() => {
 
 <style scoped>
 /* Network diagnostics (N5) */
-.diag-error { display: flex; align-items: center; gap: 6px; color: #d13438; font-size: 12.5px; padding: 4px 0; }
-.diag-results { display: flex; flex-direction: column; gap: 8px; }
+.diag-error { display: flex; align-items: center; gap: 6px; color: #d13438; font-size: 12.5px; padding: 4px 18px; }
+.diag-results { display: flex; flex-direction: column; gap: 8px; padding: 4px 18px 14px; }
 .diag-line { display: flex; gap: 10px; font-size: 13px; }
 .diag-key { color: var(--color-text-secondary); min-width: 70px; }
 .diag-val { font-weight: 500; font-family: var(--font-mono, monospace); }
@@ -1224,11 +1224,12 @@ onUnmounted(() => {
 .diag-probe-name { font-weight: 500; }
 .diag-probe-status { color: var(--color-text-secondary); }
 
-/* Config profiles (N6) */
-.profile-save-row { display: flex; gap: 8px; align-items: center; }
+/* Config profiles (N6) — align with .setting-row's 18px horizontal padding (the card
+   itself has padding:0, so direct children must supply their own inset). */
+.profile-save-row { display: flex; gap: 8px; align-items: center; padding: 12px 18px; }
 .profile-save-row .input { flex: 1; }
-.profile-empty { color: var(--color-text-secondary); font-size: 12.5px; padding: 10px 0 2px; }
-.profile-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+.profile-empty { color: var(--color-text-secondary); font-size: 12.5px; padding: 4px 18px 14px; }
+.profile-list { display: flex; flex-direction: column; gap: 6px; padding: 2px 18px 14px; }
 .profile-item {
   display: flex; align-items: center; justify-content: space-between;
   padding: 7px 10px; border-radius: 8px; background: rgba(128,128,128,0.06);
