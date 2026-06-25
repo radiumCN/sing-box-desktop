@@ -14,8 +14,10 @@ onMounted(() => {
 });
 
 const showAddDialog = ref(false);
+const addMode = ref<"url" | "text">("url");
 const newSubName = ref("");
 const newSubUrl = ref("");
+const newSubContent = ref("");
 const addLoading = ref(false);
 const addError = ref("");
 const updatingId = ref<string | null>(null);
@@ -37,21 +39,40 @@ const subTypeLabel = (type: string) => {
 };
 
 async function addSub() {
-  if (!newSubName.value.trim() || !newSubUrl.value.trim()) {
-    addError.value = "请填写名称和订阅链接";
+  const name = newSubName.value.trim();
+  if (!name) {
+    addError.value = "请填写名称";
+    return;
+  }
+  if (addMode.value === "url" && !newSubUrl.value.trim()) {
+    addError.value = "请填写订阅链接";
+    return;
+  }
+  if (addMode.value === "text" && !newSubContent.value.trim()) {
+    addError.value = "请粘贴节点内容";
     return;
   }
   addLoading.value = true;
   addError.value = "";
   try {
-    await store.addSubscription(newSubName.value.trim(), newSubUrl.value.trim());
-    showAddDialog.value = false;
-    newSubName.value = "";
-    newSubUrl.value = "";
+    if (addMode.value === "url") {
+      await store.addSubscription(name, newSubUrl.value.trim());
+    } else {
+      await store.importSubscriptionFromText(name, newSubContent.value.trim());
+    }
+    cancelAdd();
   } catch (e) {
     addError.value = String(e);
   } finally {
     addLoading.value = false;
+  }
+}
+
+async function pasteContent() {
+  try {
+    newSubContent.value = await navigator.clipboard.readText();
+  } catch {
+    // Clipboard read may be blocked — user can paste manually.
   }
 }
 
@@ -83,8 +104,10 @@ async function refreshAll() {
 
 function cancelAdd() {
   showAddDialog.value = false;
+  addMode.value = "url";
   newSubName.value = "";
   newSubUrl.value = "";
+  newSubContent.value = "";
   addError.value = "";
 }
 
@@ -193,6 +216,14 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
     <!-- Add Dialog (inline) -->
     <div v-if="showAddDialog" class="card add-dialog">
       <div class="dialog-title">添加订阅</div>
+      <div class="mode-tabs">
+        <button class="mode-tab" :class="{ active: addMode === 'url' }" @click="addMode = 'url'">
+          链接订阅
+        </button>
+        <button class="mode-tab" :class="{ active: addMode === 'text' }" @click="addMode = 'text'">
+          手动导入
+        </button>
+      </div>
       <div class="form-group">
         <label class="form-label">订阅名称</label>
         <input
@@ -202,13 +233,28 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
           @keyup.enter="addSub"
         />
       </div>
-      <div class="form-group">
+      <div v-if="addMode === 'url'" class="form-group">
         <label class="form-label">订阅链接</label>
         <input
           class="input"
           v-model="newSubUrl"
           placeholder="https://... (支持 Clash / V2Ray / SIP008 格式)"
           @keyup.enter="addSub"
+        />
+      </div>
+      <div v-else class="form-group">
+        <div class="form-label-row">
+          <label class="form-label">节点内容</label>
+          <button class="btn btn-ghost paste-btn" @click="pasteContent">
+            <Copy :size="12" />
+            从剪贴板粘贴
+          </button>
+        </div>
+        <textarea
+          class="input content-area"
+          v-model="newSubContent"
+          rows="6"
+          placeholder="粘贴节点链接 / Base64 / Clash YAML / SIP008 内容&#10;支持 vmess:// vless:// ss:// trojan:// hy2://（每行一个）"
         />
       </div>
       <div v-if="addError" class="form-error">
@@ -219,7 +265,7 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
         <button class="btn btn-ghost" @click="cancelAdd">取消</button>
         <button class="btn btn-primary" :disabled="addLoading" @click="addSub">
           <RefreshCw v-if="addLoading" :size="13" class="spin" />
-          {{ addLoading ? "获取中..." : "添加" }}
+          {{ addLoading ? (addMode === "url" ? "获取中..." : "导入中...") : (addMode === "url" ? "添加" : "导入") }}
         </button>
       </div>
     </div>
@@ -249,10 +295,11 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
                 自动 → {{ store.activeNodeNow ?? "选择中…" }}
               </span>
             </div>
-            <div class="sub-url">{{ sub.url }}</div>
+            <div class="sub-url">{{ sub.url || "本地导入" }}</div>
           </div>
           <div class="sub-actions">
             <button
+              v-if="sub.url"
               class="btn btn-ghost icon-btn"
               :disabled="updatingId === sub.id"
               title="更新订阅"
@@ -261,6 +308,7 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
               <RefreshCw :size="14" :class="{ spin: updatingId === sub.id }" />
             </button>
             <button
+              v-if="sub.url"
               class="btn btn-ghost icon-btn"
               title="二维码分享"
               @click="showQr(sub.name, sub.url)"
@@ -277,8 +325,8 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
           </div>
         </div>
 
-        <!-- Auto-update row -->
-        <div class="sub-autoupdate">
+        <!-- Auto-update row (URL subscriptions only) -->
+        <div v-if="sub.url" class="sub-autoupdate">
           <div class="autoupdate-left">
             <Clock :size="12" class="autoupdate-icon" />
             <span class="autoupdate-label">自动更新</span>
@@ -356,7 +404,7 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
         </div>
         <div class="hint-item">
           <span class="badge badge-green">V2Ray</span>
-          <span>Base64 编码节点链接，vmess:// vless:// ss:// trojan:// hy2://</span>
+          <span>Base64 编码节点链接，vmess:// vless:// ss:// trojan:// hy2:// tuic:// anytls://</span>
         </div>
         <div class="hint-item">
           <span class="badge badge-yellow">SIP008</span>
@@ -385,6 +433,26 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
 .dialog-title { font-size: 15px; font-weight: 600; }
 .form-group { display: flex; flex-direction: column; gap: 6px; }
 .form-label { font-size: 12px; font-weight: 500; color: var(--color-text-secondary); }
+.form-label-row { display: flex; align-items: center; justify-content: space-between; }
+.paste-btn { padding: 2px 8px !important; font-size: 11px; }
+.content-area {
+  resize: vertical; min-height: 110px;
+  font-family: 'Cascadia Code', monospace; font-size: 12px; line-height: 1.5;
+}
+
+.mode-tabs {
+  display: flex; gap: 4px; padding: 3px;
+  background: rgba(128,128,128,0.08); border-radius: var(--radius-md);
+}
+.mode-tab {
+  flex: 1; padding: 6px 12px; border: none; border-radius: var(--radius-sm);
+  background: transparent; color: var(--color-text-secondary);
+  font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s;
+}
+.mode-tab.active {
+  background: var(--color-surface); color: var(--color-text);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.08);
+}
 .form-error {
   display: flex; align-items: center; gap: 6px;
   font-size: 12px; color: var(--color-error);

@@ -300,30 +300,6 @@ pub async fn stop_singbox(state: SharedState, graceful: bool) -> Result<()> {
     Ok(())
 }
 
-/// Fetch real-time stats from sing-box API (Clash API compatible)
-#[allow(dead_code)]
-pub async fn fetch_traffic_stats(api_port: u16) -> Result<crate::types::TrafficStats> {
-    let url = format!("http://127.0.0.1:{}/traffic", api_port);
-    let client = reqwest::Client::new();
-
-    // The traffic endpoint is a streaming endpoint; for simplicity we use /memory
-    let memory_url = format!("http://127.0.0.1:{}/memory", api_port);
-    let resp = client.get(&memory_url)
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await?;
-    let _body: Value = resp.json().await?;
-
-    let _ = url;
-    // Return placeholder — real traffic data comes via WebSocket stream
-    Ok(crate::types::TrafficStats {
-        upload_bytes: 0,
-        download_bytes: 0,
-        upload_speed: 0,
-        download_speed: 0,
-        connections: 0,
-    })
-}
 
 /// Fetch connections from Clash API
 pub async fn fetch_connections(api_port: u16) -> Result<Vec<crate::types::ConnectionInfo>> {
@@ -366,4 +342,28 @@ pub async fn fetch_connections(api_port: u16) -> Result<Vec<crate::types::Connec
     }
 
     Ok(result)
+}
+
+/// Close a single active connection via the Clash API (`DELETE /connections/{id}`).
+pub async fn close_connection(api_port: u16, id: &str) -> Result<()> {
+    let url = format!("http://127.0.0.1:{}/connections/{}", api_port, id);
+    let client = reqwest::Client::new();
+    client.delete(&url)
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+/// Close all active connections via the Clash API (`DELETE /connections`).
+pub async fn close_all_connections(api_port: u16) -> Result<()> {
+    let url = format!("http://127.0.0.1:{}/connections", api_port);
+    let client = reqwest::Client::new();
+    client.delete(&url)
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
 }

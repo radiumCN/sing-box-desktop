@@ -148,6 +148,15 @@ pub fn run() {
                 }
             }
 
+            // "Start minimized": hide the main window on launch so the app lives in the
+            // tray only. The window is created visible by tauri.conf.json, so we hide it
+            // here rather than starting hidden (keeps the normal show/focus path intact).
+            if crate::config::load_app_config().startup_minimized {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
+
             // Persistent core: start sing-box on launch so toggling the proxy later is
             // instant. An idle core (mixed inbound only, no system proxy, no TUN) has no
             // effect on the system network. If the user had a proxy running last session
@@ -337,6 +346,7 @@ pub fn run() {
             commands::cmd_get_logs,
             commands::cmd_get_subscriptions,
             commands::cmd_add_subscription,
+            commands::cmd_import_subscription_from_text,
             commands::cmd_update_subscription,
             commands::cmd_delete_subscription,
             commands::cmd_get_nodes,
@@ -349,7 +359,10 @@ pub fn run() {
             commands::cmd_get_app_config,
             commands::cmd_save_app_config,
             commands::cmd_set_proxy_mode,
+            commands::cmd_export_logs,
             commands::cmd_get_connections,
+            commands::cmd_close_connection,
+            commands::cmd_close_all_connections,
             commands::cmd_get_traffic_total,
             commands::cmd_parse_subscription_from_text,
             commands::cmd_check_singbox_update,
@@ -366,6 +379,12 @@ pub fn run() {
             commands::cmd_delete_rule,
             commands::cmd_toggle_rule,
             commands::cmd_reset_rules,
+            commands::cmd_get_rule_providers,
+            commands::cmd_add_rule_provider,
+            commands::cmd_delete_rule_provider,
+            commands::cmd_toggle_rule_provider,
+            commands::cmd_get_proxy_groups,
+            commands::cmd_save_proxy_groups,
             commands::cmd_update_tray_tooltip,
             commands::cmd_get_system_proxy_status,
             commands::cmd_set_system_proxy,

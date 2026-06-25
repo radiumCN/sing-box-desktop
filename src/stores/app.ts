@@ -34,6 +34,13 @@ export interface ProxyNode {
   subscription_id?: string;
 }
 
+export interface ProxyGroup {
+  id: string;
+  name: string;
+  group_type: string; // "selector" | "urltest"
+  nodes: string[];    // member node names
+}
+
 export interface SpeedResult {
   latency_ms?: number;
   download_kbps?: number;
@@ -76,6 +83,7 @@ export const useAppStore = defineStore("app", () => {
   const status = ref<SingboxStatus>({ running: false });
   const subscriptions = ref<Subscription[]>([]);
   const nodes = ref<ProxyNode[]>([]);
+  const proxyGroups = ref<ProxyGroup[]>([]);
   const config = ref<AppConfig>({
     proxy_mode: "rule",
     startup_with_system: false,
@@ -283,6 +291,13 @@ export const useAppStore = defineStore("app", () => {
     return sub;
   }
 
+  async function importSubscriptionFromText(name: string, content: string) {
+    const sub = await invoke<Subscription>("cmd_import_subscription_from_text", { name, content });
+    subscriptions.value.push(sub);
+    await fetchNodes();
+    return sub;
+  }
+
   async function updateSubscription(id: string) {
     const sub = await invoke<Subscription>("cmd_update_subscription", { id });
     const idx = subscriptions.value.findIndex((s) => s.id === id);
@@ -329,6 +344,18 @@ export const useAppStore = defineStore("app", () => {
     await fetchNodes();
     updateTrayTooltip();
     await refreshActiveNow();
+  }
+
+  // ── Custom proxy groups ──────────────────────────────────────────
+  async function fetchProxyGroups() {
+    proxyGroups.value = await invoke<ProxyGroup[]>("cmd_get_proxy_groups");
+  }
+
+  // Persist the full group list. Changes apply on the next config rebuild
+  // (reconnect / mode switch), like routing rules.
+  async function saveProxyGroups(groups: ProxyGroup[]) {
+    await invoke("cmd_save_proxy_groups", { groups });
+    proxyGroups.value = groups;
   }
 
   // The concrete node the auto group is currently routing through (resolved via the
@@ -572,6 +599,9 @@ export const useAppStore = defineStore("app", () => {
     status,
     subscriptions,
     nodes,
+    proxyGroups,
+    fetchProxyGroups,
+    saveProxyGroups,
     config,
     trafficHistory,
     totalUpload,
@@ -592,6 +622,7 @@ export const useAppStore = defineStore("app", () => {
     setConnectionMode,
     fetchSubscriptions,
     addSubscription,
+    importSubscriptionFromText,
     updateSubscription,
     deleteSubscription,
     saveSubscriptionSettings,

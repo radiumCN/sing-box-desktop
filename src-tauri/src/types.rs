@@ -42,22 +42,15 @@ pub struct SpeedResult {
     pub download_kbps: Option<u32>,
 }
 
-#[allow(dead_code)]
+/// A user-defined proxy group. sing-box natively supports only `selector` (manual
+/// pick) and `urltest` (auto, lowest-latency) group types — those are the two allowed
+/// values for `group_type`. `nodes` holds member node names (outbound tags).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyGroup {
+    pub id: String,
     pub name: String,
-    pub group_type: String, // Selector, URLTest, Fallback
-    pub current: String,
+    pub group_type: String,
     pub nodes: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TrafficStats {
-    pub upload_bytes: u64,
-    pub download_bytes: u64,
-    pub upload_speed: u64,   // bytes/s
-    pub download_speed: u64, // bytes/s
-    pub connections: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,13 +69,6 @@ pub struct ConnectionInfo {
     pub start: String,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LogEntry {
-    pub level: String,
-    pub message: String,
-    pub time: String,
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {

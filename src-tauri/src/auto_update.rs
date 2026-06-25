@@ -1,5 +1,19 @@
 use std::time::Duration;
 use tauri::{Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
+
+/// Show a native desktop notification. These fire from background tasks that may run
+/// while the window is hidden/minimized, so a system notification is the only way the
+/// user sees them. Failures (e.g. OS permission denied) are ignored — a missing toast
+/// must never break the update flow.
+fn notify(app_handle: &tauri::AppHandle, title: &str, body: &str) {
+    let _ = app_handle
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show();
+}
 
 /// Background task: check for sing-box updates on startup and periodically.
 /// Emits "singbox-update-available" { version, download_url, release_notes } when a new version is found.
@@ -30,7 +44,7 @@ pub async fn start_subscription_auto_updater(app_handle: tauri::AppHandle) {
     loop {
         let state = app_handle.state::<crate::commands::AppState>();
 
-        let to_update: Vec<(String, String)> = {
+        let to_update: Vec<(String, String, String)> = {
             let subs = state.subscriptions.lock().unwrap();
             let now = chrono::Utc::now();
             subs.iter()
@@ -39,14 +53,24 @@ pub async fn start_subscription_auto_updater(app_handle: tauri::AppHandle) {
                     None => true,
                     Some(last) => (now - last).num_hours() >= s.update_interval as i64,
                 })
-                .map(|s| (s.id.clone(), s.url.clone()))
+                .map(|s| (s.id.clone(), s.url.clone(), s.name.clone()))
                 .collect()
         };
 
-        for (id, url) in to_update {
+        for (id, url, name) in to_update {
             match do_update_subscription(&app_handle, &id, &url).await {
-                Ok(_) => log::info!("订阅自动更新成功: {}", id),
-                Err(e) => log::warn!("订阅自动更新失败 [{}]: {}", id, e),
+                Ok(count) => {
+                    log::info!("订阅自动更新成功: {}", id);
+                    notify(
+                        &app_handle,
+                        "订阅已更新",
+                        &format!("{} 更新成功，共 {} 个节点", name, count),
+                    );
+                }
+                Err(e) => {
+                    log::warn!("订阅自动更新失败 [{}]: {}", id, e);
+                    notify(&app_handle, "订阅更新失败", &format!("{}：{}", name, e));
+                }
             }
         }
 
@@ -58,7 +82,7 @@ async fn do_update_subscription(
     app_handle: &tauri::AppHandle,
     id: &str,
     url: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     let content = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent("ClashForWindows/0.20.39")
@@ -74,6 +98,7 @@ async fn do_update_subscription(
     let state = app_handle.state::<crate::commands::AppState>();
     let sub_type = crate::subscription::detect_sub_type(&content, url);
     let (nodes, outbounds) = crate::subscription::parse_subscription(&content, id)?;
+    let node_count = nodes.len();
 
     {
         let mut subs = state.subscriptions.lock().unwrap();
@@ -104,7 +129,7 @@ async fn do_update_subscription(
         crate::config::save_outbounds(&all_outbounds)?;
     }
 
-    Ok(())
+    Ok(node_count)
 }
 
 // ─── App Self-Update Checker ─────────────────────────────────────────
@@ -134,6 +159,11 @@ pub async fn start_app_update_checker(app_handle: tauri::AppHandle) {
                     "is_prerelease": release.is_prerelease,
                     "current_version": current,
                 }));
+                notify(
+                    &app_handle,
+                    "发现新版本",
+                    &format!("sing-box-desktop {} 可供更新", release.version),
+                );
             }
         }
         Err(e) => {
@@ -161,6 +191,11 @@ async fn check_and_emit(app_handle: &tauri::AppHandle) {
                     "release_notes": release.release_notes,
                     "installed_version": installed_ver,
                 }));
+                notify(
+                    app_handle,
+                    "内核可更新",
+                    &format!("sing-box 内核 {} 可供更新", release.version),
+                );
             } else if installed_ver.is_empty() {
                 // Not installed at all — notify frontend
                 let _ = app_handle.emit("singbox-not-installed", serde_json::json!({

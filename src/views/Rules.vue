@@ -26,11 +26,27 @@ interface RouteRule {
   process_name: string[];
 }
 
+interface RuleProvider {
+  id: string;
+  name: string;
+  url: string;
+  action: RuleAction;
+  enabled: boolean;
+  format: string;
+}
+
 const rules = ref<RouteRule[]>([]);
 const loading = ref(false);
 const expandedId = ref<string | null>(null);
 const showAddDialog = ref(false);
 const saving = ref(false);
+
+// ─── Remote rule-set providers ───────────────────────────────────────
+const providers = ref<RuleProvider[]>([]);
+const showProviderDialog = ref(false);
+const newProviderName = ref("");
+const newProviderUrl = ref("");
+const newProviderAction = ref<RuleAction>("proxy");
 
 // ─── Add dialog state ────────────────────────────────────────────────
 
@@ -213,7 +229,39 @@ function moveDown(index: number) {
   [rules.value[index], rules.value[index + 1]] = [rules.value[index + 1], rules.value[index]];
 }
 
-onMounted(load);
+// ─── Rule provider actions ───────────────────────────────────────────
+async function loadProviders() {
+  providers.value = await invoke<RuleProvider[]>("cmd_get_rule_providers");
+}
+
+async function addProvider() {
+  const name = newProviderName.value.trim();
+  const url = newProviderUrl.value.trim();
+  if (!name || !url) return;
+  providers.value = await invoke<RuleProvider[]>("cmd_add_rule_provider", {
+    name,
+    url,
+    action: newProviderAction.value,
+  });
+  showProviderDialog.value = false;
+  newProviderName.value = "";
+  newProviderUrl.value = "";
+  newProviderAction.value = "proxy";
+}
+
+async function deleteProvider(id: string) {
+  if (!confirm("确认删除此规则集？")) return;
+  providers.value = await invoke<RuleProvider[]>("cmd_delete_rule_provider", { id });
+}
+
+async function toggleProvider(id: string) {
+  providers.value = await invoke<RuleProvider[]>("cmd_toggle_rule_provider", { id });
+}
+
+onMounted(() => {
+  load();
+  loadProviders();
+});
 </script>
 
 <template>
@@ -255,6 +303,68 @@ onMounted(load);
           <span class="preset-action">{{ actionLabel[p.action] }}</span>
           {{ p.label }}
         </button>
+      </div>
+    </div>
+
+    <!-- Remote rule-set providers -->
+    <div class="card preset-card">
+      <div class="provider-head">
+        <div class="preset-label">
+          <Globe :size="13" />
+          <span>远程规则集</span>
+        </div>
+        <button class="btn btn-ghost btn-sm" @click="showProviderDialog = true">
+          <Plus :size="13" />
+          添加规则集
+        </button>
+      </div>
+      <p class="provider-hint">
+        订阅远程 sing-box 规则集（.srs / .json），命中后按指定动作分流。通过代理下载并每日更新。
+      </p>
+      <div v-if="providers.length === 0" class="provider-empty">暂无远程规则集</div>
+      <div v-else class="provider-list">
+        <div v-for="p in providers" :key="p.id" class="provider-item" :class="{ disabled: !p.enabled }">
+          <button class="toggle-btn" :title="p.enabled ? '点击禁用' : '点击启用'" @click="toggleProvider(p.id)">
+            <ToggleRight v-if="p.enabled" :size="18" class="toggle-on" />
+            <ToggleLeft v-else :size="18" class="toggle-off" />
+          </button>
+          <div class="provider-info">
+            <div class="provider-name">
+              {{ p.name }}
+              <span class="provider-badge" :class="`preset-${p.action}`">{{ actionLabel[p.action] }}</span>
+              <span class="provider-fmt">{{ p.format === "source" ? "JSON" : "SRS" }}</span>
+            </div>
+            <div class="provider-url" :title="p.url">{{ p.url }}</div>
+          </div>
+          <button class="icon-btn danger" title="删除" @click="deleteProvider(p.id)">
+            <Trash2 :size="14" />
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add provider dialog -->
+    <div v-if="showProviderDialog" class="card add-dialog">
+      <div class="dialog-title">添加远程规则集</div>
+      <div class="form-group">
+        <label class="form-label">名称</label>
+        <input class="input" v-model="newProviderName" placeholder="例如：广告拦截" @keyup.enter="addProvider" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">规则集地址</label>
+        <input class="input" v-model="newProviderUrl" placeholder="https://.../ruleset.srs（支持 .srs / .json）" @keyup.enter="addProvider" />
+      </div>
+      <div class="form-group">
+        <label class="form-label">命中动作</label>
+        <select class="input" v-model="newProviderAction">
+          <option value="proxy">代理</option>
+          <option value="direct">直连</option>
+          <option value="block">拦截</option>
+        </select>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn btn-ghost" @click="showProviderDialog = false">取消</button>
+        <button class="btn btn-primary" @click="addProvider">添加</button>
       </div>
     </div>
 
@@ -567,4 +677,35 @@ onMounted(load);
   display: flex; align-items: flex-start; gap: 6px;
   font-size: 11px; color: var(--color-text-muted); line-height: 1.5;
 }
+
+/* ─── Remote rule-set providers ─── */
+.provider-head { display: flex; align-items: center; justify-content: space-between; }
+.btn-sm { padding: 3px 10px !important; font-size: 12px; }
+.provider-hint { font-size: 12px; color: var(--color-text-muted); margin: 6px 0 10px; line-height: 1.5; }
+.provider-empty { font-size: 12px; color: var(--color-text-muted); padding: 8px 0; }
+.provider-list { display: flex; flex-direction: column; gap: 8px; }
+.provider-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); background: rgba(128,128,128,0.03);
+}
+.provider-item.disabled { opacity: 0.5; }
+.provider-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.provider-name { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.provider-url {
+  font-size: 11px; color: var(--color-text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.provider-badge {
+  font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 100px;
+}
+.provider-badge.preset-proxy { background: rgba(0,120,212,.12); color: #0078d4; }
+.provider-badge.preset-direct { background: rgba(16,124,16,.12); color: #107c10; }
+.provider-badge.preset-block { background: rgba(209,52,56,.12); color: #d13438; }
+.provider-fmt {
+  font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px;
+  background: rgba(128,128,128,0.12); color: var(--color-text-secondary);
+}
+
+.add-dialog { padding: 20px; display: flex; flex-direction: column; gap: 14px; margin-bottom: 4px; }
 </style>

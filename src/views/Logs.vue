@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, watch, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { Trash2, ArrowDown, Copy } from "@lucide/vue";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { Trash2, ArrowDown, Copy, Download } from "@lucide/vue";
 
 const logs = ref<string[]>([]);
 const autoScroll = ref(true);
@@ -68,6 +69,24 @@ async function copyAllLogs() {
   }
 }
 
+const exporting = ref(false);
+async function exportLogs() {
+  exporting.value = true;
+  try {
+    const path = await invoke<string>("cmd_export_logs");
+    try {
+      await revealItemInDir(path);
+    } catch {
+      // Reveal may be unavailable; the file is still written.
+    }
+    alert(`日志已导出到：\n${path}`);
+  } catch (e) {
+    alert(`导出失败：${e}`);
+  } finally {
+    exporting.value = false;
+  }
+}
+
 watch(filtered, scrollToBottom);
 
 onMounted(() => {
@@ -102,6 +121,10 @@ onUnmounted(() => {
         <button class="btn btn-ghost" @click="copyAllLogs" :title="copySuccess ? '已复制!' : '复制全部日志'">
           <Copy :size="14" :style="{ color: copySuccess ? '#107c10' : undefined }" />
           {{ copySuccess ? '已复制' : '复制' }}
+        </button>
+        <button class="btn btn-ghost" @click="exportLogs" :disabled="exporting" title="导出日志到文件">
+          <Download :size="14" />
+          {{ exporting ? '导出中...' : '导出' }}
         </button>
         <button class="btn btn-ghost" @click="logs = []" title="清空日志">
           <Trash2 :size="14" />

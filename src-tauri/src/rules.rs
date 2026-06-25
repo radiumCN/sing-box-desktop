@@ -425,77 +425,50 @@ pub fn save_rules(rules: &[RouteRule]) -> Result<()> {
     Ok(())
 }
 
-/// Convert RouteRule list to sing-box route.rules JSON array.
-/// Kept as a reusable converter; `build_singbox_config` currently inlines an
-/// equivalent (more tailored) transform, so this is not wired in by default.
-#[allow(dead_code)]
-pub fn rules_to_singbox(rules: &[RouteRule]) -> Vec<serde_json::Value> {
-    use serde_json::json;
-    let mut result = Vec::new();
+// ─── Remote rule-set providers ───────────────────────────────────────
 
-    // DNS rule always first
-    result.push(json!({ "protocol": "dns", "outbound": "dns-out" }));
-
-    for rule in rules.iter().filter(|r| r.enabled) {
-        let mut obj = serde_json::Map::new();
-
-        if !rule.domain.is_empty() {
-            obj.insert("domain".into(), json!(rule.domain));
-        }
-        if !rule.domain_suffix.is_empty() {
-            obj.insert("domain_suffix".into(), json!(rule.domain_suffix));
-        }
-        if !rule.domain_keyword.is_empty() {
-            obj.insert("domain_keyword".into(), json!(rule.domain_keyword));
-        }
-        if !rule.geosite.is_empty() {
-            obj.insert("geosite".into(), json!(rule.geosite));
-        }
-        if !rule.geoip.is_empty() {
-            obj.insert("geoip".into(), json!(rule.geoip));
-        }
-        if !rule.ip_cidr.is_empty() {
-            obj.insert("ip_cidr".into(), json!(rule.ip_cidr));
-        }
-        if !rule.port.is_empty() {
-            // Flatten port ranges to individual values
-            let ports: Vec<serde_json::Value> = rule.port.iter()
-                .flat_map(|p| {
-                    if p.contains('-') {
-                        let parts: Vec<&str> = p.split('-').collect();
-                        if parts.len() == 2 {
-                            if let (Ok(s), Ok(e)) = (parts[0].parse::<u16>(), parts[1].parse::<u16>()) {
-                                return (s..=e).map(|n| json!(n)).collect::<Vec<_>>();
-                            }
-                        }
-                        vec![]
-                    } else if let Ok(n) = p.parse::<u16>() {
-                        vec![json!(n)]
-                    } else {
-                        vec![]
-                    }
-                })
-                .collect();
-            if !ports.is_empty() {
-                obj.insert("port".into(), json!(ports));
-            }
-        }
-        if let Some(ref net) = rule.network {
-            obj.insert("network".into(), json!(net));
-        }
-        if !rule.process_name.is_empty() {
-            obj.insert("process_name".into(), json!(rule.process_name));
-        }
-
-        if !obj.is_empty() {
-            obj.insert("outbound".into(), json!(rule.action.to_string()));
-            result.push(serde_json::Value::Object(obj));
-        }
-    }
-
-    // Clash mode overrides always at end
-    result.push(json!({ "clash_mode": "direct", "outbound": "direct" }));
-    result.push(json!({ "clash_mode": "global", "outbound": "proxy" }));
-
-    result
+fn default_provider_format() -> String {
+    "binary".to_string()
 }
+
+/// A user-added remote rule-set (sing-box rule-set / `.srs` or source `.json`).
+/// Matched domains/IPs in the set are routed to `action`'s outbound.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleProvider {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub action: RuleAction,
+    pub enabled: bool,
+    /// sing-box rule-set format: "binary" (.srs) or "source" (.json).
+    #[serde(default = "default_provider_format")]
+    pub format: String,
+}
+
+/// Guess the rule-set format from a URL's extension; defaults to binary (.srs).
+pub fn guess_provider_format(url: &str) -> String {
+    let lower = url.split('?').next().unwrap_or(url).to_lowercase();
+    if lower.ends_with(".json") {
+        "source".to_string()
+    } else {
+        "binary".to_string()
+    }
+}
+
+pub fn load_rule_providers() -> Vec<RuleProvider> {
+    let path = config::app_data_dir().join("rule_providers.json");
+    if let Ok(data) = std::fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_rule_providers(providers: &[RuleProvider]) -> Result<()> {
+    config::ensure_dirs()?;
+    let path = config::app_data_dir().join("rule_providers.json");
+    let data = serde_json::to_string_pretty(providers)?;
+    std::fs::write(path, data)?;
+    Ok(())
+}
+

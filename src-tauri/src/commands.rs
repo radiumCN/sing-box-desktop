@@ -271,6 +271,23 @@ pub fn cmd_get_logs(state: State<'_, AppState>) -> Vec<String> {
     state.singbox_state.lock().unwrap().logs.clone()
 }
 
+/// Export the current in-memory logs to a timestamped `.log` file under the app data
+/// dir's `logs/` folder and return the absolute path. The frontend reveals it via the
+/// opener plugin. Returns an error if there is nothing to export.
+#[tauri::command]
+pub fn cmd_export_logs(state: State<'_, AppState>) -> Result<String, String> {
+    let logs = state.singbox_state.lock().unwrap().logs.clone();
+    if logs.is_empty() {
+        return Err("暂无日志可导出".to_string());
+    }
+    let dir = config::app_data_dir().join("logs");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let filename = format!("singbox-{}.log", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let path = dir.join(filename);
+    std::fs::write(&path, logs.join("\n")).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 // ─── Subscriptions ──────────────────────────────────────────────────
 
 #[tauri::command]
@@ -300,6 +317,55 @@ pub async fn cmd_add_subscription(
         last_update: Some(chrono::Utc::now()),
         auto_update: true,
         update_interval: 24,
+    };
+
+    {
+        let mut subs = state.subscriptions.lock().unwrap();
+        subs.push(sub.clone());
+        config::save_subscriptions(&subs).map_err(|e| e.to_string())?;
+    }
+    {
+        let mut all_nodes = state.nodes.lock().unwrap();
+        all_nodes.retain(|n| n.subscription_id.as_deref() != Some(&id));
+        all_nodes.extend(nodes);
+        config::save_nodes(&all_nodes).map_err(|e| e.to_string())?;
+    }
+    {
+        let mut all_outbounds = state.outbounds.lock().unwrap();
+        all_outbounds.retain(|ob| {
+            !outbounds.iter().any(|new| new["tag"] == ob["tag"])
+        });
+        all_outbounds.extend(outbounds);
+        config::save_outbounds(&all_outbounds).map_err(|e| e.to_string())?;
+    }
+
+    Ok(sub)
+}
+
+/// Import a subscription from pasted text (single node links / Base64 / Clash YAML /
+/// SIP008) instead of a remote URL. Persisted as a local subscription with no URL and
+/// auto-update disabled — there is no remote source to re-fetch from.
+#[tauri::command]
+pub async fn cmd_import_subscription_from_text(
+    name: String,
+    content: String,
+    state: State<'_, AppState>,
+) -> Result<Subscription, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let (nodes, outbounds) = subscription::parse_subscription(&content, &id)
+        .map_err(|e| e.to_string())?;
+    let sub_type = subscription::detect_sub_type(&content, "");
+    config::save_subscription_content(&id, &content).map_err(|e| e.to_string())?;
+
+    let sub = Subscription {
+        id: id.clone(),
+        name,
+        url: String::new(),
+        sub_type,
+        node_count: nodes.len(),
+        last_update: Some(chrono::Utc::now()),
+        auto_update: false,
+        update_interval: 0,
     };
 
     {
@@ -878,6 +944,29 @@ pub async fn cmd_get_connections(
         .map_err(|e| e.to_string())
 }
 
+/// Close a single active connection by id.
+#[tauri::command]
+pub async fn cmd_close_connection(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let port = state.app_config.lock().unwrap().api_port;
+    crate::singbox::close_connection(port, &id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Close all active connections at once.
+#[tauri::command]
+pub async fn cmd_close_all_connections(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let port = state.app_config.lock().unwrap().api_port;
+    crate::singbox::close_all_connections(port)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /* Cumulative traffic counters reported by the Clash API, in bytes. The core keeps
    these from the moment it starts, so they represent ALL traffic since the proxy
    service started — independent of which UI page is open. They reset to zero each
@@ -1010,6 +1099,66 @@ pub fn cmd_reset_rules() -> Result<Vec<crate::rules::RouteRule>, String> {
     let rules = crate::rules::preset_rules();
     crate::rules::save_rules(&rules).map_err(|e| e.to_string())?;
     Ok(rules)
+}
+
+// ─── Remote rule-set providers ───────────────────────────────────────
+
+#[tauri::command]
+pub fn cmd_get_rule_providers() -> Vec<crate::rules::RuleProvider> {
+    crate::rules::load_rule_providers()
+}
+
+#[tauri::command]
+pub fn cmd_add_rule_provider(
+    name: String,
+    url: String,
+    action: crate::rules::RuleAction,
+) -> Result<Vec<crate::rules::RuleProvider>, String> {
+    let mut providers = crate::rules::load_rule_providers();
+    providers.push(crate::rules::RuleProvider {
+        id: uuid::Uuid::new_v4().to_string(),
+        format: crate::rules::guess_provider_format(&url),
+        name,
+        url,
+        action,
+        enabled: true,
+    });
+    crate::rules::save_rule_providers(&providers).map_err(|e| e.to_string())?;
+    Ok(providers)
+}
+
+#[tauri::command]
+pub fn cmd_delete_rule_provider(id: String) -> Result<Vec<crate::rules::RuleProvider>, String> {
+    let mut providers = crate::rules::load_rule_providers();
+    providers.retain(|p| p.id != id);
+    crate::rules::save_rule_providers(&providers).map_err(|e| e.to_string())?;
+    Ok(providers)
+}
+
+#[tauri::command]
+pub fn cmd_toggle_rule_provider(id: String) -> Result<Vec<crate::rules::RuleProvider>, String> {
+    let mut providers = crate::rules::load_rule_providers();
+    if let Some(p) = providers.iter_mut().find(|p| p.id == id) {
+        p.enabled = !p.enabled;
+    }
+    crate::rules::save_rule_providers(&providers).map_err(|e| e.to_string())?;
+    Ok(providers)
+}
+
+// ─── Custom proxy groups ─────────────────────────────────────────────
+
+#[tauri::command]
+pub fn cmd_get_proxy_groups() -> Vec<crate::types::ProxyGroup> {
+    config::load_proxy_groups()
+}
+
+/// Replace the full list of custom proxy groups. Takes effect on the next config
+/// rebuild (reconnect / mode switch), like routing rules.
+#[tauri::command]
+pub fn cmd_save_proxy_groups(
+    groups: Vec<crate::types::ProxyGroup>,
+) -> Result<(), String> {
+    config::save_proxy_groups(&groups).map_err(|e| e.to_string())
 }
 
 // ─── Updater ────────────────────────────────────────────────────────

@@ -100,6 +100,23 @@ pub fn save_outbounds(outbounds: &[Value]) -> Result<()> {
     Ok(())
 }
 
+pub fn load_proxy_groups() -> Vec<crate::types::ProxyGroup> {
+    let path = app_data_dir().join("proxy_groups.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_proxy_groups(groups: &[crate::types::ProxyGroup]) -> Result<()> {
+    ensure_dirs()?;
+    let path = app_data_dir().join("proxy_groups.json");
+    let data = serde_json::to_string_pretty(groups)?;
+    fs::write(path, data)?;
+    Ok(())
+}
+
 /// Cache the raw text content of a subscription so it can be re-parsed on startup.
 pub fn save_subscription_content(id: &str, content: &str) -> Result<()> {
     ensure_dirs()?;

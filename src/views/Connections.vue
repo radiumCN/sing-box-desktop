@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { RefreshCw, Activity } from "@lucide/vue";
+import { RefreshCw, Activity, X, Ban } from "@lucide/vue";
 
 interface ConnectionInfo {
   id: string;
@@ -75,6 +75,24 @@ async function fetchConnections() {
   }
 }
 
+async function closeConnection(id: string) {
+  try {
+    await invoke("cmd_close_connection", { id });
+    connections.value = connections.value.filter((c) => c.id !== id);
+  } catch {
+    // Ignore — the connection may have already closed; next poll reconciles.
+  }
+}
+
+async function closeAll() {
+  try {
+    await invoke("cmd_close_all_connections");
+    connections.value = [];
+  } catch {
+    // Ignore — next poll reconciles state.
+  }
+}
+
 onMounted(() => {
   fetchConnections();
   pollTimer = setInterval(fetchConnections, 2000);
@@ -90,6 +108,10 @@ onUnmounted(() => {
       <h1 class="page-title">活动连接</h1>
       <div class="header-actions">
         <span class="conn-count">{{ connections.length }} 个连接</span>
+        <button class="btn btn-ghost" @click="closeAll" :disabled="connections.length === 0">
+          <Ban :size="14" />
+          关闭全部
+        </button>
         <button class="btn btn-ghost" @click="fetchConnections" :disabled="loading">
           <RefreshCw :size="14" :class="{ spin: loading }" />
           刷新
@@ -116,6 +138,7 @@ onUnmounted(() => {
             <th class="col-traffic">上传</th>
             <th class="col-traffic">下载</th>
             <th class="col-proto">协议</th>
+            <th class="col-close"></th>
           </tr>
         </thead>
         <tbody>
@@ -146,6 +169,11 @@ onUnmounted(() => {
             <td class="col-traffic download-val">↓ {{ formatBytes(conn.download) }}</td>
             <td class="col-proto">
               <span class="proto-tag">{{ conn.network.toUpperCase() }}</span>
+            </td>
+            <td class="col-close">
+              <button class="close-btn" title="关闭此连接" @click="closeConnection(conn.id)">
+                <X :size="13" />
+              </button>
             </td>
           </tr>
         </tbody>
@@ -202,6 +230,16 @@ onUnmounted(() => {
 .col-chain { max-width: 120px; color: var(--color-text-secondary); }
 .col-traffic { width: 80px; }
 .col-proto { width: 52px; }
+.col-close { width: 32px; text-align: center; }
+
+.close-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border: none; border-radius: 4px;
+  background: transparent; color: var(--color-text-muted); cursor: pointer;
+  opacity: 0; transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.conn-table tr:hover .close-btn { opacity: 1; }
+.close-btn:hover { background: rgba(232,17,35,0.12); color: #e81123; }
 
 .text-muted { color: var(--color-text-muted); }
 

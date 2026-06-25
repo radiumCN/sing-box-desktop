@@ -15,7 +15,15 @@ pub fn detect_sub_type(content: &str, url: &str) -> SubType {
     // V2Ray base64 encoded
     if let Ok(decoded) = general_purpose::STANDARD.decode(content_trimmed.as_bytes()) {
         if let Ok(text) = String::from_utf8(decoded) {
-            if text.contains("vmess://") || text.contains("vless://") || text.contains("ss://") {
+            if text.contains("vmess://")
+                || text.contains("vless://")
+                || text.contains("ss://")
+                || text.contains("trojan://")
+                || text.contains("hysteria2://")
+                || text.contains("hy2://")
+                || text.contains("tuic://")
+                || text.contains("anytls://")
+            {
                 return SubType::V2ray;
             }
         }
@@ -27,6 +35,8 @@ pub fn detect_sub_type(content: &str, url: &str) -> SubType {
         || content_trimmed.starts_with("trojan://")
         || content_trimmed.starts_with("hysteria2://")
         || content_trimmed.starts_with("hy2://")
+        || content_trimmed.starts_with("tuic://")
+        || content_trimmed.starts_with("anytls://")
     {
         return SubType::V2ray;
     }
@@ -50,17 +60,17 @@ pub fn parse_subscription(
         SubType::Clash => parse_clash(content, sub_id),
         SubType::V2ray => parse_v2ray(content, sub_id),
         SubType::Sip008 => parse_sip008(content, sub_id),
-        SubType::Unknown => Err(anyhow!("???????")),
+        SubType::Unknown => Err(anyhow!("无法识别的订阅格式")),
     }
 }
 
 fn parse_clash(content: &str, sub_id: &str) -> Result<(Vec<ProxyNode>, Vec<Value>)> {
     let yaml: YamlValue = serde_yaml::from_str(content)
-        .map_err(|e| anyhow!("Clash YAML ????: {}", e))?;
+        .map_err(|e| anyhow!("Clash YAML 解析失败: {}", e))?;
 
     let proxies = yaml["proxies"]
         .as_sequence()
-        .ok_or_else(|| anyhow!("????proxies ??"))?;
+        .ok_or_else(|| anyhow!("未找到 proxies 字段"))?;
 
     let mut nodes = Vec::new();
     let mut outbounds = Vec::new();
@@ -74,7 +84,7 @@ fn parse_clash(content: &str, sub_id: &str) -> Result<(Vec<ProxyNode>, Vec<Value
         let node = ProxyNode {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.clone(),
-            group: "??".to_string(),
+            group: "默认".to_string(),
             protocol: proto.clone(),
             server: server.clone(),
             port,
@@ -125,6 +135,22 @@ fn clash_transport(network: &str, proxy: &YamlValue) -> Option<Value> {
     }
 }
 
+/// Clash `skip-cert-verify` flag — default false (verify the certificate). TLS is
+/// secure by default; only a node that explicitly opts out skips verification.
+fn clash_skip_verify(proxy: &YamlValue) -> bool {
+    proxy["skip-cert-verify"].as_bool().unwrap_or(false)
+}
+
+/// Read an explicit "skip TLS verification" flag from URI query params. Defaults to
+/// false (verify) — only an explicit allowInsecure/insecure = 1/true opts out.
+fn param_insecure(params: &std::collections::HashMap<String, String>) -> bool {
+    params.get("allowInsecure")
+        .or_else(|| params.get("allow_insecure"))
+        .or_else(|| params.get("insecure"))
+        .map(|v| v == "1" || v == "true")
+        .unwrap_or(false)
+}
+
 fn clash_yaml_proxy_to_singbox(proxy: &YamlValue, tag: &str) -> Option<Value> {
     let proto = proxy["type"].as_str()?;
     let server = proxy["server"].as_str()?;
@@ -161,7 +187,7 @@ fn clash_yaml_proxy_to_singbox(proxy: &YamlValue, tag: &str) -> Option<Value> {
                 ob["transport"] = t;
             }
             if tls {
-                ob["tls"] = json!({ "enabled": true, "insecure": true });
+                ob["tls"] = json!({ "enabled": true, "insecure": clash_skip_verify(proxy) });
             }
             Some(ob)
         }
@@ -204,7 +230,7 @@ fn clash_yaml_proxy_to_singbox(proxy: &YamlValue, tag: &str) -> Option<Value> {
                         "short_id": sid
                     });
                 } else {
-                    tls_obj["insecure"] = json!(true);
+                    tls_obj["insecure"] = json!(clash_skip_verify(proxy));
                 }
                 ob["tls"] = tls_obj;
             }
@@ -219,7 +245,7 @@ fn clash_yaml_proxy_to_singbox(proxy: &YamlValue, tag: &str) -> Option<Value> {
                 "server": server,
                 "server_port": port,
                 "password": password,
-                "tls": { "enabled": true, "server_name": sni, "insecure": true }
+                "tls": { "enabled": true, "server_name": sni, "insecure": clash_skip_verify(proxy) }
             }))
         }
         "hysteria2" | "hy2" => {
@@ -231,7 +257,46 @@ fn clash_yaml_proxy_to_singbox(proxy: &YamlValue, tag: &str) -> Option<Value> {
                 "server": server,
                 "server_port": port,
                 "password": password,
-                "tls": { "enabled": true, "server_name": sni, "insecure": true }
+                "tls": { "enabled": true, "server_name": sni, "insecure": clash_skip_verify(proxy) }
+            }))
+        }
+        "tuic" => {
+            let uuid = proxy["uuid"].as_str().unwrap_or("");
+            let password = proxy["password"].as_str().unwrap_or("");
+            let sni = proxy["sni"].as_str().unwrap_or(server);
+            let congestion = proxy["congestion-controller"].as_str()
+                .or_else(|| proxy["congestion_control"].as_str())
+                .unwrap_or("bbr");
+            let udp_relay_mode = proxy["udp-relay-mode"].as_str().unwrap_or("native");
+            let mut tls = json!({ "enabled": true, "server_name": sni, "insecure": clash_skip_verify(proxy) });
+            if let Some(alpn) = proxy["alpn"].as_sequence() {
+                let list: Vec<&str> = alpn.iter().filter_map(|v| v.as_str()).collect();
+                if !list.is_empty() {
+                    tls["alpn"] = json!(list);
+                }
+            }
+            Some(json!({
+                "type": "tuic",
+                "tag": tag,
+                "server": server,
+                "server_port": port,
+                "uuid": uuid,
+                "password": password,
+                "congestion_control": congestion,
+                "udp_relay_mode": udp_relay_mode,
+                "tls": tls
+            }))
+        }
+        "anytls" => {
+            let password = proxy["password"].as_str().unwrap_or("");
+            let sni = proxy["sni"].as_str().unwrap_or(server);
+            Some(json!({
+                "type": "anytls",
+                "tag": tag,
+                "server": server,
+                "server_port": port,
+                "password": password,
+                "tls": { "enabled": true, "server_name": sni, "insecure": clash_skip_verify(proxy) }
             }))
         }
         _ => None,
@@ -262,7 +327,7 @@ fn parse_v2ray(content: &str, sub_id: &str) -> Result<(Vec<ProxyNode>, Vec<Value
     }
 
     if nodes.is_empty() {
-        return Err(anyhow!("????????"));
+        return Err(anyhow!("未解析到有效节点"));
     }
 
     Ok((nodes, outbounds))
@@ -279,8 +344,12 @@ fn parse_node_link(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
         parse_trojan(link, sub_id)
     } else if link.starts_with("hysteria2://") || link.starts_with("hy2://") {
         parse_hysteria2(link, sub_id)
+    } else if link.starts_with("tuic://") {
+        parse_tuic(link, sub_id)
+    } else if link.starts_with("anytls://") {
+        parse_anytls(link, sub_id)
     } else {
-        Err(anyhow!("??????: {}", link))
+        Err(anyhow!("不支持的链接类型: {}", link))
     }
 }
 
@@ -326,13 +395,19 @@ fn parse_vmess(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
         outbound["transport"] = transport;
     }
     if tls {
-        outbound["tls"] = json!({ "enabled": true, "server_name": sni, "insecure": true });
+        // Secure by default; vmess links may opt out via an explicit allowInsecure
+        // field (carried as bool / "1"/"true" / 1 depending on the exporter).
+        let insecure = v["allowInsecure"].as_bool()
+            .or_else(|| v["allowInsecure"].as_str().map(|s| s == "1" || s == "true"))
+            .or_else(|| v["allowInsecure"].as_u64().map(|n| n == 1))
+            .unwrap_or(false);
+        outbound["tls"] = json!({ "enabled": true, "server_name": sni, "insecure": insecure });
     }
 
     let node = ProxyNode {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.clone(),
-        group: "??".to_string(),
+        group: "默认".to_string(),
         protocol: "vmess".to_string(),
         server,
         port,
@@ -400,8 +475,8 @@ fn parse_vless(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
                 "short_id": sid
             });
         } else {
-            // Plain TLS: allow self-signed certs for compatibility.
-            tls["insecure"] = json!(true);
+            // Plain TLS: verify by default; honor an explicit allowInsecure param.
+            tls["insecure"] = json!(param_insecure(&params));
         }
         outbound["tls"] = tls;
     }
@@ -409,7 +484,7 @@ fn parse_vless(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
     let node = ProxyNode {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.clone(),
-        group: "??".to_string(),
+        group: "默认".to_string(),
         protocol: "vless".to_string(),
         server,
         port,
@@ -453,7 +528,7 @@ fn parse_ss(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
     let node = ProxyNode {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.clone(),
-        group: "??".to_string(),
+        group: "默认".to_string(),
         protocol: "shadowsocks".to_string(),
         server,
         port,
@@ -476,6 +551,7 @@ fn parse_trojan(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     let sni = params.get("sni").cloned().unwrap_or_else(|| server.clone());
+    let insecure = param_insecure(&params);
 
     let outbound = json!({
         "type": "trojan",
@@ -483,13 +559,13 @@ fn parse_trojan(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
         "server": server,
         "server_port": port,
         "password": password,
-        "tls": { "enabled": true, "server_name": sni, "insecure": true }
+        "tls": { "enabled": true, "server_name": sni, "insecure": insecure }
     });
 
     let node = ProxyNode {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.clone(),
-        group: "??".to_string(),
+        group: "默认".to_string(),
         protocol: "trojan".to_string(),
         server,
         port,
@@ -513,7 +589,7 @@ fn parse_hysteria2(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     let sni = params.get("sni").cloned().unwrap_or_else(|| server.clone());
-    let insecure = params.get("insecure").map(|v| v == "1").unwrap_or(false);
+    let insecure = param_insecure(&params);
 
     let outbound = json!({
         "type": "hysteria2",
@@ -527,8 +603,103 @@ fn parse_hysteria2(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
     let node = ProxyNode {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.clone(),
-        group: "??".to_string(),
+        group: "默认".to_string(),
         protocol: "hysteria2".to_string(),
+        server,
+        port,
+        latency: None,
+        download_speed: None,
+        is_active: false,
+        subscription_id: Some(sub_id.to_string()),
+    };
+
+    Ok((node, outbound))
+}
+
+fn parse_tuic(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
+    let url = Url::parse(link)?;
+    let uuid = url.username().to_string();
+    let password = url.password().unwrap_or("").to_string();
+    let server = url.host_str().unwrap_or("").to_string();
+    let port = url.port().unwrap_or(443);
+    let name = url.fragment().unwrap_or(&server).to_string();
+    let params: std::collections::HashMap<String, String> = url.query_pairs()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let sni = params.get("sni").cloned().unwrap_or_else(|| server.clone());
+    let insecure = param_insecure(&params);
+    let congestion = params.get("congestion_control").cloned()
+        .unwrap_or_else(|| "bbr".to_string());
+    let udp_relay_mode = params.get("udp_relay_mode").cloned()
+        .unwrap_or_else(|| "native".to_string());
+
+    let mut tls = json!({ "enabled": true, "server_name": sni, "insecure": insecure });
+    if let Some(alpn) = params.get("alpn") {
+        let list: Vec<&str> = alpn.split(',').filter(|s| !s.is_empty()).collect();
+        if !list.is_empty() {
+            tls["alpn"] = json!(list);
+        }
+    }
+
+    let outbound = json!({
+        "type": "tuic",
+        "tag": name,
+        "server": server,
+        "server_port": port,
+        "uuid": uuid,
+        "password": password,
+        "congestion_control": congestion,
+        "udp_relay_mode": udp_relay_mode,
+        "tls": tls
+    });
+
+    let node = ProxyNode {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: name.clone(),
+        group: "默认".to_string(),
+        protocol: "tuic".to_string(),
+        server,
+        port,
+        latency: None,
+        download_speed: None,
+        is_active: false,
+        subscription_id: Some(sub_id.to_string()),
+    };
+
+    Ok((node, outbound))
+}
+
+fn parse_anytls(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
+    let url = Url::parse(link)?;
+    // anytls://<password>@host:port  — the password is carried in the userinfo.
+    let password = if !url.username().is_empty() {
+        url.username().to_string()
+    } else {
+        url.password().unwrap_or("").to_string()
+    };
+    let server = url.host_str().unwrap_or("").to_string();
+    let port = url.port().unwrap_or(443);
+    let name = url.fragment().unwrap_or(&server).to_string();
+    let params: std::collections::HashMap<String, String> = url.query_pairs()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let sni = params.get("sni").cloned().unwrap_or_else(|| server.clone());
+    let insecure = param_insecure(&params);
+
+    let outbound = json!({
+        "type": "anytls",
+        "tag": name,
+        "server": server,
+        "server_port": port,
+        "password": password,
+        "tls": { "enabled": true, "server_name": sni, "insecure": insecure }
+    });
+
+    let node = ProxyNode {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: name.clone(),
+        group: "默认".to_string(),
+        protocol: "anytls".to_string(),
         server,
         port,
         latency: None,
@@ -543,7 +714,7 @@ fn parse_hysteria2(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
 fn parse_sip008(content: &str, sub_id: &str) -> Result<(Vec<ProxyNode>, Vec<Value>)> {
     let v: Value = serde_json::from_str(content)?;
     let servers = v["servers"].as_array()
-        .ok_or_else(|| anyhow!("SIP008: ????servers ??"))?;
+        .ok_or_else(|| anyhow!("SIP008: 未找到 servers 字段"))?;
 
     let mut nodes = Vec::new();
     let mut outbounds = Vec::new();
@@ -570,7 +741,7 @@ fn parse_sip008(content: &str, sub_id: &str) -> Result<(Vec<ProxyNode>, Vec<Valu
         nodes.push(ProxyNode {
             id: uuid::Uuid::new_v4().to_string(),
             name,
-            group: "??".to_string(),
+            group: "默认".to_string(),
             protocol: "shadowsocks".to_string(),
             server,
             port,
@@ -624,12 +795,45 @@ pub fn build_singbox_config(
         .map(|(sid, members)| (format!("{}-{}", AUTO_TAG, sid), members))
         .collect();
 
+    /* User-defined custom proxy groups. A group is emitted only when its name does not
+       collide with a reserved tag / existing node / sub-group tag (a duplicate outbound
+       tag would make sing-box reject the whole config) and it has at least one member
+       that actually exists as an outbound. (group_tag, group_type, member_node_tags). */
+    let reserved_tags: std::collections::HashSet<String> = {
+        let mut s: std::collections::HashSet<String> =
+            ["proxy", "direct", "block", AUTO_TAG].iter().map(|t| t.to_string()).collect();
+        s.extend(outbound_tag_set.iter().map(|t| t.to_string()));
+        s.extend(sub_groups.iter().map(|(t, _)| t.clone()));
+        s
+    };
+    let mut seen_group_tags: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let custom_groups: Vec<(String, String, Vec<Value>)> = crate::config::load_proxy_groups()
+        .into_iter()
+        .filter_map(|g| {
+            if reserved_tags.contains(&g.name) || !seen_group_tags.insert(g.name.clone()) {
+                return None;
+            }
+            let members: Vec<Value> = g.nodes.iter()
+                .filter(|n| outbound_tag_set.contains(n.as_str()))
+                .map(|n| Value::String(n.clone()))
+                .collect();
+            if members.is_empty() {
+                return None;
+            }
+            let gtype = if g.group_type == "urltest" { "urltest" } else { "selector" };
+            Some((g.name, gtype.to_string(), members))
+        })
+        .collect();
+
     /* Selector options order: global "auto" → per-subscription autos → every node. */
     let mut selector_outbounds: Vec<Value> = Vec::new();
     if has_nodes {
         selector_outbounds.push(Value::String(AUTO_TAG.to_string()));
     }
     for (tag, _) in &sub_groups {
+        selector_outbounds.push(Value::String(tag.clone()));
+    }
+    for (tag, _, _) in &custom_groups {
         selector_outbounds.push(Value::String(tag.clone()));
     }
     selector_outbounds.extend(node_tags.iter().cloned());
@@ -714,6 +918,20 @@ pub fn build_singbox_config(
     }
     for (tag, members) in &sub_groups {
         all_outbounds.push(urltest_group(tag, members));
+    }
+    /* User-defined custom groups: urltest (auto by latency) or selector (manual pick,
+       defaulting to its first member). */
+    for (tag, gtype, members) in &custom_groups {
+        if gtype == "urltest" {
+            all_outbounds.push(urltest_group(tag, members));
+        } else {
+            all_outbounds.push(json!({
+                "type": "selector",
+                "tag": tag,
+                "outbounds": members,
+                "default": members[0]
+            }));
+        }
     }
     all_outbounds.extend_from_slice(&clean_outbounds);
 
@@ -915,9 +1133,72 @@ pub fn build_singbox_config(
         }
     }
 
+    // User-added remote rule-set providers. Each enabled provider contributes one
+    // remote rule_set entry (downloaded through the proxy) and one route rule mapping
+    // its matches to the chosen outbound. Placed before the broad CN catch-alls so a
+    // user provider can override the default geosite-cn/geoip-cn direct routing.
+    let rule_providers = crate::rules::load_rule_providers();
+    let mut provider_rule_sets: Vec<Value> = Vec::new();
+    for p in rule_providers.iter().filter(|p| p.enabled && !p.url.is_empty()) {
+        let tag = format!("rp-{}", p.id);
+        let outbound = match p.action {
+            crate::rules::RuleAction::Proxy => "proxy",
+            crate::rules::RuleAction::Direct => "direct",
+            crate::rules::RuleAction::Block => "block",
+            crate::rules::RuleAction::Dns => continue,
+        };
+        provider_rule_sets.push(json!({
+            "type": "remote",
+            "tag": tag,
+            "format": p.format,
+            "url": p.url,
+            "download_detour": "proxy",
+            "update_interval": "1d"
+        }));
+        route_rules.push(json!({ "rule_set": [tag], "outbound": outbound }));
+    }
+
     // Broad CN catch-alls (geosite/geoip rule sets)
     route_rules.push(json!({ "rule_set": ["geosite-cn"], "outbound": "direct" }));
     route_rules.push(json!({ "rule_set": ["geoip-cn"], "outbound": "direct" }));
+
+    // Listen address: bind to all interfaces when LAN sharing is enabled, otherwise
+    // stay loopback-only. Applies to every local inbound (mixed/http/socks).
+    let listen_addr = if config.allow_lan { "0.0.0.0" } else { "127.0.0.1" };
+
+    // The mixed inbound (HTTP + SOCKS on one port) is always present. Dedicated
+    // http/socks inbounds are added only when their port differs from the mixed port
+    // (and each other) — reusing a port would make sing-box fail to start.
+    let mut inbounds: Vec<Value> = vec![json!({
+        "type": "mixed",
+        "tag": "mixed-in",
+        "listen": listen_addr,
+        "listen_port": config.mixed_port,
+        "set_system_proxy": false
+    })];
+    if config.http_port != 0 && config.http_port != config.mixed_port {
+        inbounds.push(json!({
+            "type": "http",
+            "tag": "http-in",
+            "listen": listen_addr,
+            "listen_port": config.http_port
+        }));
+    }
+    if config.socks_port != 0
+        && config.socks_port != config.mixed_port
+        && config.socks_port != config.http_port
+    {
+        inbounds.push(json!({
+            "type": "socks",
+            "tag": "socks-in",
+            "listen": listen_addr,
+            "listen_port": config.socks_port
+        }));
+    }
+
+    // Combine the built-in CN rule sets with any user-added remote providers.
+    let mut all_rule_sets: Vec<Value> = vec![geosite_cn_rs, geoip_cn_rs];
+    all_rule_sets.extend(provider_rule_sets);
 
     let mut cfg = json!({
         "log": { "level": config.log_level, "timestamp": true },
@@ -939,20 +1220,12 @@ pub fn build_singbox_config(
             "strategy": "ipv4_only",
             "independent_cache": true
         },
-        "inbounds": [
-            {
-                "type": "mixed",
-                "tag": "mixed-in",
-                "listen": "127.0.0.1",
-                "listen_port": config.mixed_port,
-                "set_system_proxy": false
-            }
-        ],
+        "inbounds": inbounds,
         "outbounds": all_outbounds,
         "route": {
             "default_domain_resolver": "dns_local",
             "rules": route_rules,
-            "rule_set": [ geosite_cn_rs, geoip_cn_rs ],
+            "rule_set": all_rule_sets,
             "final": "proxy",
             "auto_detect_interface": true
         },
