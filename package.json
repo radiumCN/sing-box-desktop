@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "fetch-kernel": "node scripts/fetch-singbox.js",
     "prepare-installer": "node scripts/prepare-installer.js",
     "preview": "vite preview",
     "tauri": "tauri"

@@ -1533,7 +1533,7 @@ pub fn cmd_wintun_available() -> bool {
 
 #[tauri::command]
 pub async fn cmd_download_wintun() -> Result<(), String> {
-    let bin_dir = crate::updater::singbox_binary_path()
+    let bin_dir = crate::updater::resolved_singbox_path()
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::path::PathBuf::from("."));
