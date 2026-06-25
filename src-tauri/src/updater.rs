@@ -303,16 +303,55 @@ pub async fn download_singbox(
 
 /// Write extracted bytes to `dest`, going through a temp file + rename so an
 /// already-running sing-box binary doesn't block the write.
+///
+/// On Windows a running executable cannot be overwritten directly (os error 5 /
+/// Access Denied). However Windows *does* allow renaming a file that is currently
+/// in use, so we:
+///   1. Write the new binary to `<dest>.tmp`
+///   2. Rename the existing binary (if any) to `<dest>.old`  ← allowed even while running
+///   3. Rename `.tmp` → final name
+///   4. Best-effort delete of the `.old` file (succeeds after the process exits)
 fn write_binary(dest: &PathBuf, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
+
     let tmp = dest.with_extension("tmp");
-    let mut out = std::fs::File::create(&tmp)?;
+    let mut out = std::fs::File::create(&tmp)
+        .map_err(|e| anyhow!("无法创建临时文件 {:?}: {}", tmp, e))?;
     out.write_all(bytes)?;
     drop(out);
-    std::fs::rename(&tmp, dest)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        // Step 2: move the current binary aside so it is no longer at `dest`.
+        let old = dest.with_extension("old");
+        // Remove a stale .old from a previous update attempt (ignore errors).
+        let _ = std::fs::remove_file(&old);
+        if dest.exists() {
+            std::fs::rename(dest, &old)
+                .map_err(|e| anyhow!("无法移走旧内核文件: {}", e))?;
+        }
+
+        // Step 3: put the new binary in place.
+        if let Err(e) = std::fs::rename(&tmp, dest) {
+            // Roll back: restore the old binary so the app is not left without a kernel.
+            let _ = std::fs::rename(&old, dest);
+            return Err(anyhow!("无法写入新内核文件: {}", e));
+        }
+
+        // Step 4: clean up — this will silently fail if the old process is still alive,
+        // which is fine; the file will be cleaned up on the next update.
+        let _ = std::fs::remove_file(&old);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::fs::rename(&tmp, dest)
+            .map_err(|e| anyhow!("无法写入新内核文件: {}", e))?;
+    }
+
     Ok(())
 }
 
