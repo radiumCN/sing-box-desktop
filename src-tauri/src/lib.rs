@@ -8,6 +8,7 @@ mod updater;
 mod tun;
 mod rules;
 mod auto_update;
+mod stats;
 mod commands;
 
 use std::sync::Mutex;
@@ -111,6 +112,17 @@ pub fn run() {
     };
 
     tauri::Builder::default()
+        // Single-instance MUST be the first plugin registered (Tauri requirement). A second
+        // launch is redirected here instead of starting a rival process — which would fight
+        // over the mixed/API ports and the TUN adapter — and we surface the existing window.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            use tauri::Manager;
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_store::Builder::default().build())
@@ -121,6 +133,9 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_opener::init())
+        // Global hotkeys are registered/handled from the frontend via the plugin's JS API;
+        // the Rust side only needs the default plugin initialised.
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .manage(app_state)
         .manage(TrayState {
             sys_proxy_item: Mutex::new(None),
@@ -392,6 +407,10 @@ pub fn run() {
             commands::cmd_get_logs,
             commands::cmd_export_config,
             commands::cmd_import_config,
+            commands::cmd_list_profiles,
+            commands::cmd_save_profile,
+            commands::cmd_load_profile,
+            commands::cmd_delete_profile,
             commands::cmd_get_subscriptions,
             commands::cmd_add_subscription,
             commands::cmd_import_subscription_from_text,
@@ -412,6 +431,9 @@ pub fn run() {
             commands::cmd_close_connection,
             commands::cmd_close_all_connections,
             commands::cmd_get_traffic_total,
+            commands::cmd_add_traffic_sample,
+            commands::cmd_get_traffic_history,
+            commands::cmd_run_diagnostics,
             commands::cmd_parse_subscription_from_text,
             commands::cmd_check_singbox_update,
             commands::cmd_get_installed_version,
@@ -439,6 +461,7 @@ pub fn run() {
             commands::cmd_sync_tray_menu,
             commands::cmd_get_memory_usage,
             commands::cmd_save_subscription_settings,
+            commands::cmd_set_subscription_filters,
             commands::cmd_check_app_update,
             commands::cmd_download_app_update,
         ])

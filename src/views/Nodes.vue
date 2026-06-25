@@ -2,7 +2,9 @@
 import { ref, computed, watch, onMounted } from "vue";
 import { Gauge, RefreshCw, CheckCircle, Signal, Zap, ArrowUpDown, Plus, Trash2, Pencil, Layers } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
+import { useI18n } from "vue-i18n";
 
+const { t } = useI18n();
 const store = useAppStore();
 const testingAll = ref(false);
 const testingGroup = ref(false);
@@ -75,7 +77,7 @@ async function saveGroup() {
   showGroupEditor.value = false;
 }
 async function deleteGroup(id: string) {
-  if (!confirm("确认删除此代理组？")) return;
+  if (!confirm(t("nodes.confirmDeleteGroup"))) return;
   await store.saveProxyGroups(store.proxyGroups.filter((g) => g.id !== id));
 }
 async function useGroup(name: string) {
@@ -205,18 +207,18 @@ const autoNowName = computed(() => store.activeNodeNow);
 <template>
   <div class="page">
     <div class="page-header">
-      <h1 class="page-title">节点列表</h1>
+      <h1 class="page-title">{{ t("nodes.title") }}</h1>
       <div class="header-actions">
-        <span class="node-count">{{ store.nodes.length }} 个节点</span>
-        <button class="btn btn-ghost" :disabled="testingAll" @click="testAll" title="测试所有节点的延迟和网速">
+        <span class="node-count">{{ t("nodes.nodeCount", { n: store.nodes.length }) }}</span>
+        <button class="btn btn-ghost" :disabled="testingAll" @click="testAll" :title="t('nodes.testAllTip')">
           <Gauge :size="14" :class="{ spin: testingAll }" />
-          {{ testingAll ? "测试中..." : "全部测速" }}
+          {{ testingAll ? t("nodes.testing") : t("nodes.testAll") }}
         </button>
         <!-- Sort selector -->
         <div class="sort-group">
           <ArrowUpDown :size="13" />
           <button
-            v-for="[k, label] in [['none','默认'],['latency','延迟'],['speed','速度']]"
+            v-for="[k, label] in [['none', t('nodes.sortDefault')],['latency', t('nodes.sortLatency')],['speed', t('nodes.sortSpeed')]]"
             :key="k"
             class="sort-btn"
             :class="{ active: sortBy === k }"
@@ -226,14 +228,14 @@ const autoNowName = computed(() => store.activeNodeNow);
 
         <button class="btn btn-ghost" @click="store.fetchNodes">
           <RefreshCw :size="14" />
-          刷新
+          {{ t("nodes.refresh") }}
         </button>
       </div>
     </div>
 
     <!-- Filters -->
     <div class="filters">
-      <input class="input search-input" v-model="search" placeholder="搜索节点名称或服务器..." />
+      <input class="input search-input" v-model="search" :placeholder="t('nodes.searchPlaceholder')" />
 
       <!-- Subscription tabs (show only if more than one sub) -->
       <div v-if="store.subscriptions.length > 0" class="sub-tabs">
@@ -242,7 +244,7 @@ const autoNowName = computed(() => store.activeNodeNow);
           :class="{ active: filterSubId === 'all' }"
           @click="switchSub('all')"
         >
-          全部 <span class="sub-count">{{ store.nodes.length }}</span>
+          {{ t("nodes.allTab") }} <span class="sub-count">{{ store.nodes.length }}</span>
         </button>
         <button
           v-for="sub in store.subscriptions"
@@ -262,16 +264,16 @@ const autoNowName = computed(() => store.activeNodeNow);
       <div class="group-head">
         <div class="group-title">
           <Layers :size="14" />
-          <span>自定义代理组</span>
+          <span>{{ t("nodes.customGroups") }}</span>
         </div>
         <button class="btn btn-ghost btn-sm" @click="openNewGroup">
           <Plus :size="13" />
-          新建组
+          {{ t("nodes.newGroup") }}
         </button>
       </div>
 
       <div v-if="store.proxyGroups.length === 0 && !showGroupEditor" class="group-empty">
-        创建自定义组（手动选择 / 自动选优），保存后在下次重连生效
+        {{ t("nodes.groupEmptyHint") }}
       </div>
 
       <div v-if="store.proxyGroups.length > 0" class="group-list">
@@ -284,18 +286,18 @@ const autoNowName = computed(() => store.activeNodeNow);
           <div class="group-info">
             <div class="group-name">
               {{ g.name }}
-              <span class="group-badge">{{ g.group_type === "urltest" ? "自动选优" : "手动选择" }}</span>
+              <span class="group-badge">{{ g.group_type === "urltest" ? t("nodes.autoSelect") : t("nodes.manualSelect") }}</span>
             </div>
-            <div class="group-members">{{ g.nodes.length }} 个节点</div>
+            <div class="group-members">{{ t("nodes.nodeCount", { n: g.nodes.length }) }}</div>
           </div>
           <div class="group-actions">
             <button class="btn btn-ghost btn-sm" @click="useGroup(g.name)">
-              {{ store.activeProxyTag === g.name ? "使用中" : "使用此组" }}
+              {{ store.activeProxyTag === g.name ? t("nodes.inUse") : t("nodes.useGroup") }}
             </button>
-            <button class="icon-btn" title="编辑" @click="openEditGroup(g)">
+            <button class="icon-btn" :title="t('nodes.edit')" @click="openEditGroup(g)">
               <Pencil :size="14" />
             </button>
-            <button class="icon-btn danger" title="删除" @click="deleteGroup(g.id)">
+            <button class="icon-btn danger" :title="t('nodes.delete')" @click="deleteGroup(g.id)">
               <Trash2 :size="14" />
             </button>
           </div>
@@ -305,13 +307,13 @@ const autoNowName = computed(() => store.activeNodeNow);
       <!-- Group editor -->
       <div v-if="showGroupEditor" class="group-editor">
         <div class="editor-row">
-          <input class="input" v-model="groupForm.name" placeholder="组名称（需唯一，勿与节点同名）" />
+          <input class="input" v-model="groupForm.name" :placeholder="t('nodes.groupNamePlaceholder')" />
           <select class="input editor-type" v-model="groupForm.group_type">
-            <option value="urltest">自动选优（按延迟）</option>
-            <option value="selector">手动选择</option>
+            <option value="urltest">{{ t("nodes.autoSelectByLatency") }}</option>
+            <option value="selector">{{ t("nodes.manualSelect") }}</option>
           </select>
         </div>
-        <div class="member-label">选择成员节点（{{ groupForm.nodes.length }}）</div>
+        <div class="member-label">{{ t("nodes.selectMembers", { n: groupForm.nodes.length }) }}</div>
         <div class="member-grid">
           <label
             v-for="name in allNodeNames"
@@ -328,13 +330,13 @@ const autoNowName = computed(() => store.activeNodeNow);
           </label>
         </div>
         <div class="editor-actions">
-          <button class="btn btn-ghost" @click="showGroupEditor = false">取消</button>
+          <button class="btn btn-ghost" @click="showGroupEditor = false">{{ t("nodes.cancel") }}</button>
           <button
             class="btn btn-primary"
             :disabled="!groupForm.name.trim() || groupForm.nodes.length === 0"
             @click="saveGroup"
           >
-            {{ editingGroupId ? "保存修改" : "创建" }}
+            {{ editingGroupId ? t("nodes.saveChanges") : t("nodes.create") }}
           </button>
         </div>
       </div>
@@ -342,14 +344,14 @@ const autoNowName = computed(() => store.activeNodeNow);
 
     <!-- Speed-test notice when proxy is not running -->
     <div v-if="store.nodes.length > 0 && !store.status.running" class="speed-notice">
-      <span>⚡ 代理未运行：测速只能测延迟，<strong>下载速度测试需要先启动代理</strong></span>
+      <span>⚡ {{ t("nodes.speedNoticePrefix") }}<strong>{{ t("nodes.speedNoticeStrong") }}</strong></span>
     </div>
 
     <!-- Empty -->
     <div v-if="store.nodes.length === 0" class="empty-state">
       <Signal :size="36" class="empty-icon" />
-      <div class="empty-title">暂无节点</div>
-      <div class="empty-desc">请先在「订阅」页面添加订阅</div>
+      <div class="empty-title">{{ t("nodes.emptyTitle") }}</div>
+      <div class="empty-desc">{{ t("nodes.emptyDesc") }}</div>
     </div>
 
     <!-- Node List -->
@@ -360,7 +362,7 @@ const autoNowName = computed(() => store.activeNodeNow);
         class="card node-item auto-item"
         :class="{ active: store.activeProxyTag === currentAutoTag }"
         @click="selectAuto(filterSubId === 'all' ? undefined : filterSubId)"
-        title="动态自动选优：内核持续测速并自动切换到延迟最低的节点（Clash.Meta「Auto」）"
+        :title="t('nodes.autoCardTip')"
       >
         <div class="node-left">
           <div class="active-indicator">
@@ -369,15 +371,15 @@ const autoNowName = computed(() => store.activeNodeNow);
           </div>
           <div class="node-info">
             <div class="node-name">
-              {{ filterSubId === 'all' ? '自动选优（全部节点）' : '自动选优（本订阅）' }}
+              {{ filterSubId === 'all' ? t('nodes.autoAllNodes') : t('nodes.autoThisSub') }}
             </div>
             <div class="node-meta">
               <span class="badge badge-gray protocol-badge">URLTest</span>
               <span
                 v-if="store.activeProxyTag === currentAutoTag && autoNowName"
                 class="node-server auto-now"
-              >当前命中：{{ autoNowName }}</span>
-              <span v-else class="node-server">内核持续测速，自动切换最快节点</span>
+              >{{ t("nodes.currentHit", { name: autoNowName }) }}</span>
+              <span v-else class="node-server">{{ t("nodes.autoSwitchDesc") }}</span>
             </div>
           </div>
         </div>
@@ -386,7 +388,7 @@ const autoNowName = computed(() => store.activeNodeNow);
             class="btn btn-ghost icon-btn"
             :disabled="testingGroup || !store.status.running"
             @click.stop="retestGroup"
-            :title="store.status.running ? '立即重测本组所有节点并刷新最优' : '需先启动代理'"
+            :title="store.status.running ? t('nodes.retestGroupTip') : t('nodes.needStartProxy')"
           >
             <RefreshCw :size="13" :class="{ spin: testingGroup }" />
           </button>
@@ -406,7 +408,14 @@ const autoNowName = computed(() => store.activeNodeNow);
             <div v-else class="check-placeholder" />
           </div>
           <div class="node-info">
-            <div class="node-name">{{ node.name }}</div>
+            <div class="node-name">
+              <span
+                class="health-dot"
+                :style="{ background: latencyColor(node.latency) }"
+                :title="latencyLabel(node.latency)"
+              />
+              {{ node.name }}
+            </div>
             <div class="node-meta">
               <span class="badge badge-gray protocol-badge">{{ node.protocol }}</span>
               <span class="node-server">{{ node.server }}:{{ node.port }}</span>
@@ -423,7 +432,7 @@ const autoNowName = computed(() => store.activeNodeNow);
               v-if="node.latency !== undefined && node.latency !== null"
               class="download-speed"
               :style="{ color: node.download_speed != null ? speedColor(node.download_speed) : 'var(--color-text-muted)' }"
-              :title="node.download_speed == null ? '下载测速需要先启动代理' : ''"
+              :title="node.download_speed == null ? t('nodes.downloadNeedProxy') : ''"
             >
               ↓ {{ node.download_speed != null ? speedLabel(node.download_speed) : '--' }}
             </span>
@@ -432,7 +441,7 @@ const autoNowName = computed(() => store.activeNodeNow);
             class="btn btn-ghost icon-btn"
             :disabled="isTesting(node.id)"
             @click.stop="testOne(node.id)"
-            :title="store.status.running ? '测试延迟 + 下载速度' : '测试延迟（启动代理后可测速）'"
+            :title="store.status.running ? t('nodes.testNodeTip') : t('nodes.testNodeTipNoProxy')"
           >
             <Gauge :size="13" :class="{ spin: isTesting(node.id) }" />
           </button>
@@ -441,7 +450,7 @@ const autoNowName = computed(() => store.activeNodeNow);
     </div>
 
     <div v-if="filtered.length === 0 && store.nodes.length > 0" class="no-result">
-      没有匹配「{{ search }}」的节点
+      {{ t("nodes.noResult", { q: search }) }}
     </div>
   </div>
 </template>
@@ -516,6 +525,10 @@ const autoNowName = computed(() => store.activeNodeNow);
 .check-placeholder { width: 16px; height: 16px; }
 .node-info { flex: 1; min-width: 0; }
 .node-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.health-dot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  margin-right: 6px; vertical-align: middle; flex-shrink: 0;
+}
 .node-meta { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
 .protocol-badge { font-size: 10px; padding: 1px 6px; }
 .node-server { font-size: 11px; color: var(--color-text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

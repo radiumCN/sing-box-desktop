@@ -3,8 +3,12 @@ import { onMounted, watch } from "vue";
 import { RouterView } from "vue-router";
 import Sidebar from "./components/Sidebar.vue";
 import { useAppStore } from "./stores/app";
+import { setLocale } from "./i18n";
 
 const store = useAppStore();
+
+// Keep the active UI locale in sync with the persisted AppConfig.language.
+watch(() => store.config.language, (lang) => setLocale(lang), { immediate: true });
 
 function applyTheme(theme: string) {
   const html = document.documentElement;

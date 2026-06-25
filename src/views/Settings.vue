@@ -3,15 +3,95 @@ import { ref, watch, onMounted, onUnmounted, computed } from "vue";
 import {
   Shield, Globe, Cpu, Monitor, Download,
   RefreshCw, CheckCircle, AlertCircle, Package, ExternalLink,
-  ShieldCheck, ShieldAlert, Check, Rocket, Zap, Save, Upload, Archive
+  ShieldCheck, ShieldAlert, Check, Rocket, Zap, Save, Upload, Archive, Layers, Trash2
 } from "@lucide/vue";
 import { invoke } from "@tauri-apps/api/core";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
+import { useI18n } from "vue-i18n";
 import { useAppStore, type AppConfig } from "../stores/app";
+import { setLocale } from "../i18n";
 
 const store = useAppStore();
+const { t } = useI18n();
+
+// Apply a language change to the UI immediately; the debounced config save then persists it.
+function onLanguageChange() {
+  setLocale(localConfig.value.language);
+}
+
+// ─── Network diagnostics (N5) ──────────────────────────────────────────
+interface ProbeResult { name: string; ok: boolean; latency_ms?: number | null; }
+interface DiagnosticsResult {
+  outbound_ip?: string | null;
+  country?: string | null;
+  city?: string | null;
+  isp?: string | null;
+  probes: ProbeResult[];
+}
+const diagResult = ref<DiagnosticsResult | null>(null);
+const diagnosing = ref(false);
+const diagError = ref("");
+
+async function runDiagnostics() {
+  diagnosing.value = true;
+  diagError.value = "";
+  diagResult.value = null;
+  try {
+    diagResult.value = await invoke<DiagnosticsResult>("cmd_run_diagnostics");
+  } catch (e) {
+    diagError.value = String(e);
+  } finally {
+    diagnosing.value = false;
+  }
+}
+
+const diagLocation = computed(() => {
+  const r = diagResult.value;
+  if (!r) return "";
+  return [r.city, r.country].filter(Boolean).join(", ");
+});
+
+// ─── Config profiles (N6) ──────────────────────────────────────────────
+const profiles = ref<string[]>([]);
+const newProfileName = ref("");
+const profileBusy = ref(false);
+
+async function refreshProfiles() {
+  profiles.value = await store.listProfiles();
+}
+async function saveCurrentProfile() {
+  const name = newProfileName.value.trim();
+  if (!name) return;
+  profileBusy.value = true;
+  try {
+    await store.saveProfile(name);
+    newProfileName.value = "";
+    await refreshProfiles();
+  } catch (e) {
+    alert(String(e));
+  } finally {
+    profileBusy.value = false;
+  }
+}
+async function switchProfile(name: string) {
+  profileBusy.value = true;
+  try {
+    await store.loadProfile(name);
+    localConfig.value = { ...store.config };
+    alert(t("settings.profileSwitched", { name }));
+  } catch (e) {
+    alert(String(e));
+  } finally {
+    profileBusy.value = false;
+  }
+}
+async function removeProfile(name: string) {
+  if (!confirm(t("settings.confirmDeleteProfile", { name }))) return;
+  await store.deleteProfile(name);
+  await refreshProfiles();
+}
 const saved = ref(false);
 const appVersion = ref("");
 const localConfig = ref<AppConfig>({ ...store.config });
@@ -51,9 +131,9 @@ async function exportConfig() {
     } catch {
       /** Reveal may be unavailable; the file is still written. */
     }
-    alert(`配置已导出到：\n${path}`);
+    alert(t('settings.exportedTo', { path }));
   } catch (e) {
-    alert(`导出失败：${e}`);
+    alert(t('settings.exportFailed', { e }));
   } finally {
     exportingConfig.value = false;
   }
@@ -63,10 +143,10 @@ async function exportConfig() {
 async function importConfig() {
   const content = importText.value.trim();
   if (!content) {
-    alert("请粘贴备份文件的内容");
+    alert(t('settings.pasteBackupContent'));
     return;
   }
-  if (!confirm("导入将覆盖当前的订阅、节点、分组、规则与设置，确定继续？")) return;
+  if (!confirm(t('settings.importConfirm'))) return;
   importingConfig.value = true;
   try {
     await invoke("cmd_import_config", { content });
@@ -79,9 +159,9 @@ async function importConfig() {
     ]);
     showImportModal.value = false;
     importText.value = "";
-    alert("配置已导入。新的路由 / DNS 设置将在下次启动代理时生效。");
+    alert(t('settings.importSuccess'));
   } catch (e) {
-    alert(`导入失败：${e}`);
+    alert(t('settings.importFailed', { e }));
   } finally {
     importingConfig.value = false;
   }
@@ -94,6 +174,7 @@ interface ReleaseInfo {
   published_at: string;
   release_notes: string;
   download_url: string;
+  sha256?: string | null;
 }
 
 // ─── TUN / Admin ─────────────────────────────────────────────────────
@@ -221,6 +302,7 @@ async function startDownload() {
   try {
     await invoke("cmd_download_singbox", {
       downloadUrl: latestRelease.value.download_url,
+      sha256: latestRelease.value.sha256 ?? null,
     });
   } catch (e) {
     downloadError.value = String(e);
@@ -239,6 +321,7 @@ interface AppReleaseInfo {
   release_notes: string;
   download_url: string;
   is_prerelease: boolean;
+  sha256?: string | null;
 }
 
 const appLatestRelease = ref<AppReleaseInfo | null>(null);
@@ -305,6 +388,7 @@ async function startAppDownload() {
   try {
     await invoke("cmd_download_app_update", {
       downloadUrl: appLatestRelease.value.download_url,
+      sha256: appLatestRelease.value.sha256 ?? null,
     });
   } catch (e) {
     appDownloadError.value = String(e);
@@ -321,6 +405,7 @@ onMounted(async () => {
   await Promise.all([
     refreshKernelStatus(),
     refreshTunStatus(),
+    refreshProfiles(),
     getVersion().then((v) => (appVersion.value = v)),
   ]);
 
@@ -354,10 +439,10 @@ onUnmounted(() => {
 <template>
   <div class="page">
     <div class="page-header">
-      <h1 class="page-title">设置</h1>
+      <h1 class="page-title">{{ t('settings.title') }}</h1>
       <Transition name="autosave">
         <span v-if="saved" class="autosave-badge">
-          <Check :size="12" />已保存
+          <Check :size="12" />{{ t('settings.saved') }}
         </span>
       </Transition>
     </div>
@@ -366,21 +451,21 @@ onUnmounted(() => {
     <section class="settings-section">
       <div class="section-header">
         <Rocket :size="15" />
-        <span>应用更新</span>
+        <span>{{ t('settings.appUpdate') }}</span>
       </div>
       <div class="card settings-card kernel-card">
 
         <!-- Current app version + channel -->
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">当前版本</div>
+            <div class="setting-label">{{ t('settings.currentVersion') }}</div>
             <div class="setting-desc">v{{ appVersion }}</div>
           </div>
           <div class="channel-select-wrap">
-            <span class="channel-label">更新通道</span>
+            <span class="channel-label">{{ t('settings.updateChannel') }}</span>
             <select class="input select-input" v-model="localConfig.update_channel" style="width:110px">
-              <option value="stable">稳定版</option>
-              <option value="beta">测试版</option>
+              <option value="stable">{{ t('settings.channelStable') }}</option>
+              <option value="beta">{{ t('settings.channelBeta') }}</option>
             </select>
           </div>
         </div>
@@ -390,9 +475,9 @@ onUnmounted(() => {
           <div class="release-header">
             <span class="release-tag">{{ appLatestRelease.version }}</span>
             <span class="release-date">{{ formatDate(appLatestRelease.published_at) }}</span>
-            <span v-if="appLatestRelease.is_prerelease" class="badge badge-purple">预览版</span>
-            <span v-if="hasAppUpdate" class="badge badge-yellow">有新版本</span>
-            <span v-else class="badge badge-green">已是最新</span>
+            <span v-if="appLatestRelease.is_prerelease" class="badge badge-purple">{{ t('settings.preview') }}</span>
+            <span v-if="hasAppUpdate" class="badge badge-yellow">{{ t('settings.hasNewVersion') }}</span>
+            <span v-else class="badge badge-green">{{ t('settings.upToDate') }}</span>
           </div>
           <div v-if="appLatestRelease.release_notes" class="release-notes">
             {{ appLatestRelease.release_notes }}
@@ -409,7 +494,7 @@ onUnmounted(() => {
             @click="() => checkAppUpdate(true)"
           >
             <RefreshCw :size="13" :class="{ spin: checkingAppUpdate }" />
-            {{ checkingAppUpdate ? "检查中..." : "检查更新" }}
+            {{ checkingAppUpdate ? t('settings.checking') : t('settings.checkUpdate') }}
           </button>
 
           <button
@@ -419,7 +504,7 @@ onUnmounted(() => {
             @click="startAppDownload"
           >
             <Download :size="13" :class="{ spin: downloadingApp }" />
-            {{ downloadingApp ? "下载中..." : "下载并安装" }}
+            {{ downloadingApp ? t('settings.downloading') : t('settings.downloadAndInstall') }}
           </button>
 
           <a
@@ -428,14 +513,14 @@ onUnmounted(() => {
             target="_blank"
           >
             <ExternalLink :size="13" />
-            查看所有版本
+            {{ t('settings.viewAllVersions') }}
           </a>
         </div>
 
         <!-- Download progress -->
         <div v-if="downloadingApp || appDownloadDone" class="download-progress-area">
           <div class="progress-info">
-            <span>{{ appDownloadDone ? "下载完成 ✓ 安装程序即将启动" : `下载中 ${appDownloadProgress.toFixed(1)}%` }}</span>
+            <span>{{ appDownloadDone ? t('settings.downloadDoneInstaller') : t('settings.downloadingPercent', { percent: appDownloadProgress.toFixed(1) }) }}</span>
             <span v-if="!appDownloadDone && appTotalBytes > 0" class="progress-bytes">
               {{ formatBytes(appDownloadedBytes) }} / {{ formatBytes(appTotalBytes) }}
             </span>
@@ -456,8 +541,7 @@ onUnmounted(() => {
         </div>
 
         <div class="kernel-hint">
-          更新通道：<strong>稳定版</strong> 发布经过测试的正式版本，<strong>测试版</strong> 包含最新功能但可能存在已知问题。
-          下载完成后将自动启动安装程序完成升级。
+          {{ t('settings.appUpdateHint') }}
         </div>
       </div>
     </section>
@@ -466,25 +550,25 @@ onUnmounted(() => {
     <section class="settings-section">
       <div class="section-header">
         <Package :size="15" />
-        <span>sing-box 内核管理</span>
+        <span>{{ t('settings.kernelManagement') }}</span>
       </div>
       <div class="card settings-card kernel-card">
 
         <!-- Current status -->
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">当前内核版本</div>
+            <div class="setting-label">{{ t('settings.currentKernelVersion') }}</div>
             <div class="setting-desc">
               <template v-if="installedVersion">{{ installedVersion }}</template>
-              <span v-else class="not-installed">未安装 — 需要下载才能使用代理功能</span>
+              <span v-else class="not-installed">{{ t('settings.kernelNotInstalledDesc') }}</span>
             </div>
           </div>
           <div class="kernel-status">
             <span v-if="kernelExists" class="badge badge-green">
-              <CheckCircle :size="11" /> 已安装
+              <CheckCircle :size="11" /> {{ t('settings.installed') }}
             </span>
             <span v-else class="badge badge-red">
-              <AlertCircle :size="11" /> 未安装
+              <AlertCircle :size="11" /> {{ t('settings.notInstalled') }}
             </span>
           </div>
         </div>
@@ -494,8 +578,8 @@ onUnmounted(() => {
           <div class="release-header">
             <span class="release-tag">{{ latestRelease.version }}</span>
             <span class="release-date">{{ formatDate(latestRelease.published_at) }}</span>
-            <span v-if="hasUpdate" class="badge badge-yellow">有更新</span>
-            <span v-else-if="kernelExists" class="badge badge-green">已是最新</span>
+            <span v-if="hasUpdate" class="badge badge-yellow">{{ t('settings.hasUpdate') }}</span>
+            <span v-else-if="kernelExists" class="badge badge-green">{{ t('settings.upToDate') }}</span>
           </div>
           <div v-if="latestRelease.release_notes" class="release-notes">
             {{ latestRelease.release_notes }}
@@ -512,7 +596,7 @@ onUnmounted(() => {
             @click="() => checkUpdate()"
           >
             <RefreshCw :size="13" :class="{ spin: checkingUpdate }" />
-            {{ checkingUpdate ? "检查中..." : "检查更新" }}
+            {{ checkingUpdate ? t('settings.checking') : t('settings.checkUpdate') }}
           </button>
 
           <button
@@ -522,14 +606,14 @@ onUnmounted(() => {
             @click="startDownload"
           >
             <Download :size="13" :class="{ spin: downloading }" />
-            {{ downloading ? "下载中..." : kernelExists ? "更新内核" : "下载安装" }}
+            {{ downloading ? t('settings.downloading') : kernelExists ? t('settings.updateKernel') : t('settings.downloadInstall') }}
           </button>
 
           <a
             class="btn btn-ghost"
             href="https://github.com/SagerNet/sing-box/releases"
             target="_blank"
-            title="在 GitHub 查看所有版本"
+            :title="t('settings.viewAllVersionsGithub')"
           >
             <ExternalLink :size="13" />
             GitHub Releases
@@ -539,7 +623,7 @@ onUnmounted(() => {
         <!-- Download progress -->
         <div v-if="downloading || downloadDone" class="download-progress-area">
           <div class="progress-info">
-            <span>{{ downloadDone ? "下载完成 ✓" : `下载中 ${downloadProgress.toFixed(1)}%` }}</span>
+            <span>{{ downloadDone ? t('settings.downloadDone') : t('settings.downloadingPercent', { percent: downloadProgress.toFixed(1) }) }}</span>
             <span v-if="!downloadDone && totalBytes > 0" class="progress-bytes">
               {{ formatBytes(downloadedBytes) }} / {{ formatBytes(totalBytes) }}
             </span>
@@ -560,8 +644,8 @@ onUnmounted(() => {
         </div>
 
         <div class="kernel-hint">
-          sing-box 内核保存在应用数据目录中，下载完成后无需重启即可使用。
-          如需手动安装，也可将 <code>{{ kernelBinaryName }}</code> 放入应用数据目录的 <code>bin/</code> 子目录。
+          {{ t('settings.kernelHintPart1') }}
+          {{ t('settings.kernelHintPart2') }} <code>{{ kernelBinaryName }}</code> {{ t('settings.kernelHintPart3') }} <code>bin/</code> {{ t('settings.kernelHintPart4') }}
         </div>
       </div>
     </section>
@@ -570,13 +654,13 @@ onUnmounted(() => {
     <section class="settings-section">
       <div class="section-header">
         <Monitor :size="15" />
-        <span>系统行为</span>
+        <span>{{ t('settings.systemBehavior') }}</span>
       </div>
       <div class="card settings-card">
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">开机自启动</div>
-            <div class="setting-desc">Windows 登录时自动启动 Skylark</div>
+            <div class="setting-label">{{ t('settings.startupWithSystem') }}</div>
+            <div class="setting-desc">{{ t('settings.startupWithSystemDesc') }}</div>
           </div>
           <label class="toggle">
             <input type="checkbox" v-model="localConfig.startup_with_system" />
@@ -586,8 +670,8 @@ onUnmounted(() => {
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">启动时最小化</div>
-            <div class="setting-desc">启动后自动最小化到系统托盘</div>
+            <div class="setting-label">{{ t('settings.startupMinimized') }}</div>
+            <div class="setting-desc">{{ t('settings.startupMinimizedDesc') }}</div>
           </div>
           <label class="toggle">
             <input type="checkbox" v-model="localConfig.startup_minimized" />
@@ -597,8 +681,8 @@ onUnmounted(() => {
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">允许局域网访问</div>
-            <div class="setting-desc">允许局域网内其他设备使用此代理</div>
+            <div class="setting-label">{{ t('settings.allowLan') }}</div>
+            <div class="setting-desc">{{ t('settings.allowLanDesc') }}</div>
           </div>
           <label class="toggle">
             <input type="checkbox" v-model="localConfig.allow_lan" />
@@ -608,9 +692,9 @@ onUnmounted(() => {
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">关闭按钮行为</div>
+            <div class="setting-label">{{ t('settings.closeButtonBehavior') }}</div>
             <div class="setting-desc">
-              {{ localConfig.close_to_tray ? "点击关闭按钮最小化到系统托盘" : "点击关闭按钮退出应用" }}
+              {{ localConfig.close_to_tray ? t('settings.closeToTrayDesc') : t('settings.closeToExitDesc') }}
             </div>
           </div>
           <label class="toggle">
@@ -621,8 +705,8 @@ onUnmounted(() => {
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">记住代理状态</div>
-            <div class="setting-desc">开机自启动时自动恢复上次的代理状态（系统代理 / TUN 模式）</div>
+            <div class="setting-label">{{ t('settings.rememberProxyState') }}</div>
+            <div class="setting-desc">{{ t('settings.rememberProxyStateDesc') }}</div>
           </div>
           <label class="toggle">
             <input type="checkbox" v-model="localConfig.restore_proxy_on_startup" />
@@ -632,11 +716,26 @@ onUnmounted(() => {
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">日志写入文件</div>
-            <div class="setting-desc">将内核日志持续写入 logs/skylark-日期.log，崩溃后仍可查看；下次启动代理时生效</div>
+            <div class="setting-label">{{ t('settings.logToFile') }}</div>
+            <div class="setting-desc">{{ t('settings.logToFileDesc') }}</div>
           </div>
           <label class="toggle">
             <input type="checkbox" v-model="localConfig.log_to_file" />
+            <span class="toggle-track" />
+          </label>
+        </div>
+        <div class="setting-divider" />
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">{{ t('settings.enableGlobalShortcuts') }}</div>
+            <div class="setting-desc">{{ t('settings.enableGlobalShortcutsDesc') }}</div>
+          </div>
+          <label class="toggle">
+            <input
+              type="checkbox"
+              v-model="localConfig.enable_global_shortcuts"
+              @change="store.applyGlobalShortcuts(localConfig.enable_global_shortcuts)"
+            />
             <span class="toggle-track" />
           </label>
         </div>
@@ -647,37 +746,37 @@ onUnmounted(() => {
     <section class="settings-section">
       <div class="section-header">
         <Globe :size="15" />
-        <span>端口配置</span>
+        <span>{{ t('settings.portConfig') }}</span>
       </div>
       <div class="card settings-card">
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">HTTP 代理端口</div>
-            <div class="setting-desc">HTTP/HTTPS 代理监听端口</div>
+            <div class="setting-label">{{ t('settings.httpPort') }}</div>
+            <div class="setting-desc">{{ t('settings.httpPortDesc') }}</div>
           </div>
           <input class="input port-input" type="number" v-model.number="localConfig.http_port" min="1024" max="65535" />
         </div>
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">SOCKS5 端口</div>
-            <div class="setting-desc">SOCKS5 代理监听端口</div>
+            <div class="setting-label">{{ t('settings.socksPort') }}</div>
+            <div class="setting-desc">{{ t('settings.socksPortDesc') }}</div>
           </div>
           <input class="input port-input" type="number" v-model.number="localConfig.socks_port" min="1024" max="65535" />
         </div>
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">混合端口</div>
-            <div class="setting-desc">HTTP+SOCKS5 混合代理端口（推荐）</div>
+            <div class="setting-label">{{ t('settings.mixedPort') }}</div>
+            <div class="setting-desc">{{ t('settings.mixedPortDesc') }}</div>
           </div>
           <input class="input port-input" type="number" v-model.number="localConfig.mixed_port" min="1024" max="65535" />
         </div>
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">API 端口</div>
-            <div class="setting-desc">Clash 兼容 API 监听端口</div>
+            <div class="setting-label">{{ t('settings.apiPort') }}</div>
+            <div class="setting-desc">{{ t('settings.apiPortDesc') }}</div>
           </div>
           <input class="input port-input" type="number" v-model.number="localConfig.api_port" min="1024" max="65535" />
         </div>
@@ -689,15 +788,15 @@ onUnmounted(() => {
     <section class="settings-section">
       <div class="section-header">
         <RefreshCw :size="15" />
-        <span>订阅</span>
+        <span>{{ t('settings.subscription') }}</span>
       </div>
       <div class="card settings-card">
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">订阅 User-Agent</div>
+            <div class="setting-label">{{ t('settings.subscriptionUserAgent') }}</div>
             <div class="setting-desc">
-              拉取订阅时发送的客户端标识。部分机场按 UA 返回不同内容——旧版 Clash 标识可能只返回「请更换客户端」占位节点。
-              常用：<code>v2rayN/6.45</code>、<code>clash-verge/v2.0.0</code>、<code>ClashMetaForAndroid/2.10</code>、<code>sing-box/1.12</code>。留空恢复默认。
+              {{ t('settings.subscriptionUserAgentDesc') }}
+              {{ t('settings.subscriptionUserAgentCommon') }}<code>v2rayN/6.45</code>、<code>clash-verge/v2.0.0</code>、<code>ClashMetaForAndroid/2.10</code>、<code>sing-box/1.12</code>{{ t('settings.subscriptionUserAgentLeaveEmpty') }}
             </div>
           </div>
           <input
@@ -714,21 +813,21 @@ onUnmounted(() => {
     <section class="settings-section">
       <div class="section-header">
         <Globe :size="15" />
-        <span>DNS 与网络</span>
+        <span>{{ t('settings.dnsAndNetwork') }}</span>
       </div>
       <div class="card settings-card">
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">国内 DNS 解析器</div>
-            <div class="setting-desc">直连域名使用；支持 IP（如 223.5.5.5）、DoH（https://…）、DoT（tls://…）</div>
+            <div class="setting-label">{{ t('settings.domesticDnsResolver') }}</div>
+            <div class="setting-desc">{{ t('settings.domesticDnsResolverDesc') }}</div>
           </div>
           <input class="input" type="text" v-model.trim="localConfig.dns_local" placeholder="223.5.5.5" style="width:220px" />
         </div>
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">启用 IPv6</div>
-            <div class="setting-desc">开启后双栈解析（优先 IPv4）并接管 IPv6 流量；默认关闭为纯 IPv4</div>
+            <div class="setting-label">{{ t('settings.enableIpv6') }}</div>
+            <div class="setting-desc">{{ t('settings.enableIpv6Desc') }}</div>
           </div>
           <label class="toggle">
             <input type="checkbox" v-model="localConfig.enable_ipv6" />
@@ -738,32 +837,124 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <!-- Config backup / restore -->
+    <!-- Network diagnostics (N5) -->
     <section class="settings-section">
       <div class="section-header">
-        <Archive :size="15" />
-        <span>配置备份</span>
+        <Zap :size="15" />
+        <span>{{ t('settings.diagnostics') }}</span>
       </div>
       <div class="card settings-card">
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">导出配置</div>
-            <div class="setting-desc">将订阅、节点、分组、路由规则与全部设置打包为一个 JSON 文件（不含 API 密钥）</div>
+            <div class="setting-label">{{ t('settings.diagnostics') }}</div>
+            <div class="setting-desc">{{ t('settings.diagnosticsDesc') }}</div>
+          </div>
+          <button class="btn btn-ghost" :disabled="diagnosing" @click="runDiagnostics">
+            <RefreshCw v-if="diagnosing" :size="13" class="spin" />
+            {{ diagnosing ? t('settings.diagnosing') : t('settings.runDiagnostics') }}
+          </button>
+        </div>
+        <template v-if="diagError">
+          <div class="setting-divider" />
+          <div class="diag-error"><AlertCircle :size="13" /> {{ diagError }}</div>
+        </template>
+        <template v-if="diagResult">
+          <div class="setting-divider" />
+          <div class="diag-results">
+            <div class="diag-line">
+              <span class="diag-key">{{ t('settings.diagOutboundIp') }}</span>
+              <span class="diag-val">{{ diagResult.outbound_ip ?? '--' }}</span>
+            </div>
+            <div class="diag-line" v-if="diagLocation">
+              <span class="diag-key">{{ t('settings.diagLocation') }}</span>
+              <span class="diag-val">{{ diagLocation }}</span>
+            </div>
+            <div class="diag-line" v-if="diagResult.isp">
+              <span class="diag-key">{{ t('settings.diagIsp') }}</span>
+              <span class="diag-val">{{ diagResult.isp }}</span>
+            </div>
+            <div class="diag-probes">
+              <div v-for="p in diagResult.probes" :key="p.name" class="diag-probe">
+                <span class="diag-dot" :class="p.ok ? 'ok' : 'fail'" />
+                <span class="diag-probe-name">{{ p.name }}</span>
+                <span class="diag-probe-status">
+                  {{ p.ok ? (p.latency_ms != null ? p.latency_ms + 'ms' : t('settings.diagReachable')) : t('settings.diagUnreachable') }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <!-- Config profiles (N6) -->
+    <section class="settings-section">
+      <div class="section-header">
+        <Layers :size="15" />
+        <span>{{ t('settings.profiles') }}</span>
+      </div>
+      <div class="card settings-card">
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">{{ t('settings.profiles') }}</div>
+            <div class="setting-desc">{{ t('settings.profilesDesc') }}</div>
+          </div>
+        </div>
+        <div class="setting-divider" />
+        <div class="profile-save-row">
+          <input
+            class="input"
+            v-model="newProfileName"
+            :placeholder="t('settings.profileNamePlaceholder')"
+            @keyup.enter="saveCurrentProfile"
+          />
+          <button class="btn btn-ghost" :disabled="profileBusy || !newProfileName.trim()" @click="saveCurrentProfile">
+            <Save :size="13" /> {{ t('settings.saveCurrentProfile') }}
+          </button>
+        </div>
+        <div v-if="profiles.length === 0" class="profile-empty">{{ t('settings.noProfiles') }}</div>
+        <div v-else class="profile-list">
+          <div v-for="p in profiles" :key="p" class="profile-item">
+            <span class="profile-name">{{ p }}</span>
+            <div class="profile-actions">
+              <button class="btn btn-ghost btn-sm" :disabled="profileBusy" @click="switchProfile(p)">
+                {{ t('settings.switchProfile') }}
+              </button>
+              <button class="btn btn-ghost btn-sm danger" :disabled="profileBusy" @click="removeProfile(p)">
+                <Trash2 :size="13" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Config backup / restore -->
+    <section class="settings-section">
+      <div class="section-header">
+        <Archive :size="15" />
+        <span>{{ t('settings.configBackup') }}</span>
+      </div>
+      <div class="card settings-card">
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">{{ t('settings.exportConfig') }}</div>
+            <div class="setting-desc">{{ t('settings.exportConfigDesc') }}</div>
           </div>
           <button class="btn btn-ghost btn-sm" :disabled="exportingConfig" @click="exportConfig">
             <Save :size="12" />
-            {{ exportingConfig ? "导出中..." : "导出" }}
+            {{ exportingConfig ? t('settings.exporting') : t('settings.export') }}
           </button>
         </div>
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">导入配置</div>
-            <div class="setting-desc">从备份文件恢复，将覆盖当前的订阅、节点、分组、规则与设置</div>
+            <div class="setting-label">{{ t('settings.importConfig') }}</div>
+            <div class="setting-desc">{{ t('settings.importConfigDesc') }}</div>
           </div>
           <button class="btn btn-ghost btn-sm" :disabled="importingConfig" @click="showImportModal = true">
             <Upload :size="12" />
-            导入
+            {{ t('settings.import') }}
           </button>
         </div>
       </div>
@@ -773,14 +964,14 @@ onUnmounted(() => {
     <section class="settings-section">
       <div class="section-header">
         <Shield :size="15" />
-        <span>TUN 模式</span>
+        <span>{{ t('settings.tunMode') }}</span>
       </div>
       <div class="card settings-card">
         <!-- Enable toggle -->
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">启用 TUN 模式</div>
-            <div class="setting-desc">接管全局流量，包括不支持代理的应用。需要管理员权限。</div>
+            <div class="setting-label">{{ t('settings.enableTunMode') }}</div>
+            <div class="setting-desc">{{ t('settings.enableTunModeDesc') }}</div>
           </div>
           <label class="toggle">
             <input type="checkbox" v-model="localConfig.tun_enabled" />
@@ -797,15 +988,15 @@ onUnmounted(() => {
               <ShieldAlert v-else :size="15" class="check-bad" />
             </div>
             <div class="check-info">
-              <div class="check-label">管理员权限</div>
+              <div class="check-label">{{ t('settings.adminPrivilege') }}</div>
               <div class="check-desc">
-                <span v-if="isAdmin" class="text-ok">当前以管理员身份运行</span>
-                <span v-else class="text-bad">当前无管理员权限，TUN 模式无法启动</span>
+                <span v-if="isAdmin" class="text-ok">{{ t('settings.runningAsAdmin') }}</span>
+                <span v-else class="text-bad">{{ t('settings.noAdminPrivilege') }}</span>
               </div>
             </div>
             <button v-if="!isAdmin" class="btn btn-primary btn-sm" @click="requestAdmin">
               <ShieldCheck :size="12" />
-              以管理员重启
+              {{ t('settings.restartAsAdmin') }}
             </button>
           </div>
 
@@ -818,10 +1009,10 @@ onUnmounted(() => {
                 <AlertCircle v-else :size="15" class="check-bad" />
               </div>
               <div class="check-info">
-                <div class="check-label">WinTun 驱动</div>
+                <div class="check-label">{{ t('settings.wintunDriver') }}</div>
                 <div class="check-desc">
-                  <span v-if="wintunAvailable" class="text-ok">wintun.dll 已就绪</span>
-                  <span v-else class="text-bad">未找到 wintun.dll，需要下载</span>
+                  <span v-if="wintunAvailable" class="text-ok">{{ t('settings.wintunReady') }}</span>
+                  <span v-else class="text-bad">{{ t('settings.wintunNotFound') }}</span>
                 </div>
               </div>
               <button
@@ -831,7 +1022,7 @@ onUnmounted(() => {
                 @click="downloadWintun"
               >
                 <Download :size="12" :class="{ spin: downloadingWintun }" />
-                {{ downloadingWintun ? "下载中..." : "下载 WinTun" }}
+                {{ downloadingWintun ? t('settings.downloading') : t('settings.downloadWintun') }}
               </button>
             </div>
             <div v-if="wintunError" class="tun-error">{{ wintunError }}</div>
@@ -842,9 +1033,9 @@ onUnmounted(() => {
             <div class="tun-divider" />
             <div class="tun-check-row">
               <div class="check-info">
-                <div class="check-label">macOS TUN</div>
+                <div class="check-label">{{ t('settings.macosTun') }}</div>
                 <div class="check-desc">
-                  <span class="text-ok">无需额外驱动；启用 TUN 时将请求一次 root 授权。</span>
+                  <span class="text-ok">{{ t('settings.macosTunDesc') }}</span>
                 </div>
               </div>
             </div>
@@ -857,13 +1048,13 @@ onUnmounted(() => {
     <section class="settings-section">
       <div class="section-header">
         <Zap :size="15" />
-        <span>自动选优（URLTest）</span>
+        <span>{{ t('settings.autoSelect') }}</span>
       </div>
       <div class="card settings-card">
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">测速 URL</div>
-            <div class="setting-desc">用于探测各节点延迟的地址，建议使用返回 204 的轻量端点</div>
+            <div class="setting-label">{{ t('settings.testUrl') }}</div>
+            <div class="setting-desc">{{ t('settings.testUrlDesc') }}</div>
           </div>
           <input
             class="input"
@@ -876,8 +1067,8 @@ onUnmounted(() => {
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">检测间隔（分钟）</div>
-            <div class="setting-desc">内核每隔多久重新测速并切换到更快的节点</div>
+            <div class="setting-label">{{ t('settings.testInterval') }}</div>
+            <div class="setting-desc">{{ t('settings.testIntervalDesc') }}</div>
           </div>
           <input
             class="input port-input"
@@ -889,8 +1080,8 @@ onUnmounted(() => {
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">容差（毫秒）</div>
-            <div class="setting-desc">仅当新节点比当前节点快出此差值才切换，避免在相近节点间频繁抖动</div>
+            <div class="setting-label">{{ t('settings.tolerance') }}</div>
+            <div class="setting-desc">{{ t('settings.toleranceDesc') }}</div>
           </div>
           <input
             class="input port-input"
@@ -900,7 +1091,7 @@ onUnmounted(() => {
           />
         </div>
         <div class="kernel-hint">
-          修改后需重新启动代理才会生效。该设置同时作用于「全部节点」与各订阅的自动选优组。
+          {{ t('settings.autoSelectHint') }}
         </div>
       </div>
     </section>
@@ -909,39 +1100,54 @@ onUnmounted(() => {
     <section class="settings-section">
       <div class="section-header">
         <Cpu :size="15" />
-        <span>高级设置</span>
+        <span>{{ t('settings.advancedSettings') }}</span>
       </div>
       <div class="card settings-card">
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">日志级别</div>
-            <div class="setting-desc">sing-box 核心日志详细程度</div>
+            <div class="setting-label">{{ t('settings.logLevel') }}</div>
+            <div class="setting-desc">{{ t('settings.logLevelDesc') }}</div>
           </div>
           <select class="input select-input" v-model="localConfig.log_level">
-            <option value="trace">Trace（最详细）</option>
+            <option value="trace">{{ t('settings.logLevelTrace') }}</option>
             <option value="debug">Debug</option>
-            <option value="info">Info（推荐）</option>
+            <option value="info">{{ t('settings.logLevelInfo') }}</option>
             <option value="warn">Warn</option>
-            <option value="error">Error（最少）</option>
+            <option value="error">{{ t('settings.logLevelError') }}</option>
           </select>
         </div>
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">主题</div>
-            <div class="setting-desc">界面颜色主题</div>
+            <div class="setting-label">{{ t('settings.theme') }}</div>
+            <div class="setting-desc">{{ t('settings.themeDesc') }}</div>
           </div>
           <select class="input select-input" v-model="localConfig.theme">
-            <option value="system">跟随系统</option>
-            <option value="light">浅色</option>
-            <option value="dark">深色</option>
+            <option value="system">{{ t('settings.themeSystem') }}</option>
+            <option value="light">{{ t('settings.themeLight') }}</option>
+            <option value="dark">{{ t('settings.themeDark') }}</option>
           </select>
         </div>
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">自动检查内核更新</div>
-            <div class="setting-desc">启动后定期检查 sing-box 新版本</div>
+            <div class="setting-label">{{ t('settings.language') }}</div>
+            <div class="setting-desc">{{ t('settings.languageDesc') }}</div>
+          </div>
+          <select
+            class="input select-input"
+            v-model="localConfig.language"
+            @change="onLanguageChange"
+          >
+            <option value="zh-CN">{{ t('settings.languageZh') }}</option>
+            <option value="en">{{ t('settings.languageEn') }}</option>
+          </select>
+        </div>
+        <div class="setting-divider" />
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">{{ t('settings.autoCheckKernelUpdate') }}</div>
+            <div class="setting-desc">{{ t('settings.autoCheckKernelUpdateDesc') }}</div>
           </div>
           <label class="toggle">
             <input type="checkbox" v-model="localConfig.auto_update_notify" />
@@ -951,8 +1157,8 @@ onUnmounted(() => {
         <div class="setting-divider" />
         <div class="setting-row">
           <div class="setting-info">
-            <div class="setting-label">检查间隔（小时）</div>
-            <div class="setting-desc">0 表示仅启动时检查一次</div>
+            <div class="setting-label">{{ t('settings.checkInterval') }}</div>
+            <div class="setting-desc">{{ t('settings.checkIntervalDesc') }}</div>
           </div>
           <input
             class="input port-input"
@@ -975,27 +1181,27 @@ onUnmounted(() => {
       </div>
       <div>
         <div class="about-name">Skylark</div>
-        <div class="about-desc">基于 sing-box 内核的跨平台图形化代理客户端</div>
-        <div class="about-version">v{{ appVersion }} · {{ installedVersion ?? "sing-box 未安装" }}</div>
+        <div class="about-desc">{{ t('settings.aboutDesc') }}</div>
+        <div class="about-version">v{{ appVersion }} · {{ installedVersion ?? t('settings.singboxNotInstalled') }}</div>
       </div>
     </div>
 
     <!-- Import config modal -->
     <div v-if="showImportModal" class="dialog-overlay" @click.self="showImportModal = false">
       <div class="dialog-card">
-        <div class="dialog-title">导入配置</div>
-        <div class="dialog-hint">粘贴此前导出的备份文件（skylark-config-*.json）的完整内容。导入会覆盖现有数据。</div>
+        <div class="dialog-title">{{ t('settings.importConfig') }}</div>
+        <div class="dialog-hint">{{ t('settings.importDialogHint') }}</div>
         <textarea
           class="input import-area"
           v-model="importText"
           rows="8"
-          placeholder='粘贴备份 JSON，例如 {"format":"skylark-config",...}'
+          :placeholder="t('settings.importPlaceholder')"
         />
         <div class="dialog-actions">
-          <button class="btn btn-ghost" @click="showImportModal = false">取消</button>
+          <button class="btn btn-ghost" @click="showImportModal = false">{{ t('settings.cancel') }}</button>
           <button class="btn btn-primary" :disabled="importingConfig" @click="importConfig">
             <RefreshCw v-if="importingConfig" :size="13" class="spin" />
-            {{ importingConfig ? "导入中..." : "导入并覆盖" }}
+            {{ importingConfig ? t('settings.importing') : t('settings.importAndOverwrite') }}
           </button>
         </div>
       </div>
@@ -1004,6 +1210,35 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* Network diagnostics (N5) */
+.diag-error { display: flex; align-items: center; gap: 6px; color: #d13438; font-size: 12.5px; padding: 4px 18px; }
+.diag-results { display: flex; flex-direction: column; gap: 8px; padding: 4px 18px 14px; }
+.diag-line { display: flex; gap: 10px; font-size: 13px; }
+.diag-key { color: var(--color-text-secondary); min-width: 70px; }
+.diag-val { font-weight: 500; font-family: var(--font-mono, monospace); }
+.diag-probes { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 4px; }
+.diag-probe { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.diag-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.diag-dot.ok { background: #107c10; }
+.diag-dot.fail { background: #d13438; }
+.diag-probe-name { font-weight: 500; }
+.diag-probe-status { color: var(--color-text-secondary); }
+
+/* Config profiles (N6) — align with .setting-row's 18px horizontal padding (the card
+   itself has padding:0, so direct children must supply their own inset). */
+.profile-save-row { display: flex; gap: 8px; align-items: center; padding: 12px 18px; }
+.profile-save-row .input { flex: 1; }
+.profile-empty { color: var(--color-text-secondary); font-size: 12.5px; padding: 4px 18px 14px; }
+.profile-list { display: flex; flex-direction: column; gap: 6px; padding: 2px 18px 14px; }
+.profile-item {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 7px 10px; border-radius: 8px; background: rgba(128,128,128,0.06);
+}
+.profile-name { font-size: 13px; font-weight: 500; }
+.profile-actions { display: flex; gap: 6px; }
+.btn-sm { padding: 3px 10px; font-size: 12px; }
+.btn-sm.danger { color: #d13438; }
+
 .page { display: flex; flex-direction: column; gap: 20px; max-width: 700px; }
 .page-header { display: flex; align-items: center; justify-content: space-between; }
 .page-title { font-size: 20px; font-weight: 600; }

@@ -3,6 +3,7 @@ import { ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
 
 export interface SingboxStatus {
   running: boolean;
@@ -25,6 +26,10 @@ export interface Subscription {
   download?: number; // bytes
   total?: number;    // bytes
   expire?: number;   // unix timestamp (seconds)
+  // Node-name filters / region grouping (N2).
+  include?: string | null;
+  exclude?: string | null;
+  group_by_region?: boolean;
 }
 
 export interface ProxyNode {
@@ -38,6 +43,12 @@ export interface ProxyNode {
   download_speed?: number; // KB/s
   is_active: boolean;
   subscription_id?: string;
+}
+
+export interface TrafficDay {
+  date: string;   // YYYY-MM-DD
+  upload: number; // bytes
+  download: number;
 }
 
 export interface ProxyGroup {
@@ -81,6 +92,7 @@ export interface AppConfig {
   dns_local: string;
   log_to_file: boolean;
   subscription_user_agent: string;
+  enable_global_shortcuts: boolean;
 }
 
 export interface TrafficPoint {
@@ -122,6 +134,7 @@ export const useAppStore = defineStore("app", () => {
     dns_local: "223.5.5.5",
     log_to_file: false,
     subscription_user_agent: "v2rayN/6.45",
+    enable_global_shortcuts: false,
   });
   const trafficHistory = ref<TrafficPoint[]>([]);
   // Cumulative bytes since the core started (authoritative, from the Clash API).
@@ -294,22 +307,100 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  // ── Global hotkeys (N4) ─────────────────────────────────────────────
+  // Fixed, sensible defaults. Registration/handling happens entirely in JS via the
+  // global-shortcut plugin; the Rust side only initialises the plugin. Disabled by
+  // default (config flag) so the app never grabs system-wide combos unasked.
+  const SHORTCUT_TOGGLE_PROXY = "CommandOrControl+Shift+P";
+  const SHORTCUT_TOGGLE_TUN = "CommandOrControl+Shift+T";
+  const SHORTCUT_CYCLE_MODE = "CommandOrControl+Shift+R";
+
+  async function applyGlobalShortcuts(enabled: boolean) {
+    // Always clear first so toggling off (or re-applying) never leaves stale bindings.
+    try { await unregisterAll(); } catch { /* nothing registered yet */ }
+    if (!enabled) return;
+    try {
+      await register(SHORTCUT_TOGGLE_PROXY, (e) => {
+        if (e.state === "Pressed") setConnectionMode(systemProxyEnabled.value ? "off" : "system");
+      });
+      await register(SHORTCUT_TOGGLE_TUN, (e) => {
+        if (e.state === "Pressed") setConnectionMode(config.value.tun_enabled ? "off" : "tun");
+      });
+      await register(SHORTCUT_CYCLE_MODE, (e) => {
+        if (e.state !== "Pressed") return;
+        const m = config.value.proxy_mode;
+        const next = m === "rule" ? "global" : m === "global" ? "direct" : "rule";
+        setProxyMode(next);
+      });
+    } catch (err) {
+      console.error("global shortcut registration failed:", err);
+    }
+  }
+
   async function fetchSubscriptions() {
     subscriptions.value = await invoke<Subscription[]>("cmd_get_subscriptions");
   }
 
-  async function addSubscription(name: string, url: string) {
-    const sub = await invoke<Subscription>("cmd_add_subscription", { name, url });
+  async function addSubscription(
+    name: string,
+    url: string,
+    filters?: { include?: string | null; exclude?: string | null; groupByRegion?: boolean }
+  ) {
+    const sub = await invoke<Subscription>("cmd_add_subscription", {
+      name,
+      url,
+      include: filters?.include ?? null,
+      exclude: filters?.exclude ?? null,
+      groupByRegion: filters?.groupByRegion ?? false,
+    });
     subscriptions.value.push(sub);
     await fetchNodes();
     return sub;
   }
 
-  async function importSubscriptionFromText(name: string, content: string) {
-    const sub = await invoke<Subscription>("cmd_import_subscription_from_text", { name, content });
+  async function importSubscriptionFromText(
+    name: string,
+    content: string,
+    filters?: { include?: string | null; exclude?: string | null; groupByRegion?: boolean }
+  ) {
+    const sub = await invoke<Subscription>("cmd_import_subscription_from_text", {
+      name,
+      content,
+      include: filters?.include ?? null,
+      exclude: filters?.exclude ?? null,
+      groupByRegion: filters?.groupByRegion ?? false,
+    });
     subscriptions.value.push(sub);
     await fetchNodes();
     return sub;
+  }
+
+  /** Update an existing subscription's name filters / region grouping and re-apply
+   * them to the cached content (no network fetch). Returns the new node count. */
+  async function setSubscriptionFilters(
+    id: string,
+    include: string | null,
+    exclude: string | null,
+    groupByRegion: boolean
+  ) {
+    const nodeCount = await invoke<number>("cmd_set_subscription_filters", {
+      id,
+      include,
+      exclude,
+      groupByRegion,
+    });
+    const idx = subscriptions.value.findIndex((s) => s.id === id);
+    if (idx !== -1) {
+      subscriptions.value[idx] = {
+        ...subscriptions.value[idx],
+        include,
+        exclude,
+        group_by_region: groupByRegion,
+        node_count: nodeCount,
+      };
+    }
+    await fetchNodes();
+    return nodeCount;
   }
 
   async function updateSubscription(id: string) {
@@ -453,6 +544,26 @@ export const useAppStore = defineStore("app", () => {
   let lastUpTotal = 0;
   let lastDownTotal = 0;
   let trafficWasRunning = false;
+  // Bytes accumulated since the last persistent-history flush. The poller runs every
+  // second; we batch ~30s of deltas into one disk write to keep history I/O cheap.
+  let pendingUp = 0;
+  let pendingDown = 0;
+  let flushCountdown = 30;
+
+  async function flushTrafficHistory() {
+    if (pendingUp === 0 && pendingDown === 0) return;
+    const up = pendingUp;
+    const down = pendingDown;
+    pendingUp = 0;
+    pendingDown = 0;
+    try {
+      await invoke("cmd_add_traffic_sample", { upload: up, download: down });
+    } catch {
+      // On failure, fold the bytes back so they aren't lost before the next flush.
+      pendingUp += up;
+      pendingDown += down;
+    }
+  }
 
   async function pollTraffic() {
     // Refresh status + system proxy here so the monitor reacts to changes from anywhere
@@ -466,6 +577,8 @@ export const useAppStore = defineStore("app", () => {
 
     if (!proxyingNow) {
       if (trafficWasRunning) {
+        // Persist whatever accrued in this session before tearing down counters.
+        await flushTrafficHistory();
         uploadSpeed.value = 0;
         downloadSpeed.value = 0;
         totalUpload.value = 0;
@@ -507,6 +620,14 @@ export const useAppStore = defineStore("app", () => {
     totalUpload.value = up;
     totalDownload.value = down;
     addTrafficPoint(upDelta, downDelta);
+
+    // Accumulate for the persistent daily history; flush in ~30s batches.
+    pendingUp += upDelta;
+    pendingDown += downDelta;
+    if (--flushCountdown <= 0) {
+      flushCountdown = 30;
+      await flushTrafficHistory();
+    }
   }
 
   function ensureTrafficPoller() {
@@ -528,6 +649,28 @@ export const useAppStore = defineStore("app", () => {
     clearTrafficHistory();
     // Align the monitor's flag so its transition logic won't double-reset.
     trafficWasRunning = proxying.value;
+  }
+
+  async function fetchTrafficHistory(days?: number): Promise<TrafficDay[]> {
+    return await invoke<TrafficDay[]>("cmd_get_traffic_history", { days: days ?? null });
+  }
+
+  // ── Config profiles (N6) ────────────────────────────────────────────
+  async function listProfiles(): Promise<string[]> {
+    return await invoke<string[]>("cmd_list_profiles");
+  }
+  async function saveProfile(name: string) {
+    await invoke("cmd_save_profile", { name });
+  }
+  async function deleteProfile(name: string) {
+    await invoke("cmd_delete_profile", { name });
+  }
+  /** Load a profile, then refresh all in-memory state so the UI reflects it (mirrors the
+   * config-import flow). Routing / DNS apply on the next proxy (re)start. */
+  async function loadProfile(name: string) {
+    await invoke("cmd_load_profile", { name });
+    await fetchConfig();
+    await Promise.all([fetchSubscriptions(), fetchNodes(), fetchProxyGroups()]);
   }
 
   async function fetchConfig() {
@@ -612,6 +755,8 @@ export const useAppStore = defineStore("app", () => {
     // dashboard's reactive state (especially config.tun_enabled, which no poller
     // refreshes) would stay stale, and tray-side failures would be invisible.
     await listenTrayConnectionEvents();
+    // Register global hotkeys if the user has enabled them.
+    await applyGlobalShortcuts(config.value.enable_global_shortcuts);
   }
 
   // Idempotent: register once for the app lifetime. `listen` returns an unlisten fn we
@@ -659,6 +804,13 @@ export const useAppStore = defineStore("app", () => {
     fetchSubscriptions,
     addSubscription,
     importSubscriptionFromText,
+    setSubscriptionFilters,
+    fetchTrafficHistory,
+    applyGlobalShortcuts,
+    listProfiles,
+    saveProfile,
+    loadProfile,
+    deleteProfile,
     updateSubscription,
     deleteSubscription,
     saveSubscriptionSettings,

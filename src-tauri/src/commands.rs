@@ -296,13 +296,10 @@ pub fn cmd_export_logs(state: State<'_, AppState>) -> Result<String, String> {
 /// Marker so import can reject unrelated JSON files.
 const CONFIG_BUNDLE_FORMAT: &str = "skylark-config";
 
-/// Export the full user setup (settings, subscriptions + their raw content, nodes,
-/// outbounds, proxy groups, routing rules) to a single timestamped JSON file under the
-/// app data dir's `backups/` folder and return the absolute path. The frontend reveals
-/// it via the opener plugin. The Clash API secret is intentionally NOT exported — it is
-/// machine-local and regenerated on demand.
-#[tauri::command]
-pub fn cmd_export_config(state: State<'_, AppState>) -> Result<String, String> {
+/// Build the full-setup bundle (settings, subscriptions + raw content, nodes, outbounds,
+/// proxy groups, routing rules). Shared by config export and named profiles. The Clash
+/// API secret is intentionally excluded — it is machine-local and regenerated on demand.
+fn build_config_bundle(state: &AppState) -> Value {
     let app_config = state.app_config.lock().unwrap().clone();
     let subscriptions = state.subscriptions.lock().unwrap().clone();
     let nodes = state.nodes.lock().unwrap().clone();
@@ -318,7 +315,7 @@ pub fn cmd_export_config(state: State<'_, AppState>) -> Result<String, String> {
         }
     }
 
-    let bundle = serde_json::json!({
+    serde_json::json!({
         "format": CONFIG_BUNDLE_FORMAT,
         "version": 1,
         "exported_at": chrono::Local::now().to_rfc3339(),
@@ -330,33 +327,16 @@ pub fn cmd_export_config(state: State<'_, AppState>) -> Result<String, String> {
         "proxy_groups": proxy_groups,
         "rules": rules,
         "subscription_contents": Value::Object(contents),
-    });
-
-    let dir = config::app_data_dir().join("backups");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let filename = format!(
-        "skylark-config-{}.json",
-        chrono::Local::now().format("%Y%m%d-%H%M%S")
-    );
-    let path = dir.join(filename);
-    let data = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
-    std::fs::write(&path, data).map_err(|e| e.to_string())?;
-    Ok(path.to_string_lossy().to_string())
+    })
 }
 
-/// Restore a configuration bundle produced by `cmd_export_config` from pasted JSON text.
-/// Each section is applied independently and tolerantly — a malformed/missing section is
-/// skipped rather than aborting the whole restore — and both the on-disk files and the
-/// in-memory `AppState` are updated so the UI reflects the change without a relaunch.
-/// Takes effect on the next core (re)start. Ports/secret unaffected mid-session.
-#[tauri::command]
-pub fn cmd_import_config(content: String, state: State<'_, AppState>) -> Result<(), String> {
-    let bundle: Value = serde_json::from_str(&content)
-        .map_err(|_| "无效的备份文件（JSON 解析失败）".to_string())?;
+/// Apply a config bundle to both on-disk files and the in-memory `AppState`. Each section
+/// is applied tolerantly (a bad section is skipped, not fatal). Shared by config import
+/// and profile loading. Takes effect on the next core (re)start.
+fn apply_config_bundle(bundle: &Value, state: &AppState) -> Result<(), String> {
     if bundle["format"] != CONFIG_BUNDLE_FORMAT {
         return Err("不是 Skylark 配置备份文件".to_string());
     }
-
     if let Some(v) = bundle.get("app_config") {
         if let Ok(cfg) = serde_json::from_value::<AppConfig>(v.clone()) {
             config::save_app_config(&cfg).map_err(|e| e.to_string())?;
@@ -401,6 +381,102 @@ pub fn cmd_import_config(content: String, state: State<'_, AppState>) -> Result<
     Ok(())
 }
 
+/// Directory holding named config profiles.
+fn profiles_dir() -> std::path::PathBuf {
+    config::app_data_dir().join("profiles")
+}
+
+/// Validate a user-supplied profile name: non-empty and free of path separators / traversal
+/// so it can only ever map to a file directly inside `profiles/`.
+fn sanitize_profile_name(name: &str) -> Option<String> {
+    let n = name.trim();
+    if n.is_empty() || n.len() > 64 || n.contains('/') || n.contains('\\') || n.contains("..") {
+        return None;
+    }
+    Some(n.to_string())
+}
+
+/// Export the full user setup to a single timestamped JSON file under the app data dir's
+/// `backups/` folder and return the absolute path. The frontend reveals it via the opener
+/// plugin.
+#[tauri::command]
+pub fn cmd_export_config(state: State<'_, AppState>) -> Result<String, String> {
+    let bundle = build_config_bundle(state.inner());
+
+    let dir = config::app_data_dir().join("backups");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let filename = format!(
+        "skylark-config-{}.json",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    );
+    let path = dir.join(filename);
+    let data = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
+    std::fs::write(&path, data).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Restore a configuration bundle produced by `cmd_export_config` from pasted JSON text.
+/// Each section is applied independently and tolerantly — a malformed/missing section is
+/// skipped rather than aborting the whole restore — and both the on-disk files and the
+/// in-memory `AppState` are updated so the UI reflects the change without a relaunch.
+/// Takes effect on the next core (re)start. Ports/secret unaffected mid-session.
+#[tauri::command]
+pub fn cmd_import_config(content: String, state: State<'_, AppState>) -> Result<(), String> {
+    let bundle: Value = serde_json::from_str(&content)
+        .map_err(|_| "无效的备份文件（JSON 解析失败）".to_string())?;
+    apply_config_bundle(&bundle, state.inner())
+}
+
+// ─── Config profiles (N6) ───────────────────────────────────────────
+
+/// List saved profile names (the `.json` files in `profiles/`), sorted.
+#[tauri::command]
+pub fn cmd_list_profiles() -> Vec<String> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(profiles_dir()) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("json") {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    out.push(stem.to_string());
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Snapshot the current full setup into a named profile (overwrites if it exists).
+#[tauri::command]
+pub fn cmd_save_profile(name: String, state: State<'_, AppState>) -> Result<(), String> {
+    let name = sanitize_profile_name(&name).ok_or("无效的配置名".to_string())?;
+    let dir = profiles_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let bundle = build_config_bundle(state.inner());
+    let data = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join(format!("{}.json", name)), data).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Load a named profile, applying it to disk + in-memory state. Takes effect on the next
+/// core (re)start (the frontend refreshes its state afterwards).
+#[tauri::command]
+pub fn cmd_load_profile(name: String, state: State<'_, AppState>) -> Result<(), String> {
+    let name = sanitize_profile_name(&name).ok_or("无效的配置名".to_string())?;
+    let path = profiles_dir().join(format!("{}.json", name));
+    let content = std::fs::read_to_string(&path).map_err(|_| "配置不存在".to_string())?;
+    let bundle: Value = serde_json::from_str(&content).map_err(|_| "配置文件损坏".to_string())?;
+    apply_config_bundle(&bundle, state.inner())
+}
+
+#[tauri::command]
+pub fn cmd_delete_profile(name: String) -> Result<(), String> {
+    let name = sanitize_profile_name(&name).ok_or("无效的配置名".to_string())?;
+    let _ = std::fs::remove_file(profiles_dir().join(format!("{}.json", name)));
+    Ok(())
+}
+
 // ─── Subscriptions ──────────────────────────────────────────────────
 
 #[tauri::command]
@@ -412,14 +488,21 @@ pub fn cmd_get_subscriptions(state: State<'_, AppState>) -> Vec<Subscription> {
 pub async fn cmd_add_subscription(
     name: String,
     url: String,
+    include: Option<String>,
+    exclude: Option<String>,
+    group_by_region: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<Subscription, String> {
     let id = uuid::Uuid::new_v4().to_string();
+    let group_by_region = group_by_region.unwrap_or(false);
     let (content, userinfo) = fetch_url(&url).await.map_err(|e| e.to_string())?;
     config::save_subscription_content(&id, &content).map_err(|e| e.to_string())?;
     let sub_type = subscription::detect_sub_type(&content, &url);
     let (nodes, outbounds) = subscription::parse_subscription(&content, &id)
         .map_err(|e| e.to_string())?;
+    let (nodes, outbounds) = subscription::apply_node_filters(
+        nodes, outbounds, include.as_deref(), exclude.as_deref(), group_by_region,
+    );
 
     let sub = Subscription {
         id: id.clone(),
@@ -434,6 +517,9 @@ pub async fn cmd_add_subscription(
         download: userinfo.download,
         total: userinfo.total,
         expire: userinfo.expire,
+        include,
+        exclude,
+        group_by_region,
     };
 
     {
@@ -466,11 +552,18 @@ pub async fn cmd_add_subscription(
 pub async fn cmd_import_subscription_from_text(
     name: String,
     content: String,
+    include: Option<String>,
+    exclude: Option<String>,
+    group_by_region: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<Subscription, String> {
     let id = uuid::Uuid::new_v4().to_string();
+    let group_by_region = group_by_region.unwrap_or(false);
     let (nodes, outbounds) = subscription::parse_subscription(&content, &id)
         .map_err(|e| e.to_string())?;
+    let (nodes, outbounds) = subscription::apply_node_filters(
+        nodes, outbounds, include.as_deref(), exclude.as_deref(), group_by_region,
+    );
     let sub_type = subscription::detect_sub_type(&content, "");
     config::save_subscription_content(&id, &content).map_err(|e| e.to_string())?;
 
@@ -487,6 +580,9 @@ pub async fn cmd_import_subscription_from_text(
         download: None,
         total: None,
         expire: None,
+        include,
+        exclude,
+        group_by_region,
     };
 
     {
@@ -517,11 +613,11 @@ pub async fn cmd_update_subscription(
     id: String,
     state: State<'_, AppState>,
 ) -> Result<Subscription, String> {
-    let url = {
+    let (url, include, exclude, group_by_region) = {
         let subs = state.subscriptions.lock().unwrap();
         subs.iter()
             .find(|s| s.id == id)
-            .map(|s| s.url.clone())
+            .map(|s| (s.url.clone(), s.include.clone(), s.exclude.clone(), s.group_by_region))
             .ok_or_else(|| "订阅不存在".to_string())?
     };
 
@@ -530,6 +626,9 @@ pub async fn cmd_update_subscription(
     let sub_type = subscription::detect_sub_type(&content, &url);
     let (nodes, outbounds) = subscription::parse_subscription(&content, &id)
         .map_err(|e| e.to_string())?;
+    let (nodes, outbounds) = subscription::apply_node_filters(
+        nodes, outbounds, include.as_deref(), exclude.as_deref(), group_by_region,
+    );
 
     let updated_sub = {
         let mut subs = state.subscriptions.lock().unwrap();
@@ -587,6 +686,58 @@ pub fn cmd_save_subscription_settings(
     sub.auto_update = auto_update;
     sub.update_interval = update_interval;
     config::save_subscriptions(&subs).map_err(|e| e.to_string())
+}
+
+/// Update a subscription's node-name filters / region grouping and re-apply them to the
+/// already-cached content (no network fetch). Returns the new node count.
+#[tauri::command]
+pub fn cmd_set_subscription_filters(
+    id: String,
+    include: Option<String>,
+    exclude: Option<String>,
+    group_by_region: bool,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    // Re-parse from the cached subscription content so a filter edit takes effect offline.
+    let content = config::load_subscription_content(&id)
+        .ok_or_else(|| "订阅内容缓存不存在，请先更新订阅".to_string())?;
+    let (nodes, outbounds) = subscription::parse_subscription(&content, &id)
+        .map_err(|e| e.to_string())?;
+    let (nodes, outbounds) = subscription::apply_node_filters(
+        nodes, outbounds, include.as_deref(), exclude.as_deref(), group_by_region,
+    );
+    let node_count = nodes.len();
+
+    {
+        let mut subs = state.subscriptions.lock().unwrap();
+        let sub = subs.iter_mut()
+            .find(|s| s.id == id)
+            .ok_or_else(|| "订阅不存在".to_string())?;
+        sub.include = include;
+        sub.exclude = exclude;
+        sub.group_by_region = group_by_region;
+        sub.node_count = node_count;
+        config::save_subscriptions(&subs).map_err(|e| e.to_string())?;
+    }
+    {
+        let mut all_nodes = state.nodes.lock().unwrap();
+        all_nodes.retain(|n| n.subscription_id.as_deref() != Some(&id));
+        all_nodes.extend(nodes);
+        config::save_nodes(&all_nodes).map_err(|e| e.to_string())?;
+    }
+    {
+        let mut all_outbounds = state.outbounds.lock().unwrap();
+        let new_tags: std::collections::HashSet<String> = outbounds.iter()
+            .filter_map(|ob| ob["tag"].as_str().map(|s| s.to_string()))
+            .collect();
+        all_outbounds.retain(|ob| {
+            ob["tag"].as_str().map(|t| !new_tags.contains(t)).unwrap_or(true)
+        });
+        all_outbounds.extend(outbounds);
+        config::save_outbounds(&all_outbounds).map_err(|e| e.to_string())?;
+    }
+
+    Ok(node_count)
 }
 
 #[tauri::command]
@@ -1190,6 +1341,112 @@ pub async fn cmd_get_traffic_total(
     })
 }
 
+/// Accumulate transferred bytes into today's persistent traffic bucket. Called
+/// periodically by the frontend traffic monitor with the bytes seen since the last flush.
+#[tauri::command]
+pub fn cmd_add_traffic_sample(upload: u64, download: u64) {
+    crate::stats::record_today(upload, download);
+}
+
+/// Recent daily traffic history (oldest-first). `days = None`/0 returns all retained days.
+#[tauri::command]
+pub fn cmd_get_traffic_history(days: Option<usize>) -> Vec<crate::stats::TrafficDay> {
+    crate::stats::history(days.unwrap_or(0))
+}
+
+// ─── Network diagnostics (N5) ───────────────────────────────────────
+
+#[derive(serde::Serialize)]
+pub struct ProbeResult {
+    pub name: String,
+    pub ok: bool,
+    pub latency_ms: Option<u32>,
+}
+
+#[derive(serde::Serialize, Default)]
+pub struct DiagnosticsResult {
+    pub outbound_ip: Option<String>,
+    pub country: Option<String>,
+    pub city: Option<String>,
+    pub isp: Option<String>,
+    pub probes: Vec<ProbeResult>,
+}
+
+/// Extract (ip, country, city, isp) from an ip-api.com JSON response. Pure (no I/O) so it
+/// is unit-testable; empty strings map to None.
+fn parse_ipapi(body: &Value) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
+    let s = |k: &str| {
+        body.get(k)
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    };
+    (s("query"), s("country"), s("city"), s("isp"))
+}
+
+/// Run network diagnostics THROUGH the proxy: resolve the outbound IP / geo / ISP and
+/// probe reachability of a few well-known endpoints. Requires the proxy to be running.
+#[tauri::command]
+pub async fn cmd_run_diagnostics(state: State<'_, AppState>) -> Result<DiagnosticsResult, String> {
+    let (mixed_port, running) = {
+        let cfg = state.app_config.lock().unwrap();
+        let running = state.singbox_state.lock().unwrap().running;
+        (cfg.mixed_port, running)
+    };
+    if !running {
+        return Err("代理未运行，无法诊断".to_string());
+    }
+
+    let proxy_url = format!("http://127.0.0.1:{}", mixed_port);
+    let proxy = reqwest::Proxy::all(&proxy_url).map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder()
+        .proxy(proxy)
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut result = DiagnosticsResult::default();
+
+    // Outbound IP + geo via ip-api (free, no key; restricted to the fields we need).
+    if let Ok(resp) = client
+        .get("http://ip-api.com/json/?fields=status,country,city,isp,query")
+        .send()
+        .await
+    {
+        if let Ok(body) = resp.json::<Value>().await {
+            let (ip, country, city, isp) = parse_ipapi(&body);
+            result.outbound_ip = ip;
+            result.country = country;
+            result.city = city;
+            result.isp = isp;
+        }
+    }
+
+    // Reachability probes (204 / redirect / 200 all count as reachable).
+    let targets = [
+        ("Google", "https://www.google.com/generate_204"),
+        ("YouTube", "https://www.youtube.com/generate_204"),
+        ("GitHub", "https://github.com"),
+        ("Cloudflare", "https://1.1.1.1/cdn-cgi/trace"),
+    ];
+    for (name, url) in targets {
+        let start = std::time::Instant::now();
+        let ok = client
+            .get(url)
+            .send()
+            .await
+            .map(|r| r.status().is_success() || r.status().is_redirection())
+            .unwrap_or(false);
+        result.probes.push(ProbeResult {
+            name: name.to_string(),
+            ok,
+            latency_ms: if ok { Some(start.elapsed().as_millis() as u32) } else { None },
+        });
+    }
+
+    Ok(result)
+}
+
 #[tauri::command]
 pub fn cmd_parse_subscription_from_text(
     content: String,
@@ -1356,9 +1613,10 @@ pub fn cmd_singbox_exists() -> bool {
 pub async fn cmd_download_singbox(
     app_handle: tauri::AppHandle,
     download_url: String,
+    sha256: Option<String>,
 ) -> Result<(), String> {
     let dest = crate::updater::singbox_binary_path();
-    crate::updater::download_singbox(app_handle, download_url, dest)
+    crate::updater::download_singbox(app_handle, download_url, dest, sha256)
         .await
         .map_err(|e| {
             // Emit failure event so frontend can handle it
@@ -1383,8 +1641,9 @@ pub async fn cmd_check_app_update(
 pub async fn cmd_download_app_update(
     app_handle: tauri::AppHandle,
     download_url: String,
+    sha256: Option<String>,
 ) -> Result<(), String> {
-    crate::updater::download_and_install_app(app_handle, download_url)
+    crate::updater::download_and_install_app(app_handle, download_url, sha256)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1545,4 +1804,40 @@ async fn fetch_url(url: &str) -> Result<(String, SubUserinfo), anyhow::Error> {
         .unwrap_or_default();
     let content = resp.text().await?;
     Ok((content, userinfo))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_ipapi_extracts_fields_and_drops_empties() {
+        let body: Value = serde_json::from_str(
+            r#"{"status":"success","country":"Japan","city":"Tokyo","isp":"Acme","query":"203.0.113.7"}"#,
+        ).unwrap();
+        let (ip, country, city, isp) = parse_ipapi(&body);
+        assert_eq!(ip.as_deref(), Some("203.0.113.7"));
+        assert_eq!(country.as_deref(), Some("Japan"));
+        assert_eq!(city.as_deref(), Some("Tokyo"));
+        assert_eq!(isp.as_deref(), Some("Acme"));
+
+        let partial: Value = serde_json::from_str(r#"{"query":"1.2.3.4","country":""}"#).unwrap();
+        let (ip2, c2, ci2, is2) = parse_ipapi(&partial);
+        assert_eq!(ip2.as_deref(), Some("1.2.3.4"));
+        assert_eq!(c2, None);
+        assert_eq!(ci2, None);
+        assert_eq!(is2, None);
+    }
+
+    #[test]
+    fn sanitize_profile_name_blocks_traversal_and_separators() {
+        assert_eq!(sanitize_profile_name("home").as_deref(), Some("home"));
+        assert_eq!(sanitize_profile_name("  Work 公司  ").as_deref(), Some("Work 公司"));
+        assert_eq!(sanitize_profile_name(""), None);
+        assert_eq!(sanitize_profile_name("   "), None);
+        assert_eq!(sanitize_profile_name("../etc/passwd"), None);
+        assert_eq!(sanitize_profile_name("a/b"), None);
+        assert_eq!(sanitize_profile_name("a\\b"), None);
+        assert_eq!(sanitize_profile_name(&"x".repeat(65)), None);
+    }
 }

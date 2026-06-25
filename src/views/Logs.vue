@@ -4,6 +4,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Trash2, ArrowDown, Copy, Download } from "@lucide/vue";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 const LOG_CAP = 1000;
 const logs = ref<string[]>([]);
@@ -81,9 +84,9 @@ async function exportLogs() {
     } catch {
       // Reveal may be unavailable; the file is still written.
     }
-    alert(`日志已导出到：\n${path}`);
+    alert(t("logs.exportSuccess", { path }));
   } catch (e) {
-    alert(`导出失败：${e}`);
+    alert(t("logs.exportFailed", { error: e }));
   } finally {
     exporting.value = false;
   }
@@ -110,7 +113,7 @@ onUnmounted(() => {
 <template>
   <div class="page">
     <div class="page-header">
-      <h1 class="page-title">运行日志</h1>
+      <h1 class="page-title">{{ t('logs.title') }}</h1>
       <div class="header-actions">
         <div class="level-tabs">
           <button
@@ -120,22 +123,22 @@ onUnmounted(() => {
             :class="{ active: filterLevel === level }"
             @click="filterLevel = level"
           >
-            {{ level === 'all' ? '全部' : level.toUpperCase() }}
+            {{ level === 'all' ? t('logs.all') : level.toUpperCase() }}
           </button>
         </div>
-        <button class="btn btn-ghost" title="自动滚动" @click="autoScroll = !autoScroll">
+        <button class="btn btn-ghost" :title="t('logs.autoScroll')" @click="autoScroll = !autoScroll">
           <ArrowDown :size="14" :style="{ opacity: autoScroll ? 1 : 0.4 }" />
-          自动滚动
+          {{ t('logs.autoScroll') }}
         </button>
-        <button class="btn btn-ghost" @click="copyAllLogs" :title="copySuccess ? '已复制!' : '复制全部日志'">
+        <button class="btn btn-ghost" @click="copyAllLogs" :title="copySuccess ? t('logs.copied') + '!' : t('logs.copyAll')">
           <Copy :size="14" :style="{ color: copySuccess ? '#107c10' : undefined }" />
-          {{ copySuccess ? '已复制' : '复制' }}
+          {{ copySuccess ? t('logs.copied') : t('logs.copy') }}
         </button>
-        <button class="btn btn-ghost" @click="exportLogs" :disabled="exporting" title="导出日志到文件">
+        <button class="btn btn-ghost" @click="exportLogs" :disabled="exporting" :title="t('logs.exportToFile')">
           <Download :size="14" />
-          {{ exporting ? '导出中...' : '导出' }}
+          {{ exporting ? t('logs.exporting') : t('logs.export') }}
         </button>
-        <button class="btn btn-ghost" @click="logs = []" title="清空日志">
+        <button class="btn btn-ghost" @click="logs = []" :title="t('logs.clear')">
           <Trash2 :size="14" />
         </button>
       </div>
@@ -143,7 +146,7 @@ onUnmounted(() => {
 
     <div class="log-container card" ref="logContainer">
       <div v-if="filtered.length === 0" class="log-empty">
-        暂无日志，启动代理后将显示运行日志
+        {{ t('logs.empty') }}
       </div>
       <div
         v-for="(log, i) in filtered"
