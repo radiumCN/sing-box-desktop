@@ -64,6 +64,8 @@ pub fn detect_sub_type(content: &str, url: &str) -> SubType {
                 || text.contains("hy2://")
                 || text.contains("tuic://")
                 || text.contains("anytls://")
+                || text.contains("wireguard://")
+                || text.contains("wg://")
             {
                 return SubType::V2ray;
             }
@@ -78,6 +80,8 @@ pub fn detect_sub_type(content: &str, url: &str) -> SubType {
         || content_trimmed.starts_with("hy2://")
         || content_trimmed.starts_with("tuic://")
         || content_trimmed.starts_with("anytls://")
+        || content_trimmed.starts_with("wireguard://")
+        || content_trimmed.starts_with("wg://")
     {
         return SubType::V2ray;
     }
@@ -103,6 +107,105 @@ pub fn parse_subscription(
         SubType::Sip008 => parse_sip008(content, sub_id),
         SubType::Unknown => Err(anyhow!("无法识别的订阅格式")),
     }
+}
+
+/// Region keyword → group label table. Each entry lists name substrings (lowercased for
+/// ASCII, plus the emoji flag) that map to a display group. Order matters: the first
+/// matching region wins. Kept deliberately small and high-signal.
+const REGION_KEYWORDS: &[(&str, &[&str])] = &[
+    ("香港", &["🇭🇰", "香港", "hong kong", "hongkong", "hk"]),
+    ("台湾", &["🇹🇼", "台湾", "台灣", "taiwan", "tw"]),
+    ("日本", &["🇯🇵", "日本", "japan", "tokyo", "jp"]),
+    ("新加坡", &["🇸🇬", "新加坡", "狮城", "singapore", "sg"]),
+    ("美国", &["🇺🇸", "美国", "美國", "united states", "usa", "us"]),
+    ("韩国", &["🇰🇷", "韩国", "韓國", "korea", "kr"]),
+    ("英国", &["🇬🇧", "英国", "united kingdom", "uk", "gb"]),
+    ("德国", &["🇩🇪", "德国", "germany", "de"]),
+    ("俄罗斯", &["🇷🇺", "俄罗斯", "russia", "ru"]),
+    ("印度", &["🇮🇳", "印度", "india", "in"]),
+    ("法国", &["🇫🇷", "法国", "france", "fr"]),
+    ("加拿大", &["🇨🇦", "加拿大", "canada", "ca"]),
+    ("澳大利亚", &["🇦🇺", "澳大利亚", "澳洲", "australia", "au"]),
+];
+
+/// Detect a node's region group from its display name. Matches emoji flags and CN/EN
+/// keywords; ASCII matching is case-insensitive and whole-word-ish (a bare `us`/`hk`
+/// must be a standalone token to avoid matching e.g. "house"). Returns `"其他"` when no
+/// region is recognised.
+pub fn detect_region(name: &str) -> String {
+    let lower = name.to_lowercase();
+    for (label, keywords) in REGION_KEYWORDS {
+        for kw in *keywords {
+            // Multi-byte (emoji / CJK) and multi-char ASCII keywords: plain substring.
+            if kw.len() > 2 || !kw.is_ascii() {
+                if name.contains(kw) || lower.contains(*kw) {
+                    return label.to_string();
+                }
+            } else {
+                // Short ASCII codes (hk/tw/jp/us…): require a token boundary so we don't
+                // match inside unrelated words.
+                if lower.split(|c: char| !c.is_ascii_alphanumeric()).any(|tok| tok == *kw) {
+                    return label.to_string();
+                }
+            }
+        }
+    }
+    "其他".to_string()
+}
+
+/// Post-parse filtering + region grouping for one subscription's nodes.
+///
+/// - `include`: keep only nodes whose name matches this regex (None/empty → keep all).
+/// - `exclude`: drop nodes whose name matches this regex (None/empty → drop none).
+/// - `group_by_region`: set each kept node's `group` to its detected region.
+///
+/// An invalid regex is treated as "no filter" rather than dropping every node, so a typo
+/// can never silently wipe a subscription. Outbounds are filtered in lock-step with nodes
+/// by matching outbound `tag` against kept node names.
+pub fn apply_node_filters(
+    nodes: Vec<ProxyNode>,
+    outbounds: Vec<Value>,
+    include: Option<&str>,
+    exclude: Option<&str>,
+    group_by_region: bool,
+) -> (Vec<ProxyNode>, Vec<Value>) {
+    let compile = |pat: Option<&str>| -> Option<regex::Regex> {
+        let p = pat?.trim();
+        if p.is_empty() {
+            return None;
+        }
+        // Case-insensitive by default — node names mix cases freely.
+        regex::RegexBuilder::new(p).case_insensitive(true).build().ok()
+    };
+    let inc = compile(include);
+    let exc = compile(exclude);
+
+    let mut kept_names = std::collections::HashSet::new();
+    let mut out_nodes = Vec::new();
+    for mut node in nodes {
+        let keep = inc.as_ref().map(|r| r.is_match(&node.name)).unwrap_or(true)
+            && !exc.as_ref().map(|r| r.is_match(&node.name)).unwrap_or(false);
+        if !keep {
+            continue;
+        }
+        if group_by_region {
+            node.group = detect_region(&node.name);
+        }
+        kept_names.insert(node.name.clone());
+        out_nodes.push(node);
+    }
+
+    let out_obs = outbounds
+        .into_iter()
+        .filter(|ob| {
+            ob["tag"]
+                .as_str()
+                .map(|t| kept_names.contains(t))
+                .unwrap_or(true)
+        })
+        .collect();
+
+    (out_nodes, out_obs)
 }
 
 fn parse_clash(content: &str, sub_id: &str) -> Result<(Vec<ProxyNode>, Vec<Value>)> {
@@ -290,6 +393,83 @@ fn clash_ss_plugin(proxy: &YamlValue) -> Option<(String, String)> {
     }
 }
 
+/// Append a CIDR prefix to a bare interface address (`10.0.0.2` → `10.0.0.2/32`,
+/// `fd00::2` → `fd00::2/128`). Leaves an address that already carries a prefix untouched.
+fn wg_with_prefix(addr: &str, default_prefix: u8) -> String {
+    let addr = addr.trim();
+    if addr.contains('/') {
+        addr.to_string()
+    } else {
+        format!("{}/{}", addr, default_prefix)
+    }
+}
+
+/// Parse a Clash `reserved` value (either a `[n, n, n]` array or a base64 string of 3
+/// bytes) into sing-box's `[u8; 3]` form. Returns None when absent/unparseable so the
+/// field is simply omitted.
+fn wg_reserved_from_clash(v: &YamlValue) -> Option<Value> {
+    if let Some(seq) = v.as_sequence() {
+        let nums: Vec<Value> = seq.iter().filter_map(|x| x.as_u64()).map(|n| json!(n)).collect();
+        if nums.len() == 3 {
+            return Some(Value::Array(nums));
+        }
+    }
+    if let Some(s) = v.as_str() {
+        if let Ok(bytes) = general_purpose::STANDARD.decode(s.trim()) {
+            if bytes.len() >= 3 {
+                return Some(json!([bytes[0], bytes[1], bytes[2]]));
+            }
+        }
+    }
+    None
+}
+
+/// Build a sing-box ≥1.12 WireGuard **endpoint** object from a Clash `wireguard` proxy.
+/// sing-box 1.11+ models WireGuard as a top-level `endpoints[]` entry (not an outbound);
+/// the config assembler routes any `type=="wireguard"` object there while keeping its tag
+/// referenceable by selectors. Single-peer (Clash's flat `server`/`public-key`) form.
+fn clash_wireguard_endpoint(proxy: &YamlValue, tag: &str, server: &str, port: u64) -> Option<Value> {
+    let private_key = proxy["private-key"].as_str()?;
+    let public_key = proxy["public-key"].as_str().unwrap_or("");
+
+    // Interface addresses: `ip` (v4) + optional `ipv6`.
+    let mut address: Vec<Value> = Vec::new();
+    if let Some(ip) = proxy["ip"].as_str() {
+        if !ip.is_empty() { address.push(json!(wg_with_prefix(ip, 32))); }
+    }
+    if let Some(ip6) = proxy["ipv6"].as_str() {
+        if !ip6.is_empty() { address.push(json!(wg_with_prefix(ip6, 128))); }
+    }
+
+    let mut peer = json!({
+        "address": server,
+        "port": port,
+        "public_key": public_key,
+        "allowed_ips": ["0.0.0.0/0", "::/0"],
+    });
+    let psk = proxy["pre-shared-key"].as_str()
+        .or_else(|| proxy["preshared-key"].as_str())
+        .unwrap_or("");
+    if !psk.is_empty() {
+        peer["pre_shared_key"] = json!(psk);
+    }
+    if let Some(reserved) = wg_reserved_from_clash(&proxy["reserved"]) {
+        peer["reserved"] = reserved;
+    }
+
+    let mut ep = json!({
+        "type": "wireguard",
+        "tag": tag,
+        "address": address,
+        "private_key": private_key,
+        "peers": [peer],
+    });
+    if let Some(mtu) = proxy["mtu"].as_u64() {
+        ep["mtu"] = json!(mtu);
+    }
+    Some(ep)
+}
+
 fn clash_yaml_proxy_to_singbox(proxy: &YamlValue, tag: &str) -> Option<Value> {
     let proto = proxy["type"].as_str()?;
     let server = proxy["server"].as_str()?;
@@ -447,6 +627,7 @@ fn clash_yaml_proxy_to_singbox(proxy: &YamlValue, tag: &str) -> Option<Value> {
                 "tls": { "enabled": true, "server_name": sni, "insecure": clash_skip_verify(proxy) }
             }))
         }
+        "wireguard" => clash_wireguard_endpoint(proxy, tag, server, port),
         _ => None,
     }
 }
@@ -496,6 +677,8 @@ fn parse_node_link(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
         parse_tuic(link, sub_id)
     } else if link.starts_with("anytls://") {
         parse_anytls(link, sub_id)
+    } else if link.starts_with("wireguard://") || link.starts_with("wg://") {
+        parse_wireguard(link, sub_id)
     } else {
         Err(anyhow!("不支持的链接类型: {}", link))
     }
@@ -976,6 +1159,98 @@ fn parse_anytls(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
     };
 
     Ok((node, outbound))
+}
+
+/// Parse a `wireguard://` / `wg://` share link into a ProxyNode + sing-box ≥1.12 WireGuard
+/// **endpoint** object (the config assembler routes `type=="wireguard"` to `endpoints[]`).
+/// Convention (used by several clients):
+///   wireguard://<private_key>@host:port?publickey=..&presharedkey=..&address=10.0.0.2/32,fd00::2/128&reserved=0,0,0&mtu=1408#name
+/// The private key is read RAW from before the `@` (then percent-decoded) so base64
+/// padding/`/` survive the URL parser's WHATWG re-encoding (same approach as `parse_ss`).
+fn parse_wireguard(link: &str, sub_id: &str) -> Result<(ProxyNode, Value)> {
+    let url = Url::parse(link)?;
+    let server = url.host_str().unwrap_or("").to_string();
+    let port = url.port().unwrap_or(51820);
+    let name = node_name_from_fragment(&url, &server);
+    let params: std::collections::HashMap<String, String> = url.query_pairs()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    let pick = |keys: &[&str]| -> String {
+        for k in keys {
+            if let Some(v) = params.get(*k) {
+                if !v.is_empty() { return v.clone(); }
+            }
+        }
+        String::new()
+    };
+
+    // Private key: raw substring between scheme and `@`, percent-decoded.
+    let scheme_len = if link.starts_with("wireguard://") { "wireguard://".len() } else { "wg://".len() };
+    let raw_userinfo = link[scheme_len..].split('@').next().unwrap_or("");
+    let mut private_key = percent_decode(raw_userinfo);
+    if private_key.is_empty() {
+        private_key = pick(&["privatekey", "private_key", "secretkey"]);
+    }
+    let public_key = pick(&["publickey", "public_key", "peer_public_key", "peerpublickey"]);
+    let psk = pick(&["presharedkey", "preshared_key", "pre_shared_key"]);
+
+    // Interface addresses: comma-separated; infer /32 (v4) or /128 (v6) when no prefix.
+    let addr_raw = pick(&["address", "ip", "addresses"]);
+    let address: Vec<Value> = addr_raw.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if s.contains('/') { json!(s.to_string()) }
+            else if s.contains(':') { json!(format!("{}/128", s)) }
+            else { json!(format!("{}/32", s)) }
+        })
+        .collect();
+
+    let mut peer = json!({
+        "address": server,
+        "port": port,
+        "public_key": public_key,
+        "allowed_ips": ["0.0.0.0/0", "::/0"],
+    });
+    if !psk.is_empty() {
+        peer["pre_shared_key"] = json!(psk);
+    }
+    let reserved = pick(&["reserved"]);
+    if !reserved.is_empty() {
+        let nums: Vec<Value> = reserved.split(',')
+            .filter_map(|x| x.trim().parse::<u64>().ok())
+            .map(|n| json!(n))
+            .collect();
+        if nums.len() == 3 {
+            peer["reserved"] = Value::Array(nums);
+        }
+    }
+
+    let mut endpoint = json!({
+        "type": "wireguard",
+        "tag": name,
+        "address": address,
+        "private_key": private_key,
+        "peers": [peer],
+    });
+    if let Some(mtu) = pick(&["mtu"]).parse::<u64>().ok() {
+        endpoint["mtu"] = json!(mtu);
+    }
+
+    let node = ProxyNode {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: name.clone(),
+        group: "默认".to_string(),
+        protocol: "wireguard".to_string(),
+        server,
+        port,
+        latency: None,
+        download_speed: None,
+        is_active: false,
+        subscription_id: Some(sub_id.to_string()),
+    };
+
+    Ok((node, endpoint))
 }
 
 fn parse_sip008(content: &str, sub_id: &str) -> Result<(Vec<ProxyNode>, Vec<Value>)> {
@@ -1482,6 +1757,13 @@ pub fn build_singbox_config(
 ) -> Value {
     let all_outbounds = build_proxy_outbounds(outbounds, config, active_tag, nodes);
 
+    // sing-box ≥1.11 models WireGuard as a top-level `endpoints[]` entry rather than an
+    // outbound. Split the WireGuard node objects out of `outbounds` while leaving their
+    // tags referenceable by the selector / urltest groups (which stay in `outbounds`).
+    let (wg_endpoints, all_outbounds): (Vec<Value>, Vec<Value>) = all_outbounds
+        .into_iter()
+        .partition(|ob| ob.get("type").and_then(|t| t.as_str()) == Some("wireguard"));
+
     // ── Rule-sets ──────────────────────────────────────────────────────
     // Prefer the locally bundled .srs files (copied to the app data dir on
     // startup). They work offline and in regions where jsDelivr/GitHub are
@@ -1618,6 +1900,12 @@ pub fn build_singbox_config(
     if config.tun_enabled {
         let tun_in = build_tun_inbound(config);
         cfg["inbounds"].as_array_mut().unwrap().push(tun_in);
+    }
+
+    // Only emit `endpoints` when WireGuard nodes exist — an empty array is harmless but
+    // we keep the config minimal and identical to before for the common case.
+    if !wg_endpoints.is_empty() {
+        cfg["endpoints"] = Value::Array(wg_endpoints);
     }
 
     cfg
@@ -2127,5 +2415,150 @@ mod tests {
         cfg.enable_ipv6 = true;
         let dual = build_tun_inbound(&cfg);
         assert_eq!(dual["address"].as_array().unwrap().len(), 2, "dual-stack address");
+    }
+
+    // ─── N2: node filtering / region grouping ──────────────────────────
+    fn mk_node(name: &str) -> ProxyNode {
+        ProxyNode {
+            id: name.to_string(),
+            name: name.to_string(),
+            group: "默认".to_string(),
+            protocol: "vmess".to_string(),
+            server: "h".to_string(),
+            port: 443,
+            latency: None,
+            download_speed: None,
+            is_active: false,
+            subscription_id: Some("s".to_string()),
+        }
+    }
+
+    #[test]
+    fn detect_region_matches_flag_keyword_and_token() {
+        assert_eq!(detect_region("🇭🇰 香港 01"), "香港");
+        assert_eq!(detect_region("Japan-Tokyo-IPLC"), "日本");
+        assert_eq!(detect_region("US-01 premium"), "美国");
+        // bare token boundary: "house" must NOT match "us"
+        assert_eq!(detect_region("warehouse node"), "其他");
+        assert_eq!(detect_region("剩余流量：100GB"), "其他");
+    }
+
+    #[test]
+    fn apply_filters_include_exclude_and_outbound_lockstep() {
+        let nodes = vec![mk_node("🇭🇰HK1"), mk_node("🇯🇵JP1"), mk_node("官网流量剩余")];
+        let obs = vec![
+            json!({"tag":"🇭🇰HK1","type":"vmess"}),
+            json!({"tag":"🇯🇵JP1","type":"vmess"}),
+            json!({"tag":"官网流量剩余","type":"vmess"}),
+        ];
+        // exclude the info node; keep the two real ones.
+        let (n, o) = apply_node_filters(nodes, obs, None, Some("流量|官网|过期"), false);
+        assert_eq!(n.len(), 2);
+        assert_eq!(o.len(), 2);
+        assert!(o.iter().all(|ob| ob["tag"] != "官网流量剩余"));
+    }
+
+    #[test]
+    fn apply_filters_invalid_regex_keeps_all() {
+        let nodes = vec![mk_node("a"), mk_node("b")];
+        let obs = vec![json!({"tag":"a"}), json!({"tag":"b"})];
+        // unbalanced bracket → invalid; must NOT wipe the list.
+        let (n, _) = apply_node_filters(nodes, obs, Some("[invalid"), None, false);
+        assert_eq!(n.len(), 2);
+    }
+
+    #[test]
+    fn apply_filters_region_grouping_sets_group() {
+        let nodes = vec![mk_node("🇭🇰HK1"), mk_node("无区域")];
+        let obs = vec![json!({"tag":"🇭🇰HK1"}), json!({"tag":"无区域"})];
+        let (n, _) = apply_node_filters(nodes, obs, None, None, true);
+        assert_eq!(n[0].group, "香港");
+        assert_eq!(n[1].group, "其他");
+    }
+
+    // ─── N3: WireGuard ─────────────────────────────────────────────────
+    #[test]
+    fn parse_wireguard_link_builds_endpoint() {
+        let link = "wireguard://cHJpdmF0ZWtleWJhc2U2NA==@192.0.2.1:51820\
+            ?publickey=PUBKEY&presharedkey=PSK&address=10.0.0.2/32,fd00::2&reserved=1,2,3&mtu=1408#WG-JP";
+        let (node, ep) = parse_wireguard(link, "sub1").unwrap();
+        assert_eq!(node.protocol, "wireguard");
+        assert_eq!(node.name, "WG-JP");
+        assert_eq!(node.server, "192.0.2.1");
+        assert_eq!(node.port, 51820);
+
+        assert_eq!(ep["type"], "wireguard");
+        assert_eq!(ep["tag"], "WG-JP");
+        // WireGuard keys are base64 strings; we keep the value as-is (percent-decoded
+        // only, so URL-escaped `+` / `=` survive) — sing-box wants the base64 string.
+        assert_eq!(ep["private_key"], "cHJpdmF0ZWtleWJhc2U2NA==");
+        // v4 keeps its /32; bare v6 gets /128 inferred.
+        assert_eq!(ep["address"][0], "10.0.0.2/32");
+        assert_eq!(ep["address"][1], "fd00::2/128");
+        assert_eq!(ep["mtu"], 1408);
+        let peer = &ep["peers"][0];
+        assert_eq!(peer["address"], "192.0.2.1");
+        assert_eq!(peer["port"], 51820);
+        assert_eq!(peer["public_key"], "PUBKEY");
+        assert_eq!(peer["pre_shared_key"], "PSK");
+        assert_eq!(peer["reserved"], json!([1, 2, 3]));
+        assert_eq!(peer["allowed_ips"], json!(["0.0.0.0/0", "::/0"]));
+    }
+
+    #[test]
+    fn clash_wireguard_maps_to_endpoint() {
+        let yaml = r#"
+type: wireguard
+server: 192.0.2.9
+port: 51820
+ip: 10.0.0.5
+ipv6: fd00::5
+private-key: PRIV
+public-key: PUB
+pre-shared-key: PSK
+reserved: [9, 8, 7]
+mtu: 1280
+"#;
+        let proxy: YamlValue = serde_yaml::from_str(yaml).unwrap();
+        let ep = clash_yaml_proxy_to_singbox(&proxy, "wg-cn").unwrap();
+        assert_eq!(ep["type"], "wireguard");
+        assert_eq!(ep["private_key"], "PRIV");
+        assert_eq!(ep["address"][0], "10.0.0.5/32");
+        assert_eq!(ep["address"][1], "fd00::5/128");
+        assert_eq!(ep["mtu"], 1280);
+        assert_eq!(ep["peers"][0]["public_key"], "PUB");
+        assert_eq!(ep["peers"][0]["reserved"], json!([9, 8, 7]));
+    }
+
+    #[test]
+    fn build_config_routes_wireguard_to_endpoints() {
+        let wg = json!({
+            "type": "wireguard", "tag": "WG1",
+            "address": ["10.0.0.2/32"], "private_key": "k",
+            "peers": [{"address": "1.2.3.4", "port": 51820, "public_key": "p"}]
+        });
+        let ss = json!({
+            "type": "shadowsocks", "tag": "SS1",
+            "server": "h", "server_port": 8388, "method": "aes-128-gcm", "password": "x"
+        });
+        let cfg = build_singbox_config(
+            &[wg, ss],
+            &crate::types::AppConfig::default(),
+            None,
+            &[],
+        );
+        // WireGuard object moved to top-level endpoints[]; not left among outbounds.
+        let eps = cfg["endpoints"].as_array().expect("endpoints present");
+        assert_eq!(eps.len(), 1);
+        assert_eq!(eps[0]["tag"], "WG1");
+        let obs = cfg["outbounds"].as_array().unwrap();
+        assert!(obs.iter().all(|o| o["type"] != "wireguard"), "no wireguard in outbounds");
+        // The shadowsocks node stays an outbound.
+        assert!(obs.iter().any(|o| o["tag"] == "SS1"));
+        // Selector still references the WG tag, so it remains selectable.
+        let proxy = obs.iter().find(|o| o["tag"] == "proxy").unwrap();
+        let members: Vec<&str> = proxy["outbounds"].as_array().unwrap()
+            .iter().filter_map(|v| v.as_str()).collect();
+        assert!(members.contains(&"WG1"));
     }
 }

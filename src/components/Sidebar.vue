@@ -6,27 +6,31 @@ import {
   Rss,
   Server,
   Activity,
+  BarChart3,
   ScrollText,
   Filter,
   Settings,
 } from "@lucide/vue";
 import { listen } from "@tauri-apps/api/event";
+import { useI18n } from "vue-i18n";
 import { useAppStore } from "../stores/app";
 
 const route = useRoute();
 const router = useRouter();
 const store = useAppStore();
+const { t } = useI18n();
 
 const hasUpdate = ref(false);
 const updateVersion = ref("");
 
 const navItems = [
-  { path: "/home", icon: Home, label: "仪表盘" },
-  { path: "/subscriptions", icon: Rss, label: "订阅" },
-  { path: "/nodes", icon: Server, label: "节点" },
-  { path: "/connections", icon: Activity, label: "连接" },
-  { path: "/logs", icon: ScrollText, label: "日志" },
-  { path: "/rules", icon: Filter, label: "分流规则" },
+  { path: "/home", icon: Home, key: "home" },
+  { path: "/subscriptions", icon: Rss, key: "subscriptions" },
+  { path: "/nodes", icon: Server, key: "nodes" },
+  { path: "/connections", icon: Activity, key: "connections" },
+  { path: "/stats", icon: BarChart3, key: "stats" },
+  { path: "/logs", icon: ScrollText, key: "logs" },
+  { path: "/rules", icon: Filter, key: "rules" },
 ];
 
 const isActive = (path: string) => route.path === path;
@@ -50,7 +54,7 @@ onMounted(() => {
         @click="router.push(item.path)"
       >
         <component :is="item.icon" :size="18" />
-        <span>{{ item.label }}</span>
+        <span>{{ t('nav.' + item.key) }}</span>
       </button>
     </div>
 
@@ -59,24 +63,24 @@ onMounted(() => {
       <div
         class="proxy-status"
         :class="store.proxying ? 'running' : 'stopped'"
-        :title="store.proxying ? '代理已连接（在仪表盘控制开关）' : '代理未连接（在仪表盘控制开关）'"
+        :title="store.proxying ? t('sidebar.connectedTitle') : t('sidebar.disconnectedTitle')"
       >
         <span class="status-dot" :class="{ running: store.proxying }" />
-        <span>{{ store.proxying ? "已连接" : "未连接" }}</span>
+        <span>{{ store.proxying ? t('sidebar.connected') : t('sidebar.disconnected') }}</span>
       </div>
 
       <button
         class="nav-item"
         :class="{ active: isActive('/settings') }"
-        :title="hasUpdate ? `sing-box ${updateVersion} 可更新` : ''"
+        :title="hasUpdate ? t('sidebar.updateTitle', { version: updateVersion }) : ''"
         @click="router.push('/settings')"
       >
         <div class="icon-wrap">
           <Settings :size="18" />
           <span v-if="hasUpdate" class="update-dot" />
         </div>
-        <span>设置</span>
-        <span v-if="hasUpdate" class="update-badge">更新</span>
+        <span>{{ t('nav.settings') }}</span>
+        <span v-if="hasUpdate" class="update-badge">{{ t('sidebar.update') }}</span>
       </button>
     </div>
   </nav>

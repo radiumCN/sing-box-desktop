@@ -15,10 +15,12 @@ import {
   Tooltip,
 } from "chart.js";
 import { invoke } from "@tauri-apps/api/core";
+import { useI18n } from "vue-i18n";
 import { useAppStore } from "../stores/app";
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip);
 
+const { t } = useI18n();
 const store = useAppStore();
 const systemProxyReady = ref(false);
 
@@ -46,9 +48,9 @@ const tunOn = computed(() => {
 // What the proxy-status card shows as the active routing method. With the persistent
 // core, base this on whether we're actually proxying — not on whether the core is up.
 const connectionLabel = computed(() => {
-  if (tunOn.value) return "TUN 模式";
-  if (systemProxyOn.value) return "系统代理";
-  return "未连接";
+  if (tunOn.value) return t("home.tunMode");
+  if (systemProxyOn.value) return t("home.systemProxy");
+  return t("home.notConnected");
 });
 
 // Remember which switch initiated an "off" transition so the sub-label can show
@@ -89,7 +91,7 @@ const chartData = computed(() => ({
   labels: chartLabels.value,
   datasets: [
     {
-      label: "上传",
+      label: t("home.upload"),
       data: store.trafficHistory.map((p) => p.upload / 1024),
       borderColor: "#0078d4",
       backgroundColor: "rgba(0,120,212,0.08)",
@@ -99,7 +101,7 @@ const chartData = computed(() => ({
       pointRadius: 0,
     },
     {
-      label: "下载",
+      label: t("home.download"),
       data: store.trafficHistory.map((p) => p.download / 1024),
       borderColor: "#107c10",
       backgroundColor: "rgba(16,124,16,0.08)",
@@ -161,10 +163,10 @@ const displayUptime = computed(() => {
 
 const proxyModeLabel = computed(() => {
   const map: Record<string, string> = {
-    rule: "规则模式",
-    global: "全局代理",
-    direct: "直连模式",
-    tun: "TUN 模式",
+    rule: t("home.ruleMode"),
+    global: t("home.globalMode"),
+    direct: t("home.directMode"),
+    tun: t("home.tunMode"),
   };
   return map[store.config.proxy_mode] ?? store.config.proxy_mode;
 });
@@ -239,13 +241,13 @@ onUnmounted(() => {
 <template>
   <div class="page">
     <div class="page-header">
-      <h1 class="page-title">仪表盘</h1>
+      <h1 class="page-title">{{ t('home.dashboard') }}</h1>
     </div>
 
     <!-- Error Banner (top, prominent) -->
     <div v-if="store.error" class="error-banner">
       <span>⚠️ {{ store.error }}</span>
-      <button class="btn btn-ghost" @click="store.error = null">关闭</button>
+      <button class="btn btn-ghost" @click="store.error = null">{{ t('home.close') }}</button>
     </div>
 
     <!-- Quick Controls -->
@@ -257,7 +259,7 @@ onUnmounted(() => {
             <component :is="store.proxying ? Wifi : WifiOff" :size="22" />
           </div>
           <div>
-            <div class="control-label">代理状态</div>
+            <div class="control-label">{{ t('home.proxyStatus') }}</div>
             <div class="control-value">{{ connectionLabel }}</div>
           </div>
         </div>
@@ -269,13 +271,13 @@ onUnmounted(() => {
           <Server :size="18" />
         </div>
         <div class="stat-content">
-          <div class="stat-label">当前节点</div>
+          <div class="stat-label">{{ t('home.currentNode') }}</div>
           <div class="stat-value text-sm">
-            {{ store.isAutoGroup ? "自动选优" : (store.activeNode?.name ?? "未选择") }}
+            {{ store.isAutoGroup ? t('home.autoSelect') : (store.activeNode?.name ?? t('home.noneSelected')) }}
           </div>
           <div class="stat-sub">
             <template v-if="store.isAutoGroup">
-              {{ store.activeNodeNow ? `→ ${store.activeNodeNow}` : "动态选择中…" }}
+              {{ store.activeNodeNow ? `→ ${store.activeNodeNow}` : t('home.dynamicSelecting') }}
             </template>
             <template v-else>{{ store.activeNode?.server ?? "--" }}</template>
           </div>
@@ -288,7 +290,7 @@ onUnmounted(() => {
           <Filter :size="18" />
         </div>
         <div class="stat-content">
-          <div class="stat-label">代理模式</div>
+          <div class="stat-label">{{ t('home.proxyMode') }}</div>
           <div class="stat-value">{{ proxyModeLabel }}</div>
           <div class="mode-btns">
             <button
@@ -298,7 +300,7 @@ onUnmounted(() => {
               :class="{ active: store.config.proxy_mode === mode }"
               @click="store.setProxyMode(mode)"
             >
-              {{ mode === 'rule' ? '规则' : mode === 'global' ? '全局' : '直连' }}
+              {{ mode === 'rule' ? t('home.rule') : mode === 'global' ? t('home.global') : t('home.direct') }}
             </button>
           </div>
         </div>
@@ -310,11 +312,11 @@ onUnmounted(() => {
           <Clock :size="18" />
         </div>
         <div class="stat-content">
-          <div class="stat-label">运行时长</div>
+          <div class="stat-label">{{ t('home.uptime') }}</div>
           <div class="stat-value">{{ displayUptime }}</div>
           <div class="stat-sub">
             <template v-if="memoryUsage !== null">
-              内存 {{ formatBytes(memoryUsage) }} · {{ store.status.version ?? "sing-box" }}
+              {{ t('home.memory', { value: formatBytes(memoryUsage) }) }} · {{ store.status.version ?? "sing-box" }}
             </template>
             <template v-else>
               {{ store.status.version ?? "sing-box" }}
@@ -328,7 +330,7 @@ onUnmounted(() => {
     <div class="card net-settings-card">
       <div class="net-settings-title">
         <Globe :size="14" />
-        网络设置
+        {{ t('home.networkSettings') }}
       </div>
       <div class="net-settings-body">
         <!-- System Proxy toggle — starts/stops the proxy; mutually exclusive with TUN -->
@@ -336,12 +338,12 @@ onUnmounted(() => {
           <div class="net-row-left">
             <div class="net-row-icon icon-blue"><Globe :size="15" /></div>
             <div>
-              <div class="net-row-label">系统代理</div>
+              <div class="net-row-label">{{ t('home.systemProxy') }}</div>
               <div class="net-row-sub">
-                <template v-if="store.connecting === 'system'">连接中…</template>
-                <template v-else-if="store.connecting === 'off' && wasSystem">断开中…</template>
+                <template v-if="store.connecting === 'system'">{{ t('home.connecting') }}</template>
+                <template v-else-if="store.connecting === 'off' && wasSystem">{{ t('home.disconnecting') }}</template>
                 <template v-else-if="systemProxyOn">{{ `127.0.0.1:${store.config.mixed_port}` }}</template>
-                <template v-else>开启即启动代理（与 TUN 互斥）</template>
+                <template v-else>{{ t('home.systemProxyHint') }}</template>
               </div>
             </div>
           </div>
@@ -350,7 +352,7 @@ onUnmounted(() => {
             :class="{ on: systemProxyOn, 'no-anim': !systemProxyReady }"
             :disabled="store.loading"
             @click="toggleSystemProxy"
-            :title="systemProxyOn ? '关闭（停止代理）' : '开启系统代理并启动代理'"
+            :title="systemProxyOn ? t('home.systemProxyToggleOff') : t('home.systemProxyToggleOn')"
           >
             <span class="toggle-knob" />
           </button>
@@ -363,18 +365,18 @@ onUnmounted(() => {
           <div class="net-row-left">
             <div class="net-row-icon icon-purple"><Filter :size="15" /></div>
             <div>
-              <div class="net-row-label">代理模式</div>
+              <div class="net-row-label">{{ t('home.proxyMode') }}</div>
               <div class="net-row-sub">{{ proxyModeLabel }}</div>
             </div>
           </div>
           <div class="mode-pills">
             <button
-              v-for="[k, label] in [['rule','规则'],['global','全局'],['direct','直连']]"
+              v-for="[k, labelKey] in [['rule','rule'],['global','global'],['direct','direct']]"
               :key="k"
               class="mode-pill"
               :class="{ active: store.config.proxy_mode === k }"
               @click="store.setProxyMode(k)"
-            >{{ label }}</button>
+            >{{ t('home.' + labelKey) }}</button>
           </div>
         </div>
 
@@ -385,11 +387,11 @@ onUnmounted(() => {
           <div class="net-row-left">
             <div class="net-row-icon icon-orange"><Shield :size="15" /></div>
             <div>
-              <div class="net-row-label">TUN 模式</div>
+              <div class="net-row-label">{{ t('home.tunMode') }}</div>
               <div class="net-row-sub">
-                <template v-if="store.connecting === 'tun'">连接中…</template>
-                <template v-else-if="store.connecting === 'off' && wasTun">断开中…</template>
-                <template v-else>{{ tunOn ? '虚拟网卡已启用，全局接管流量' : '开启即启动代理（需管理员，与系统代理互斥）' }}</template>
+                <template v-if="store.connecting === 'tun'">{{ t('home.connecting') }}</template>
+                <template v-else-if="store.connecting === 'off' && wasTun">{{ t('home.disconnecting') }}</template>
+                <template v-else>{{ tunOn ? t('home.tunOnHint') : t('home.tunOffHint') }}</template>
               </div>
             </div>
           </div>
@@ -409,15 +411,15 @@ onUnmounted(() => {
     <div class="traffic-row">
       <div class="card traffic-stat upload">
         <ArrowUp :size="16" />
-        <span class="traffic-label">上传速率</span>
+        <span class="traffic-label">{{ t('home.uploadSpeed') }}</span>
         <span class="traffic-value">{{ formatBytes(uploadSpeed) }}/s</span>
-        <span class="traffic-total">启动后累计: {{ formatBytes(totalUpload) }}</span>
+        <span class="traffic-total">{{ t('home.totalSinceStart', { value: formatBytes(totalUpload) }) }}</span>
       </div>
       <div class="card traffic-stat download">
         <ArrowDown :size="16" />
-        <span class="traffic-label">下载速率</span>
+        <span class="traffic-label">{{ t('home.downloadSpeed') }}</span>
         <span class="traffic-value">{{ formatBytes(downloadSpeed) }}/s</span>
-        <span class="traffic-total">启动后累计: {{ formatBytes(totalDownload) }}</span>
+        <span class="traffic-total">{{ t('home.totalSinceStart', { value: formatBytes(totalDownload) }) }}</span>
       </div>
     </div>
 
@@ -425,15 +427,15 @@ onUnmounted(() => {
     <div class="card chart-card">
       <div class="chart-header">
         <Zap :size="15" />
-        <span>实时流量</span>
+        <span>{{ t('home.realtimeTraffic') }}</span>
         <div class="chart-legend">
-          <span class="legend-item upload-color">▲ 上传</span>
-          <span class="legend-item download-color">▼ 下载</span>
+          <span class="legend-item upload-color">▲ {{ t('home.upload') }}</span>
+          <span class="legend-item download-color">▼ {{ t('home.download') }}</span>
         </div>
       </div>
       <div class="chart-body">
         <Line v-if="store.trafficHistory.length > 1" :data="chartData" :options="chartOptions" />
-        <div v-else class="chart-empty">启动代理后将显示实时流量数据</div>
+        <div v-else class="chart-empty">{{ t('home.chartEmpty') }}</div>
       </div>
     </div>
   </div>

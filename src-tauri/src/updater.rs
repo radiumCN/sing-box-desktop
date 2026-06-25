@@ -17,6 +17,31 @@ pub struct ReleaseInfo {
     pub published_at: String,
     pub release_notes: String,
     pub download_url: String,
+    /// Expected SHA-256 of the download asset, lowercase hex (no `sha256:` prefix).
+    /// Sourced from the GitHub release asset's `digest` field. `None` when the release
+    /// predates GitHub's per-asset digests, in which case integrity is not verified.
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+/// Lowercase-hex SHA-256 of the given bytes.
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+/// Normalise a GitHub asset `digest` value (e.g. `"sha256:ABC…"`) to bare lowercase
+/// hex. Returns `None` for empty / non-sha256 values so we never compare against a
+/// hash we can't compute.
+fn normalize_sha256_digest(raw: &str) -> Option<String> {
+    let hex = raw.strip_prefix("sha256:").unwrap_or(raw).trim().to_lowercase();
+    if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        Some(hex)
+    } else {
+        None
+    }
 }
 
 /// The sing-box release asset matching the platform we are currently running on.
@@ -191,7 +216,7 @@ pub async fn fetch_latest_release(force_refresh: bool) -> Result<ReleaseInfo> {
 
     // Find the asset matching the current OS + CPU architecture.
     let p = current_platform_asset();
-    let download_url = body["assets"]
+    let asset = body["assets"]
         .as_array()
         .ok_or_else(|| anyhow!("未找到下载资源"))?
         .iter()
@@ -199,15 +224,23 @@ pub async fn fetch_latest_release(force_refresh: bool) -> Result<ReleaseInfo> {
             let name = a["name"].as_str().unwrap_or("").to_lowercase();
             name.contains(p.os) && name.contains(p.arch) && name.ends_with(p.ext)
         })
-        .and_then(|a| a["browser_download_url"].as_str())
+        .ok_or_else(|| anyhow!("未找到 {}-{} 平台的下载链接", p.os, p.arch))?;
+
+    let download_url = asset["browser_download_url"]
+        .as_str()
         .ok_or_else(|| anyhow!("未找到 {}-{} 平台的下载链接", p.os, p.arch))?
         .to_string();
+
+    // GitHub exposes a per-asset `digest` ("sha256:…") on newer releases; absent on older
+    // ones (then we skip verification rather than block the update).
+    let sha256 = asset["digest"].as_str().and_then(normalize_sha256_digest);
 
     let release = ReleaseInfo {
         version,
         published_at,
         release_notes,
         download_url,
+        sha256,
     };
 
     save_cache(&release);
@@ -221,6 +254,7 @@ pub async fn download_singbox(
     app_handle: tauri::AppHandle,
     download_url: String,
     dest_path: PathBuf,
+    expected_sha256: Option<String>,
 ) -> Result<()> {
     use tokio::io::AsyncWriteExt;
 
@@ -283,6 +317,21 @@ pub async fn download_singbox(
 
     // Extract the sing-box binary from the archive.
     let archive_data = std::fs::read(&archive_path)?;
+
+    // Verify integrity against the release's published SHA-256 before trusting the bytes.
+    // A mismatch means a corrupted or tampered download — discard it rather than install.
+    if let Some(expected) = expected_sha256.as_deref().and_then(normalize_sha256_digest) {
+        let actual = sha256_hex(&archive_data);
+        if actual != expected {
+            let _ = std::fs::remove_file(&archive_path);
+            return Err(anyhow!(
+                "内核校验失败：下载文件 SHA-256 与发布值不一致（期望 {}…，实际 {}…），已丢弃",
+                &expected[..8],
+                &actual[..8]
+            ));
+        }
+    }
+
     if is_tar_gz {
         extract_binary_from_tar_gz(&archive_data, &dest_path)?;
     } else {
@@ -443,6 +492,10 @@ pub struct AppReleaseInfo {
     pub release_notes: String,
     pub download_url: String,
     pub is_prerelease: bool,
+    /// Expected SHA-256 of the installer asset, lowercase hex (from the GitHub asset
+    /// `digest`). `None` on older releases without per-asset digests.
+    #[serde(default)]
+    pub sha256: Option<String>,
 }
 
 fn app_cache_path(channel: &str) -> PathBuf {
@@ -476,12 +529,9 @@ fn save_app_cache(channel: &str, release: &AppReleaseInfo) {
 }
 
 /// Pick the app installer asset for the current platform from a release's asset list.
-/// Windows → `.exe`; macOS → `.dmg` (prefer arch-matched, then universal).
-fn find_app_installer_url(assets: &[serde_json::Value]) -> Option<String> {
-    let url_of = |a: &serde_json::Value| {
-        a["browser_download_url"].as_str().map(|s| s.to_string())
-    };
-
+/// Windows → `.exe`; macOS → `.dmg` (prefer arch-matched, then universal). Returns the
+/// asset object so the caller can read both its download URL and `digest`.
+fn find_app_installer_asset(assets: &[serde_json::Value]) -> Option<&serde_json::Value> {
     #[cfg(target_os = "windows")]
     {
         // Prefer a clearly-named x64 installer, then fall back to any .exe.
@@ -497,7 +547,6 @@ fn find_app_installer_url(assets: &[serde_json::Value]) -> Option<String> {
                     a["name"].as_str().unwrap_or("").to_lowercase().ends_with(".exe")
                 })
             })
-            .and_then(url_of)
     }
 
     #[cfg(target_os = "macos")]
@@ -517,19 +566,13 @@ fn find_app_installer_url(assets: &[serde_json::Value]) -> Option<String> {
                     a["name"].as_str().unwrap_or("").to_lowercase().ends_with(".dmg")
                 })
             })
-            .and_then(url_of)
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        let _ = url_of;
-        assets.iter().find_map(|a| {
+        assets.iter().find(|a| {
             let name = a["name"].as_str().unwrap_or("").to_lowercase();
-            if name.ends_with(".appimage") || name.ends_with(".deb") {
-                a["browser_download_url"].as_str().map(|s| s.to_string())
-            } else {
-                None
-            }
+            name.ends_with(".appimage") || name.ends_with(".deb")
         })
     }
 }
@@ -556,10 +599,15 @@ fn parse_app_release(body: &serde_json::Value) -> Result<AppReleaseInfo> {
         .ok_or_else(|| anyhow!("未找到下载资源"))?;
 
     // Find the installer asset matching the current platform.
-    let download_url = find_app_installer_url(assets)
+    let asset = find_app_installer_asset(assets)
         .ok_or_else(|| anyhow!("未找到当前平台的安装包"))?;
+    let download_url = asset["browser_download_url"]
+        .as_str()
+        .ok_or_else(|| anyhow!("未找到当前平台的安装包"))?
+        .to_string();
+    let sha256 = asset["digest"].as_str().and_then(normalize_sha256_digest);
 
-    Ok(AppReleaseInfo { version, published_at, release_notes, download_url, is_prerelease })
+    Ok(AppReleaseInfo { version, published_at, release_notes, download_url, is_prerelease, sha256 })
 }
 
 /// Fetch the latest app release for the given channel.
@@ -628,6 +676,7 @@ pub async fn fetch_app_release(channel: &str, force_refresh: bool) -> Result<App
 pub async fn download_and_install_app(
     app_handle: tauri::AppHandle,
     download_url: String,
+    expected_sha256: Option<String>,
 ) -> Result<()> {
     use tokio::io::AsyncWriteExt;
 
@@ -677,6 +726,22 @@ pub async fn download_and_install_app(
     }
     file.flush().await?;
     drop(file);
+
+    // Verify the installer's integrity against the release's published SHA-256 BEFORE
+    // launching it. Running an unverified installer is the highest-risk step in the whole
+    // app, so a mismatch (corruption / tampering / MITM) must abort the update.
+    if let Some(expected) = expected_sha256.as_deref().and_then(normalize_sha256_digest) {
+        let bytes = std::fs::read(&installer_path)?;
+        let actual = sha256_hex(&bytes);
+        if actual != expected {
+            let _ = std::fs::remove_file(&installer_path);
+            return Err(anyhow!(
+                "安装包校验失败：SHA-256 与发布值不一致（期望 {}…，实际 {}…），已取消安装",
+                &expected[..8],
+                &actual[..8]
+            ));
+        }
+    }
 
     let _ = app_handle.emit("app-download-done", serde_json::json!({
         "success": true,
@@ -745,4 +810,51 @@ pub async fn download_and_install_app(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sha256_hex_matches_known_vector() {
+        // SHA-256("") and SHA-256("abc") — standard NIST test vectors.
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn normalize_digest_strips_prefix_and_lowercases() {
+        let h = "BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD";
+        assert_eq!(
+            normalize_sha256_digest(&format!("sha256:{}", h)),
+            Some(h.to_lowercase())
+        );
+        // Bare hex (no prefix) is accepted too.
+        assert_eq!(normalize_sha256_digest(h), Some(h.to_lowercase()));
+    }
+
+    #[test]
+    fn normalize_digest_rejects_malformed() {
+        assert_eq!(normalize_sha256_digest(""), None);
+        assert_eq!(normalize_sha256_digest("sha256:"), None);
+        assert_eq!(normalize_sha256_digest("sha256:deadbeef"), None); // too short
+        assert_eq!(normalize_sha256_digest("sha512:abc"), None);
+        // Non-hex characters of otherwise-correct length.
+        assert_eq!(normalize_sha256_digest(&"z".repeat(64)), None);
+    }
+
+    #[test]
+    fn release_info_deserializes_without_sha256() {
+        // Older cached ReleaseInfo (pre-digest) must still load — sha256 defaults to None.
+        let json = r#"{"version":"1.10.0","published_at":"","release_notes":"","download_url":"u"}"#;
+        let r: ReleaseInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(r.sha256, None);
+    }
 }

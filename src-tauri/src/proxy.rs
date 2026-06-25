@@ -158,10 +158,43 @@ pub fn get_system_proxy_status() -> bool {
     false
 }
 
-// ─── Other Unix (no-op) ─────────────────────────────────────────────
+// ─── Linux / other Unix (GNOME gsettings) ──────────────────────────
+//
+// GLib-based desktops (GNOME, Cinnamon, Unity, and anything honouring
+// `org.gnome.system.proxy`) read the system proxy from gsettings; GNOME itself and many
+// apps respect it. KDE/others that ignore gsettings are a known gap (see ROADMAP C2 — KDE
+// kwriteconfig + per-app env fallback is a follow-up). Calls are best-effort: a missing
+// `gsettings` (headless / minimal WM) is ignored so toggling never hard-errors.
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-pub fn set_system_proxy(_enabled: bool, _port: u16, _global_mode: bool) -> Result<()> {
+pub fn set_system_proxy(enabled: bool, port: u16, _global_mode: bool) -> Result<()> {
+    // Per-domain CN bypass (the Global-mode toggle on Windows) has no Linux equivalent
+    // here, so `global_mode` is accepted but unused — same as macOS.
+    let gset = |schema: &str, key: &str, val: &str| {
+        let _ = std::process::Command::new("gsettings")
+            .args(["set", schema, key, val])
+            .output();
+    };
+    if enabled {
+        let port_str = port.to_string();
+        // sing-box's mixed inbound serves HTTP + SOCKS on the same port.
+        gset("org.gnome.system.proxy.http", "host", "127.0.0.1");
+        gset("org.gnome.system.proxy.http", "port", &port_str);
+        gset("org.gnome.system.proxy.https", "host", "127.0.0.1");
+        gset("org.gnome.system.proxy.https", "port", &port_str);
+        gset("org.gnome.system.proxy.socks", "host", "127.0.0.1");
+        gset("org.gnome.system.proxy.socks", "port", &port_str);
+        // Always bypass loopback + RFC1918 private ranges (LAN must stay direct).
+        gset(
+            "org.gnome.system.proxy",
+            "ignore-hosts",
+            "['localhost', '127.0.0.0/8', '::1', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']",
+        );
+        // Set mode last so the host/port are in place before the desktop reads "manual".
+        gset("org.gnome.system.proxy", "mode", "manual");
+    } else {
+        gset("org.gnome.system.proxy", "mode", "none");
+    }
     Ok(())
 }
 
@@ -181,5 +214,12 @@ pub fn get_system_proxy_status() -> bool {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub fn get_system_proxy_status() -> bool {
+    // `gsettings get org.gnome.system.proxy mode` prints e.g. `'manual'` (quoted).
+    let out = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.system.proxy", "mode"])
+        .output();
+    if let Ok(out) = out {
+        return String::from_utf8_lossy(&out.stdout).trim().trim_matches('\'') == "manual";
+    }
     false
 }

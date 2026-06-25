@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from "vue";
+import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
+
+const { t } = useI18n();
 import { RefreshCw, Activity, X, Ban } from "@lucide/vue";
 
 interface ConnectionInfo {
@@ -21,6 +24,10 @@ interface ConnectionInfo {
 const connections = ref<ConnectionInfo[]>([]);
 const loading = ref(false);
 const search = ref("");
+const grouped = ref(false);
+type SortKey = "default" | "host" | "upload" | "download" | "proto";
+const sortKey = ref<SortKey>("default");
+const sortDir = ref<"asc" | "desc">("desc");
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 
 const filtered = computed(() => {
@@ -34,6 +41,84 @@ const filtered = computed(() => {
       c.chains.join("").toLowerCase().includes(q)
   );
 });
+
+// Click a sortable header: toggle direction if same key, else switch key (desc first
+// for traffic — users want the heaviest connections on top).
+function toggleSort(key: Exclude<SortKey, "default">) {
+  if (sortKey.value === key) {
+    sortDir.value = sortDir.value === "asc" ? "desc" : "asc";
+  } else {
+    sortKey.value = key;
+    sortDir.value = key === "host" || key === "proto" ? "asc" : "desc";
+  }
+}
+
+const sorted = computed(() => {
+  if (sortKey.value === "default") return filtered.value;
+  const dir = sortDir.value === "asc" ? 1 : -1;
+  const key = sortKey.value;
+  return [...filtered.value].sort((a, b) => {
+    let r = 0;
+    if (key === "upload") r = a.upload - b.upload;
+    else if (key === "download") r = a.download - b.download;
+    else if (key === "host") r = (a.host || a.destination).localeCompare(b.host || b.destination);
+    else if (key === "proto") r = a.network.localeCompare(b.network);
+    return r * dir;
+  });
+});
+
+// Live totals across the currently-filtered connections.
+const totals = computed(() =>
+  filtered.value.reduce(
+    (acc, c) => ({ upload: acc.upload + c.upload, download: acc.download + c.download }),
+    { upload: 0, download: 0 }
+  )
+);
+
+interface HostGroup {
+  host: string;
+  count: number;
+  upload: number;
+  download: number;
+  proxied: boolean;
+  ids: string[];
+}
+
+// Group filtered connections by host (or destination when host is empty), summing
+// traffic — useful when one site opens dozens of connections.
+const hostGroups = computed<HostGroup[]>(() => {
+  const map = new Map<string, HostGroup>();
+  for (const c of filtered.value) {
+    const host = c.host || c.destination;
+    const g = map.get(host) ?? {
+      host,
+      count: 0,
+      upload: 0,
+      download: 0,
+      proxied: isProxy(c.chains),
+      ids: [],
+    };
+    g.count += 1;
+    g.upload += c.upload;
+    g.download += c.download;
+    g.ids.push(c.id);
+    map.set(host, g);
+  }
+  const arr = [...map.values()];
+  // Default heaviest-first; honour the active sort when it applies to a group field.
+  const dir = sortDir.value === "asc" ? 1 : -1;
+  arr.sort((a, b) => {
+    if (sortKey.value === "host") return a.host.localeCompare(b.host) * dir;
+    if (sortKey.value === "upload") return (a.upload - b.upload) * dir;
+    return (b.download + b.upload) - (a.download + a.upload);
+  });
+  return arr;
+});
+
+async function closeHostGroup(g: HostGroup) {
+  await Promise.allSettled(g.ids.map((id) => invoke("cmd_close_connection", { id })));
+  connections.value = connections.value.filter((c) => !g.ids.includes(c.id));
+}
 
 const formatBytes = (b: number) => {
   if (b < 1024) return `${b}B`;
@@ -105,45 +190,105 @@ onUnmounted(() => {
 <template>
   <div class="page">
     <div class="page-header">
-      <h1 class="page-title">活动连接</h1>
+      <h1 class="page-title">{{ t('connections.title') }}</h1>
       <div class="header-actions">
-        <span class="conn-count">{{ connections.length }} 个连接</span>
+        <span class="conn-count">{{ t('connections.connCount', { count: connections.length }) }}</span>
+        <span class="conn-total">
+          {{ t('connections.total') }}
+          <span class="upload-val">↑ {{ formatBytes(totals.upload) }}</span>
+          <span class="download-val">↓ {{ formatBytes(totals.download) }}</span>
+        </span>
+        <div class="view-tabs">
+          <button class="view-tab" :class="{ active: !grouped }" @click="grouped = false">
+            {{ t('connections.viewList') }}
+          </button>
+          <button class="view-tab" :class="{ active: grouped }" @click="grouped = true">
+            {{ t('connections.viewGrouped') }}
+          </button>
+        </div>
         <button class="btn btn-ghost" @click="closeAll" :disabled="connections.length === 0">
           <Ban :size="14" />
-          关闭全部
+          {{ t('connections.closeAll') }}
         </button>
         <button class="btn btn-ghost" @click="fetchConnections" :disabled="loading">
           <RefreshCw :size="14" :class="{ spin: loading }" />
-          刷新
+          {{ t('connections.refresh') }}
         </button>
       </div>
     </div>
 
-    <input class="input" v-model="search" placeholder="搜索主机、目标、规则..." style="max-width: 400px" />
+    <input class="input" v-model="search" :placeholder="t('connections.searchPlaceholder')" style="max-width: 400px" />
 
     <div v-if="connections.length === 0 && !loading" class="empty-state">
       <Activity :size="36" class="empty-icon" />
-      <div class="empty-title">暂无活动连接</div>
-      <div class="empty-desc">代理运行后将在此显示实时连接信息</div>
+      <div class="empty-title">{{ t('connections.emptyTitle') }}</div>
+      <div class="empty-desc">{{ t('connections.emptyDesc') }}</div>
+    </div>
+    <div v-else-if="filtered.length === 0 && search" class="empty-state">
+      <Activity :size="36" class="empty-icon" />
+      <div class="empty-title">{{ t('connections.noResult', { q: search }) }}</div>
     </div>
 
-    <div class="conn-table-wrapper">
-      <table v-if="filtered.length > 0" class="conn-table">
+    <!-- Grouped-by-host view -->
+    <div v-else-if="grouped" class="conn-table-wrapper">
+      <table class="conn-table">
         <thead>
           <tr>
-            <th class="col-host">主机</th>
-            <th class="col-port">端口</th>
-            <th class="col-rule">规则</th>
-            <th class="col-chain">代理链</th>
-            <th class="col-traffic">上传</th>
-            <th class="col-traffic">下载</th>
-            <th class="col-proto">协议</th>
+            <th class="col-host sortable" @click="toggleSort('host')">
+              {{ t('connections.colHost') }}<span v-if="sortKey === 'host'" class="sort-arrow">{{ sortDir === 'asc' ? '▲' : '▼' }}</span>
+            </th>
+            <th class="col-port">{{ t('connections.colCount') }}</th>
+            <th class="col-traffic sortable" @click="toggleSort('upload')">
+              {{ t('connections.colUpload') }}<span v-if="sortKey === 'upload'" class="sort-arrow">{{ sortDir === 'asc' ? '▲' : '▼' }}</span>
+            </th>
+            <th class="col-traffic sortable" @click="toggleSort('download')">
+              {{ t('connections.colDownload') }}<span v-if="sortKey === 'download'" class="sort-arrow">{{ sortDir === 'asc' ? '▲' : '▼' }}</span>
+            </th>
+            <th class="col-close"></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="g in hostGroups" :key="g.host" :class="{ 'row-proxy': g.proxied, 'row-direct': !g.proxied }">
+            <td class="col-host"><span class="host" :title="g.host">{{ g.host }}</span></td>
+            <td class="col-port text-muted">{{ g.count }}</td>
+            <td class="col-traffic upload-val">↑ {{ formatBytes(g.upload) }}</td>
+            <td class="col-traffic download-val">↓ {{ formatBytes(g.download) }}</td>
+            <td class="col-close">
+              <button class="close-btn" :title="t('connections.closeHost')" @click="closeHostGroup(g)">
+                <X :size="13" />
+              </button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Flat list view -->
+    <div v-else class="conn-table-wrapper">
+      <table v-if="sorted.length > 0" class="conn-table">
+        <thead>
+          <tr>
+            <th class="col-host sortable" @click="toggleSort('host')">
+              {{ t('connections.colHost') }}<span v-if="sortKey === 'host'" class="sort-arrow">{{ sortDir === 'asc' ? '▲' : '▼' }}</span>
+            </th>
+            <th class="col-port">{{ t('connections.colPort') }}</th>
+            <th class="col-rule">{{ t('connections.colRule') }}</th>
+            <th class="col-chain">{{ t('connections.colChain') }}</th>
+            <th class="col-traffic sortable" @click="toggleSort('upload')">
+              {{ t('connections.colUpload') }}<span v-if="sortKey === 'upload'" class="sort-arrow">{{ sortDir === 'asc' ? '▲' : '▼' }}</span>
+            </th>
+            <th class="col-traffic sortable" @click="toggleSort('download')">
+              {{ t('connections.colDownload') }}<span v-if="sortKey === 'download'" class="sort-arrow">{{ sortDir === 'asc' ? '▲' : '▼' }}</span>
+            </th>
+            <th class="col-proto sortable" @click="toggleSort('proto')">
+              {{ t('connections.colProto') }}<span v-if="sortKey === 'proto'" class="sort-arrow">{{ sortDir === 'asc' ? '▲' : '▼' }}</span>
+            </th>
             <th class="col-close"></th>
           </tr>
         </thead>
         <tbody>
           <tr
-            v-for="conn in filtered"
+            v-for="conn in sorted"
             :key="conn.id"
             :class="{ 'row-proxy': isProxy(conn.chains), 'row-direct': !isProxy(conn.chains) }"
           >
@@ -171,7 +316,7 @@ onUnmounted(() => {
               <span class="proto-tag">{{ conn.network.toUpperCase() }}</span>
             </td>
             <td class="col-close">
-              <button class="close-btn" title="关闭此连接" @click="closeConnection(conn.id)">
+              <button class="close-btn" :title="t('connections.closeConn')" @click="closeConnection(conn.id)">
                 <X :size="13" />
               </button>
             </td>
@@ -188,6 +333,18 @@ onUnmounted(() => {
 .page-title { font-size: 20px; font-weight: 600; }
 .header-actions { display: flex; align-items: center; gap: 8px; }
 .conn-count { font-size: 12px; color: var(--color-text-secondary); }
+.conn-total { font-size: 12px; color: var(--color-text-secondary); display: inline-flex; gap: 6px; align-items: center; }
+
+.view-tabs { display: flex; gap: 2px; background: var(--color-bg-secondary, rgba(128,128,128,0.1)); border-radius: 8px; padding: 2px; }
+.view-tab {
+  border: none; background: transparent; cursor: pointer; font-size: 12px;
+  padding: 4px 10px; border-radius: 6px; color: var(--color-text-secondary);
+}
+.view-tab.active { background: var(--color-surface); color: var(--color-text); box-shadow: 0 1px 2px rgba(0,0,0,0.08); }
+
+.sortable { cursor: pointer; user-select: none; }
+.sortable:hover { color: var(--color-text); }
+.sort-arrow { margin-left: 3px; font-size: 9px; }
 
 .empty-state {
   display: flex; flex-direction: column; align-items: center; gap: 10px;

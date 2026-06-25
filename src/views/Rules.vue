@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
+
+const { t } = useI18n();
 import {
   Plus, Trash2, ToggleLeft, ToggleRight, ChevronDown, ChevronUp,
-  Filter, Globe, Layers, BookMarked, Info, RotateCcw
+  Filter, Globe, Layers, BookMarked, Info, RotateCcw, GripVertical
 } from "@lucide/vue";
 
 // ─── Types ───────────────────────────────────────────────────────────
@@ -86,20 +89,20 @@ function splitInput(s: string): string[] {
 // ─── Presets ─────────────────────────────────────────────────────────
 
 const presets = [
-  { label: "拦截广告",             action: "block"  as RuleAction, geosite: ["category-ads-all"] },
-  { label: "私有地址直连",          action: "direct" as RuleAction, geoip: ["private"] },
-  { label: "中国大陆直连",          action: "direct" as RuleAction, geosite: ["cn"], geoip: ["cn"] },
-  { label: "Telegram",            action: "proxy"  as RuleAction, geosite: ["telegram"], geoip: ["telegram"] },
-  { label: "Google",              action: "proxy"  as RuleAction, geosite: ["google"], geoip: ["google"] },
-  { label: "YouTube",             action: "proxy"  as RuleAction, geosite: ["youtube"] },
-  { label: "GitHub",              action: "proxy"  as RuleAction, geosite: ["github"] },
-  { label: "Twitter / X",         action: "proxy"  as RuleAction, geosite: ["twitter"], geoip: ["twitter"] },
-  { label: "Netflix",             action: "proxy"  as RuleAction, geosite: ["netflix"], domain_suffix: ["netflix.com", "nflxvideo.net", "nflximg.net"] },
-  { label: "AI 服务",              action: "proxy"  as RuleAction, domain_suffix: ["openai.com", "chatgpt.com", "anthropic.com", "claude.ai"] },
-  { label: "Steam 游戏",           action: "proxy"  as RuleAction, geosite: ["steam"] },
-  { label: "苹果服务直连",           action: "direct" as RuleAction, geosite: ["apple"] },
-  { label: "微软服务直连",           action: "direct" as RuleAction, geosite: ["microsoft"] },
-  { label: "哔哩哔哩直连",           action: "direct" as RuleAction, geosite: ["bilibili"] },
+  { labelKey: "presetBlockAds",     action: "block"  as RuleAction, geosite: ["category-ads-all"] },
+  { labelKey: "presetPrivateDirect",action: "direct" as RuleAction, geoip: ["private"] },
+  { labelKey: "presetChinaDirect",  action: "direct" as RuleAction, geosite: ["cn"], geoip: ["cn"] },
+  { labelKey: "presetTelegram",     action: "proxy"  as RuleAction, geosite: ["telegram"], geoip: ["telegram"] },
+  { labelKey: "presetGoogle",       action: "proxy"  as RuleAction, geosite: ["google"], geoip: ["google"] },
+  { labelKey: "presetYoutube",      action: "proxy"  as RuleAction, geosite: ["youtube"] },
+  { labelKey: "presetGithub",       action: "proxy"  as RuleAction, geosite: ["github"] },
+  { labelKey: "presetTwitter",      action: "proxy"  as RuleAction, geosite: ["twitter"], geoip: ["twitter"] },
+  { labelKey: "presetNetflix",      action: "proxy"  as RuleAction, geosite: ["netflix"], domain_suffix: ["netflix.com", "nflxvideo.net", "nflximg.net"] },
+  { labelKey: "presetAiServices",   action: "proxy"  as RuleAction, domain_suffix: ["openai.com", "chatgpt.com", "anthropic.com", "claude.ai"] },
+  { labelKey: "presetSteam",        action: "proxy"  as RuleAction, geosite: ["steam"] },
+  { labelKey: "presetAppleDirect",  action: "direct" as RuleAction, geosite: ["apple"] },
+  { labelKey: "presetMicrosoftDirect",action: "direct" as RuleAction, geosite: ["microsoft"] },
+  { labelKey: "presetBilibiliDirect",action: "direct" as RuleAction, geosite: ["bilibili"] },
 ];
 
 // ─── Computed ────────────────────────────────────────────────────────
@@ -111,24 +114,27 @@ const actionColor: Record<RuleAction, string> = {
   dns: "badge-gray",
 };
 
-const actionLabel: Record<RuleAction, string> = {
-  proxy: "代理",
-  direct: "直连",
-  block: "拦截",
-  dns: "DNS",
+const actionLabelKey: Record<RuleAction, string> = {
+  proxy: "actionProxy",
+  direct: "actionDirect",
+  block: "actionBlock",
+  dns: "actionDns",
 };
+function actionLabel(action: RuleAction): string {
+  return t(`rules.${actionLabelKey[action]}`);
+}
 
 function matchSummary(rule: RouteRule): string {
   const parts: string[] = [];
   if (rule.geosite.length) parts.push(`GeoSite: ${rule.geosite.join(", ")}`);
   if (rule.geoip.length) parts.push(`GeoIP: ${rule.geoip.join(", ")}`);
-  if (rule.domain.length) parts.push(`域名: ${rule.domain.slice(0, 2).join(", ")}${rule.domain.length > 2 ? "…" : ""}`);
-  if (rule.domain_suffix.length) parts.push(`后缀: ${rule.domain_suffix.slice(0, 2).join(", ")}${rule.domain_suffix.length > 2 ? "…" : ""}`);
-  if (rule.domain_keyword.length) parts.push(`关键词: ${rule.domain_keyword.join(", ")}`);
+  if (rule.domain.length) parts.push(`${t("rules.summaryDomain")}: ${rule.domain.slice(0, 2).join(", ")}${rule.domain.length > 2 ? "…" : ""}`);
+  if (rule.domain_suffix.length) parts.push(`${t("rules.summarySuffix")}: ${rule.domain_suffix.slice(0, 2).join(", ")}${rule.domain_suffix.length > 2 ? "…" : ""}`);
+  if (rule.domain_keyword.length) parts.push(`${t("rules.summaryKeyword")}: ${rule.domain_keyword.join(", ")}`);
   if (rule.ip_cidr.length) parts.push(`IP: ${rule.ip_cidr.join(", ")}`);
-  if (rule.port.length) parts.push(`端口: ${rule.port.join(", ")}`);
-  if (rule.process_name.length) parts.push(`进程: ${rule.process_name.join(", ")}`);
-  return parts.join(" · ") || "（无匹配条件）";
+  if (rule.port.length) parts.push(`${t("rules.summaryPort")}: ${rule.port.join(", ")}`);
+  if (rule.process_name.length) parts.push(`${t("rules.summaryProcess")}: ${rule.process_name.join(", ")}`);
+  return parts.join(" · ") || t("rules.summaryEmpty");
 }
 
 // ─── Actions ─────────────────────────────────────────────────────────
@@ -147,7 +153,7 @@ async function toggleRule(id: string) {
 }
 
 async function deleteRule(id: string) {
-  if (!confirm("确认删除此规则？")) return;
+  if (!confirm(t("rules.confirmDeleteRule"))) return;
   rules.value = await invoke<RouteRule[]>("cmd_delete_rule", { id });
   if (expandedId.value === id) expandedId.value = null;
 }
@@ -162,14 +168,14 @@ async function saveAll() {
 }
 
 async function resetToDefault() {
-  if (!confirm("将恢复所有默认分流规则，当前规则会被覆盖。确认继续？")) return;
+  if (!confirm(t("rules.confirmReset"))) return;
   rules.value = await invoke<RouteRule[]>("cmd_reset_rules");
 }
 
 async function applyPreset(preset: typeof presets[0]) {
   const rule: RouteRule = {
     id: crypto.randomUUID(),
-    name: preset.label,
+    name: t(`rules.${preset.labelKey}`),
     enabled: true,
     action: preset.action,
     domain: [],
@@ -229,6 +235,33 @@ function moveDown(index: number) {
   [rules.value[index], rules.value[index + 1]] = [rules.value[index + 1], rules.value[index]];
 }
 
+// ─── Drag-to-reorder ────────────────────────────────────────────────
+// Rules match top-down, so order = priority. Dragging a row to a new position is a more
+// ergonomic alternative to the up/down buttons. Like those, it only mutates the local
+// list — the new order is applied to the core when the user clicks "Save & Apply".
+const dragIndex = ref<number | null>(null);
+const dragOverIndex = ref<number | null>(null);
+
+function onDragStart(index: number) {
+  dragIndex.value = index;
+}
+function onDragOver(index: number) {
+  // Must run on dragover (and preventDefault in the template) for drop to fire.
+  dragOverIndex.value = index;
+}
+function onDrop(target: number) {
+  const from = dragIndex.value;
+  dragIndex.value = null;
+  dragOverIndex.value = null;
+  if (from === null || from === target) return;
+  const [moved] = rules.value.splice(from, 1);
+  rules.value.splice(target, 0, moved);
+}
+function onDragEnd() {
+  dragIndex.value = null;
+  dragOverIndex.value = null;
+}
+
 // ─── Rule provider actions ───────────────────────────────────────────
 async function loadProviders() {
   providers.value = await invoke<RuleProvider[]>("cmd_get_rule_providers");
@@ -250,7 +283,7 @@ async function addProvider() {
 }
 
 async function deleteProvider(id: string) {
-  if (!confirm("确认删除此规则集？")) return;
+  if (!confirm(t("rules.confirmDeleteProvider"))) return;
   providers.value = await invoke<RuleProvider[]>("cmd_delete_rule_provider", { id });
 }
 
@@ -268,20 +301,20 @@ onMounted(() => {
   <div class="page">
     <div class="page-header">
       <div>
-        <h1 class="page-title">分流规则</h1>
-        <p class="page-subtitle">规则按顺序匹配，第一条匹配的规则生效</p>
+        <h1 class="page-title">{{ t("rules.pageTitle") }}</h1>
+        <p class="page-subtitle">{{ t("rules.pageSubtitle") }}</p>
       </div>
       <div class="header-actions">
-        <button class="btn btn-ghost" @click="resetToDefault" title="恢复所有默认规则">
+        <button class="btn btn-ghost" @click="resetToDefault" :title="t('rules.resetTooltip')">
           <RotateCcw :size="13" />
-          恢复默认
+          {{ t("rules.resetDefault") }}
         </button>
         <button class="btn btn-ghost" @click="showAddDialog = true">
           <Plus :size="14" />
-          添加规则
+          {{ t("rules.addRule") }}
         </button>
         <button class="btn btn-primary" :disabled="saving" @click="saveAll">
-          {{ saving ? "保存中..." : "保存并应用" }}
+          {{ saving ? t("rules.saving") : t("rules.saveApply") }}
         </button>
       </div>
     </div>
@@ -290,18 +323,18 @@ onMounted(() => {
     <div class="card preset-card">
       <div class="preset-label">
         <BookMarked :size="13" />
-        <span>快速添加预设</span>
+        <span>{{ t("rules.quickAddPreset") }}</span>
       </div>
       <div class="preset-list">
         <button
           v-for="p in presets"
-          :key="p.label"
+          :key="p.labelKey"
           class="preset-btn"
           :class="`preset-${p.action}`"
           @click="applyPreset(p)"
         >
-          <span class="preset-action">{{ actionLabel[p.action] }}</span>
-          {{ p.label }}
+          <span class="preset-action">{{ actionLabel(p.action) }}</span>
+          {{ t(`rules.${p.labelKey}`) }}
         </button>
       </div>
     </div>
@@ -311,32 +344,32 @@ onMounted(() => {
       <div class="provider-head">
         <div class="preset-label">
           <Globe :size="13" />
-          <span>远程规则集</span>
+          <span>{{ t("rules.remoteRuleSet") }}</span>
         </div>
         <button class="btn btn-ghost btn-sm" @click="showProviderDialog = true">
           <Plus :size="13" />
-          添加规则集
+          {{ t("rules.addRuleSet") }}
         </button>
       </div>
       <p class="provider-hint">
-        订阅远程 sing-box 规则集（.srs / .json），命中后按指定动作分流。通过代理下载并每日更新。
+        {{ t("rules.providerHint") }}
       </p>
-      <div v-if="providers.length === 0" class="provider-empty">暂无远程规则集</div>
+      <div v-if="providers.length === 0" class="provider-empty">{{ t("rules.noRemoteRuleSet") }}</div>
       <div v-else class="provider-list">
         <div v-for="p in providers" :key="p.id" class="provider-item" :class="{ disabled: !p.enabled }">
-          <button class="toggle-btn" :title="p.enabled ? '点击禁用' : '点击启用'" @click="toggleProvider(p.id)">
+          <button class="toggle-btn" :title="p.enabled ? t('rules.clickDisable') : t('rules.clickEnable')" @click="toggleProvider(p.id)">
             <ToggleRight v-if="p.enabled" :size="18" class="toggle-on" />
             <ToggleLeft v-else :size="18" class="toggle-off" />
           </button>
           <div class="provider-info">
             <div class="provider-name">
               {{ p.name }}
-              <span class="provider-badge" :class="`preset-${p.action}`">{{ actionLabel[p.action] }}</span>
+              <span class="provider-badge" :class="`preset-${p.action}`">{{ actionLabel(p.action) }}</span>
               <span class="provider-fmt">{{ p.format === "source" ? "JSON" : "SRS" }}</span>
             </div>
             <div class="provider-url" :title="p.url">{{ p.url }}</div>
           </div>
-          <button class="icon-btn danger" title="删除" @click="deleteProvider(p.id)">
+          <button class="icon-btn danger" :title="t('rules.delete')" @click="deleteProvider(p.id)">
             <Trash2 :size="14" />
           </button>
         </div>
@@ -345,34 +378,34 @@ onMounted(() => {
 
     <!-- Add provider dialog -->
     <div v-if="showProviderDialog" class="card add-dialog">
-      <div class="dialog-title">添加远程规则集</div>
+      <div class="dialog-title">{{ t("rules.addRemoteRuleSet") }}</div>
       <div class="form-group">
-        <label class="form-label">名称</label>
-        <input class="input" v-model="newProviderName" placeholder="例如：广告拦截" @keyup.enter="addProvider" />
+        <label class="form-label">{{ t("rules.name") }}</label>
+        <input class="input" v-model="newProviderName" :placeholder="t('rules.namePlaceholder')" @keyup.enter="addProvider" />
       </div>
       <div class="form-group">
-        <label class="form-label">规则集地址</label>
-        <input class="input" v-model="newProviderUrl" placeholder="https://.../ruleset.srs（支持 .srs / .json）" @keyup.enter="addProvider" />
+        <label class="form-label">{{ t("rules.ruleSetUrl") }}</label>
+        <input class="input" v-model="newProviderUrl" :placeholder="t('rules.ruleSetUrlPlaceholder')" @keyup.enter="addProvider" />
       </div>
       <div class="form-group">
-        <label class="form-label">命中动作</label>
+        <label class="form-label">{{ t("rules.hitAction") }}</label>
         <select class="input" v-model="newProviderAction">
-          <option value="proxy">代理</option>
-          <option value="direct">直连</option>
-          <option value="block">拦截</option>
+          <option value="proxy">{{ t("rules.actionProxy") }}</option>
+          <option value="direct">{{ t("rules.actionDirect") }}</option>
+          <option value="block">{{ t("rules.actionBlock") }}</option>
         </select>
       </div>
       <div class="dialog-actions">
-        <button class="btn btn-ghost" @click="showProviderDialog = false">取消</button>
-        <button class="btn btn-primary" @click="addProvider">添加</button>
+        <button class="btn btn-ghost" @click="showProviderDialog = false">{{ t("rules.cancel") }}</button>
+        <button class="btn btn-primary" @click="addProvider">{{ t("rules.add") }}</button>
       </div>
     </div>
 
     <!-- Rules List -->
     <div v-if="rules.length === 0 && !loading" class="empty-state">
       <Filter :size="36" class="empty-icon" />
-      <div class="empty-title">暂无规则</div>
-      <div class="empty-desc">添加规则或使用上方预设快速开始</div>
+      <div class="empty-title">{{ t("rules.emptyTitle") }}</div>
+      <div class="empty-desc">{{ t("rules.emptyDesc") }}</div>
     </div>
 
     <div class="rules-list">
@@ -380,14 +413,24 @@ onMounted(() => {
         v-for="(rule, index) in rules"
         :key="rule.id"
         class="card rule-item"
-        :class="{ disabled: !rule.enabled }"
+        :class="{
+          disabled: !rule.enabled,
+          dragging: dragIndex === index,
+          'drag-over': dragOverIndex === index && dragIndex !== index,
+        }"
+        draggable="true"
+        @dragstart="onDragStart(index)"
+        @dragover.prevent="onDragOver(index)"
+        @drop="onDrop(index)"
+        @dragend="onDragEnd"
       >
         <!-- Rule Header -->
         <div class="rule-header" @click="expandedId = expandedId === rule.id ? null : rule.id">
+          <GripVertical :size="14" class="drag-handle" :title="t('rules.dragHint')" @click.stop />
           <div class="rule-order">{{ index + 1 }}</div>
           <button
             class="toggle-btn"
-            :title="rule.enabled ? '点击禁用' : '点击启用'"
+            :title="rule.enabled ? t('rules.clickDisable') : t('rules.clickEnable')"
             @click.stop="toggleRule(rule.id)"
           >
             <ToggleRight v-if="rule.enabled" :size="20" class="toggle-on" />
@@ -398,16 +441,16 @@ onMounted(() => {
             <div class="rule-summary">{{ matchSummary(rule) }}</div>
           </div>
           <span class="badge" :class="actionColor[rule.action]">
-            {{ actionLabel[rule.action] }}
+            {{ actionLabel(rule.action) }}
           </span>
           <div class="rule-controls">
-            <button class="icon-btn" title="上移" @click.stop="moveUp(index)">
+            <button class="icon-btn" :title="t('rules.moveUp')" @click.stop="moveUp(index)">
               <ChevronUp :size="14" />
             </button>
-            <button class="icon-btn" title="下移" @click.stop="moveDown(index)">
+            <button class="icon-btn" :title="t('rules.moveDown')" @click.stop="moveDown(index)">
               <ChevronDown :size="14" />
             </button>
-            <button class="icon-btn danger" title="删除" @click.stop="deleteRule(rule.id)">
+            <button class="icon-btn danger" :title="t('rules.delete')" @click.stop="deleteRule(rule.id)">
               <Trash2 :size="13" />
             </button>
           </div>
@@ -426,15 +469,15 @@ onMounted(() => {
                 <div class="detail-val">{{ rule.geoip.join(", ") }}</div>
               </template>
               <template v-if="rule.domain.length">
-                <div class="detail-key">域名（精确）</div>
+                <div class="detail-key">{{ t("rules.detailDomain") }}</div>
                 <div class="detail-val">{{ rule.domain.join(", ") }}</div>
               </template>
               <template v-if="rule.domain_suffix.length">
-                <div class="detail-key">域名后缀</div>
+                <div class="detail-key">{{ t("rules.detailDomainSuffix") }}</div>
                 <div class="detail-val">{{ rule.domain_suffix.join(", ") }}</div>
               </template>
               <template v-if="rule.domain_keyword.length">
-                <div class="detail-key">域名关键词</div>
+                <div class="detail-key">{{ t("rules.detailDomainKeyword") }}</div>
                 <div class="detail-val">{{ rule.domain_keyword.join(", ") }}</div>
               </template>
               <template v-if="rule.ip_cidr.length">
@@ -442,15 +485,15 @@ onMounted(() => {
                 <div class="detail-val">{{ rule.ip_cidr.join(", ") }}</div>
               </template>
               <template v-if="rule.port.length">
-                <div class="detail-key">端口</div>
+                <div class="detail-key">{{ t("rules.detailPort") }}</div>
                 <div class="detail-val">{{ rule.port.join(", ") }}</div>
               </template>
               <template v-if="rule.network">
-                <div class="detail-key">协议</div>
+                <div class="detail-key">{{ t("rules.detailNetwork") }}</div>
                 <div class="detail-val">{{ rule.network }}</div>
               </template>
               <template v-if="rule.process_name.length">
-                <div class="detail-key">进程名</div>
+                <div class="detail-key">{{ t("rules.detailProcess") }}</div>
                 <div class="detail-val">{{ rule.process_name.join(", ") }}</div>
               </template>
             </div>
@@ -464,54 +507,54 @@ onMounted(() => {
       <div class="dialog card-strong">
         <div class="dialog-title">
           <Plus :size="16" />
-          添加分流规则
+          {{ t("rules.addRuleDialogTitle") }}
         </div>
 
         <div class="dialog-form">
           <div class="form-row">
             <div class="form-group half">
-              <label class="form-label">规则名称 *</label>
-              <input class="input" v-model="newRule.name" placeholder="例如：Netflix 代理" />
+              <label class="form-label">{{ t("rules.ruleName") }}</label>
+              <input class="input" v-model="newRule.name" :placeholder="t('rules.ruleNamePlaceholder')" />
             </div>
             <div class="form-group half">
-              <label class="form-label">动作</label>
+              <label class="form-label">{{ t("rules.action") }}</label>
               <select class="input" v-model="newRule.action">
-                <option value="proxy">代理</option>
-                <option value="direct">直连</option>
-                <option value="block">拦截</option>
-                <option value="dns">DNS 处理</option>
+                <option value="proxy">{{ t("rules.actionProxy") }}</option>
+                <option value="direct">{{ t("rules.actionDirect") }}</option>
+                <option value="block">{{ t("rules.actionBlock") }}</option>
+                <option value="dns">{{ t("rules.actionDnsHandle") }}</option>
               </select>
             </div>
           </div>
 
           <div class="form-section-title">
             <Info :size="12" />
-            匹配条件（至少填写一个，多个值用逗号或换行分隔）
+            {{ t("rules.matchConditionsHint") }}
           </div>
 
           <div class="form-row">
             <div class="form-group half">
-              <label class="form-label">GeoSite 标签</label>
+              <label class="form-label">{{ t("rules.geositeLabel") }}</label>
               <input class="input" v-model="newGeosite" placeholder="cn, google, telegram" />
             </div>
             <div class="form-group half">
-              <label class="form-label">GeoIP 国家码</label>
+              <label class="form-label">{{ t("rules.geoipLabel") }}</label>
               <input class="input" v-model="newGeoip" placeholder="cn, private, telegram" />
             </div>
           </div>
           <div class="form-row">
             <div class="form-group half">
-              <label class="form-label">域名（精确匹配）</label>
+              <label class="form-label">{{ t("rules.domainExact") }}</label>
               <textarea class="input textarea-sm" v-model="newDomain" placeholder="example.com&#10;another.com" />
             </div>
             <div class="form-group half">
-              <label class="form-label">域名后缀</label>
+              <label class="form-label">{{ t("rules.domainSuffix") }}</label>
               <textarea class="input textarea-sm" v-model="newDomainSuffix" placeholder=".netflix.com&#10;.google.com" />
             </div>
           </div>
           <div class="form-row">
             <div class="form-group half">
-              <label class="form-label">域名关键词</label>
+              <label class="form-label">{{ t("rules.domainKeyword") }}</label>
               <input class="input" v-model="newDomainKeyword" placeholder="google, openai" />
             </div>
             <div class="form-group half">
@@ -521,19 +564,19 @@ onMounted(() => {
           </div>
           <div class="form-row">
             <div class="form-group half">
-              <label class="form-label">端口（支持范围 80-90）</label>
+              <label class="form-label">{{ t("rules.portLabel") }}</label>
               <input class="input" v-model="newPort" placeholder="80, 443, 8080-8090" />
             </div>
             <div class="form-group half">
-              <label class="form-label">进程名（Windows）</label>
+              <label class="form-label">{{ t("rules.processNameLabel") }}</label>
               <input class="input" v-model="newProcessName" placeholder="chrome.exe, steam.exe" />
             </div>
           </div>
           <div class="form-row">
             <div class="form-group half">
-              <label class="form-label">网络协议</label>
+              <label class="form-label">{{ t("rules.networkProtocol") }}</label>
               <select class="input" v-model="newRule.network">
-                <option :value="null">不限</option>
+                <option :value="null">{{ t("rules.networkAny") }}</option>
                 <option value="tcp">TCP</option>
                 <option value="udp">UDP</option>
               </select>
@@ -542,10 +585,10 @@ onMounted(() => {
         </div>
 
         <div class="dialog-actions">
-          <button class="btn btn-ghost" @click="showAddDialog = false; resetNewRule()">取消</button>
+          <button class="btn btn-ghost" @click="showAddDialog = false; resetNewRule()">{{ t("rules.cancel") }}</button>
           <button class="btn btn-primary" @click="addRule" :disabled="!newRule.name.trim()">
             <Plus :size="13" />
-            添加规则
+            {{ t("rules.addRule") }}
           </button>
         </div>
       </div>
@@ -554,7 +597,7 @@ onMounted(() => {
     <!-- Rule order note -->
     <div class="order-note">
       <Info :size="12" />
-      规则按列表顺序依次匹配。修改顺序后点击「保存并应用」生效；代理运行中需重启才能使新规则生效。
+      {{ t("rules.orderNote") }}
     </div>
   </div>
 </template>
@@ -601,6 +644,14 @@ onMounted(() => {
 .rules-list { display: flex; flex-direction: column; gap: 6px; }
 .rule-item { overflow: hidden; }
 .rule-item.disabled { opacity: 0.55; }
+.rule-item.dragging { opacity: 0.4; }
+.rule-item.drag-over { box-shadow: 0 -2px 0 0 var(--color-primary) inset, 0 0 0 1px var(--color-primary); }
+.drag-handle {
+  color: var(--color-text-muted); cursor: grab; flex-shrink: 0;
+  opacity: 0.5; transition: opacity 0.12s;
+}
+.drag-handle:hover { opacity: 1; }
+.rule-item:active .drag-handle { cursor: grabbing; }
 .rule-header {
   display: flex; align-items: center; gap: 10px;
   padding: 12px 14px; cursor: pointer;

@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { ref, nextTick, onMounted } from "vue";
 import {
-  Plus, RefreshCw, Trash2, QrCode, Clock, Server, AlertCircle, X, Copy, Check as CheckIcon, Zap
+  Plus, RefreshCw, Trash2, QrCode, Clock, Server, AlertCircle, X, Copy, Check as CheckIcon, Zap, Filter
 } from "@lucide/vue";
 import QRCode from "qrcode";
+import { useI18n } from "vue-i18n";
 import { useAppStore } from "../stores/app";
 
+const { t } = useI18n();
 const store = useAppStore();
 
 onMounted(() => {
@@ -18,23 +20,26 @@ const addMode = ref<"url" | "text">("url");
 const newSubName = ref("");
 const newSubUrl = ref("");
 const newSubContent = ref("");
+const newSubInclude = ref("");
+const newSubExclude = ref("");
+const newSubGroupRegion = ref(false);
 const addLoading = ref(false);
 const addError = ref("");
 const updatingId = ref<string | null>(null);
 
 const formatDate = (iso?: string) => {
-  if (!iso) return "从未";
+  if (!iso) return t("subscriptions.never");
   const d = new Date(iso);
   const now = new Date();
   const diff = now.getTime() - d.getTime();
-  if (diff < 60000) return "刚刚";
-  if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`;
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`;
+  if (diff < 60000) return t("subscriptions.justNow");
+  if (diff < 3600000) return t("subscriptions.minutesAgo", { n: Math.floor(diff / 60000) });
+  if (diff < 86400000) return t("subscriptions.hoursAgo", { n: Math.floor(diff / 3600000) });
   return d.toLocaleDateString();
 };
 
 const subTypeLabel = (type: string) => {
-  const map: Record<string, string> = { clash: "Clash", v2ray: "V2Ray", sip008: "SIP008", unknown: "未知" };
+  const map: Record<string, string> = { clash: "Clash", v2ray: "V2Ray", sip008: "SIP008", unknown: t("subscriptions.unknown") };
   return map[type] ?? type;
 };
 
@@ -90,24 +95,29 @@ function formatExpire(expire?: number): { text: string; expired: boolean } {
 async function addSub() {
   const name = newSubName.value.trim();
   if (!name) {
-    addError.value = "请填写名称";
+    addError.value = t("subscriptions.errNameRequired");
     return;
   }
   if (addMode.value === "url" && !newSubUrl.value.trim()) {
-    addError.value = "请填写订阅链接";
+    addError.value = t("subscriptions.errUrlRequired");
     return;
   }
   if (addMode.value === "text" && !newSubContent.value.trim()) {
-    addError.value = "请粘贴节点内容";
+    addError.value = t("subscriptions.errContentRequired");
     return;
   }
   addLoading.value = true;
   addError.value = "";
   try {
+    const filters = {
+      include: newSubInclude.value.trim() || null,
+      exclude: newSubExclude.value.trim() || null,
+      groupByRegion: newSubGroupRegion.value,
+    };
     if (addMode.value === "url") {
-      await store.addSubscription(name, newSubUrl.value.trim());
+      await store.addSubscription(name, newSubUrl.value.trim(), filters);
     } else {
-      await store.importSubscriptionFromText(name, newSubContent.value.trim());
+      await store.importSubscriptionFromText(name, newSubContent.value.trim(), filters);
     }
     cancelAdd();
   } catch (e) {
@@ -135,7 +145,7 @@ async function updateSub(id: string) {
 }
 
 async function deleteSub(id: string, name: string) {
-  if (confirm(`确认删除订阅「${name}」？`)) {
+  if (confirm(t("subscriptions.confirmDelete", { name }))) {
     await store.deleteSubscription(id);
   }
 }
@@ -157,7 +167,55 @@ function cancelAdd() {
   newSubName.value = "";
   newSubUrl.value = "";
   newSubContent.value = "";
+  newSubInclude.value = "";
+  newSubExclude.value = "";
+  newSubGroupRegion.value = false;
   addError.value = "";
+}
+
+// ─── Node filter editor (per existing subscription) ─────────────────
+const filterVisible = ref(false);
+const filterSubId = ref("");
+const filterSubName = ref("");
+const filterInclude = ref("");
+const filterExclude = ref("");
+const filterGroupRegion = ref(false);
+const filterSaving = ref(false);
+const filterError = ref("");
+
+function openFilter(sub: {
+  id: string; name: string;
+  include?: string | null; exclude?: string | null; group_by_region?: boolean;
+}) {
+  filterSubId.value = sub.id;
+  filterSubName.value = sub.name;
+  filterInclude.value = sub.include ?? "";
+  filterExclude.value = sub.exclude ?? "";
+  filterGroupRegion.value = sub.group_by_region ?? false;
+  filterError.value = "";
+  filterVisible.value = true;
+}
+
+function closeFilter() {
+  filterVisible.value = false;
+}
+
+async function saveFilter() {
+  filterSaving.value = true;
+  filterError.value = "";
+  try {
+    await store.setSubscriptionFilters(
+      filterSubId.value,
+      filterInclude.value.trim() || null,
+      filterExclude.value.trim() || null,
+      filterGroupRegion.value
+    );
+    filterVisible.value = false;
+  } catch (e) {
+    filterError.value = String(e);
+  } finally {
+    filterSaving.value = false;
+  }
 }
 
 // ─── QR Code share dialog ──────────────────────────────────────────
@@ -201,22 +259,22 @@ async function copyUrl() {
 }
 
 const INTERVAL_OPTIONS = [
-  { value: 1,  label: "每 1 小时" },
-  { value: 3,  label: "每 3 小时" },
-  { value: 6,  label: "每 6 小时" },
-  { value: 12, label: "每 12 小时" },
-  { value: 24, label: "每 24 小时" },
-  { value: 72, label: "每 3 天" },
+  { value: 1,  label: t("subscriptions.every1h") },
+  { value: 3,  label: t("subscriptions.every3h") },
+  { value: 6,  label: t("subscriptions.every6h") },
+  { value: 12, label: t("subscriptions.every12h") },
+  { value: 24, label: t("subscriptions.every24h") },
+  { value: 72, label: t("subscriptions.every3d") },
 ];
 
 function formatNextUpdate(sub: { last_update?: string; update_interval: number }) {
-  if (!sub.last_update) return "尚未更新";
+  if (!sub.last_update) return t("subscriptions.notUpdatedYet");
   const next = new Date(sub.last_update).getTime() + sub.update_interval * 3600 * 1000;
   const diff = next - Date.now();
-  if (diff <= 0) return "即将更新";
+  if (diff <= 0) return t("subscriptions.updatingSoon");
   const h = Math.floor(diff / 3600000);
   const m = Math.floor((diff % 3600000) / 60000);
-  return h > 0 ? `${h}h ${m}m 后` : `${m}m 后`;
+  return h > 0 ? t("subscriptions.inHm", { h, m }) : t("subscriptions.inM", { m });
 }
 
 async function toggleAutoUpdate(id: string, currentAutoUpdate: boolean, interval: number) {
@@ -231,7 +289,7 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
 <template>
   <div class="page">
     <div class="page-header">
-      <h1 class="page-title">订阅管理</h1>
+      <h1 class="page-title">{{ t("subscriptions.title") }}</h1>
       <div style="display:flex;gap:8px;">
         <button
           v-if="store.subscriptions.length > 0"
@@ -240,11 +298,11 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
           @click="refreshAll"
         >
           <RefreshCw :size="13" :class="{ spin: refreshingAll }" />
-          {{ refreshingAll ? "更新中..." : "全部更新" }}
+          {{ refreshingAll ? t("subscriptions.updating") : t("subscriptions.refreshAll") }}
         </button>
         <button class="btn btn-primary" @click="showAddDialog = true">
           <Plus :size="14" />
-          添加订阅
+          {{ t("subscriptions.add") }}
         </button>
       </div>
     </div>
@@ -254,67 +312,82 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
       <div class="empty-icon">
         <Server :size="36" />
       </div>
-      <div class="empty-title">暂无订阅</div>
-      <div class="empty-desc">添加 Clash 或 V2Ray 订阅链接开始使用</div>
+      <div class="empty-title">{{ t("subscriptions.empty") }}</div>
+      <div class="empty-desc">{{ t("subscriptions.emptyDesc") }}</div>
       <button class="btn btn-primary" @click="showAddDialog = true">
         <Plus :size="14" />
-        添加第一个订阅
+        {{ t("subscriptions.addFirst") }}
       </button>
     </div>
 
     <!-- Add Dialog (inline) -->
     <div v-if="showAddDialog" class="card add-dialog">
-      <div class="dialog-title">添加订阅</div>
+      <div class="dialog-title">{{ t("subscriptions.add") }}</div>
       <div class="mode-tabs">
         <button class="mode-tab" :class="{ active: addMode === 'url' }" @click="addMode = 'url'">
-          链接订阅
+          {{ t("subscriptions.modeUrl") }}
         </button>
         <button class="mode-tab" :class="{ active: addMode === 'text' }" @click="addMode = 'text'">
-          手动导入
+          {{ t("subscriptions.modeText") }}
         </button>
       </div>
       <div class="form-group">
-        <label class="form-label">订阅名称</label>
+        <label class="form-label">{{ t("subscriptions.nameLabel") }}</label>
         <input
           class="input"
           v-model="newSubName"
-          placeholder="例如：我的机场"
+          :placeholder="t('subscriptions.namePlaceholder')"
           @keyup.enter="addSub"
         />
       </div>
       <div v-if="addMode === 'url'" class="form-group">
-        <label class="form-label">订阅链接</label>
+        <label class="form-label">{{ t("subscriptions.urlLabel") }}</label>
         <input
           class="input"
           v-model="newSubUrl"
-          placeholder="https://... (支持 Clash / V2Ray / SIP008 格式)"
+          :placeholder="t('subscriptions.urlPlaceholder')"
           @keyup.enter="addSub"
         />
       </div>
       <div v-else class="form-group">
         <div class="form-label-row">
-          <label class="form-label">节点内容</label>
+          <label class="form-label">{{ t("subscriptions.contentLabel") }}</label>
           <button class="btn btn-ghost paste-btn" @click="pasteContent">
             <Copy :size="12" />
-            从剪贴板粘贴
+            {{ t("subscriptions.pasteFromClipboard") }}
           </button>
         </div>
         <textarea
           class="input content-area"
           v-model="newSubContent"
           rows="6"
-          placeholder="粘贴节点链接 / Base64 / Clash YAML / SIP008 内容&#10;支持 vmess:// vless:// ss:// trojan:// hy2://（每行一个）"
+          :placeholder="t('subscriptions.contentPlaceholder')"
         />
       </div>
+      <details class="filter-fold">
+        <summary class="filter-summary">{{ t("subscriptions.filterFold") }}</summary>
+        <div class="form-group">
+          <label class="form-label">{{ t("subscriptions.includeLabel") }}</label>
+          <input class="input" v-model="newSubInclude" :placeholder="t('subscriptions.includePlaceholder')" />
+        </div>
+        <div class="form-group">
+          <label class="form-label">{{ t("subscriptions.excludeLabel") }}</label>
+          <input class="input" v-model="newSubExclude" :placeholder="t('subscriptions.excludePlaceholder')" />
+        </div>
+        <label class="filter-check">
+          <input type="checkbox" v-model="newSubGroupRegion" />
+          {{ t("subscriptions.groupByRegion") }}
+        </label>
+      </details>
       <div v-if="addError" class="form-error">
         <AlertCircle :size="13" />
         {{ addError }}
       </div>
       <div class="dialog-actions">
-        <button class="btn btn-ghost" @click="cancelAdd">取消</button>
+        <button class="btn btn-ghost" @click="cancelAdd">{{ t("subscriptions.cancel") }}</button>
         <button class="btn btn-primary" :disabled="addLoading" @click="addSub">
           <RefreshCw v-if="addLoading" :size="13" class="spin" />
-          {{ addLoading ? (addMode === "url" ? "获取中..." : "导入中...") : (addMode === "url" ? "添加" : "导入") }}
+          {{ addLoading ? (addMode === "url" ? t("subscriptions.fetching") : t("subscriptions.importing")) : (addMode === "url" ? t("subscriptions.confirmAdd") : t("subscriptions.confirmImport")) }}
         </button>
       </div>
     </div>
@@ -329,7 +402,7 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
               <span class="badge badge-blue">{{ subTypeLabel(sub.sub_type) }}</span>
               <span class="meta-item">
                 <Server :size="11" />
-                {{ sub.node_count }} 个节点
+                {{ t("subscriptions.nodeCount", { n: sub.node_count }) }}
               </span>
               <span class="meta-item">
                 <Clock :size="11" />
@@ -338,20 +411,20 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
               <span
                 v-if="store.activeProxyTag === `auto-${sub.id}`"
                 class="meta-item auto-hit"
-                title="本订阅自动选优组当前命中的节点"
+                :title="t('subscriptions.autoHitTitle')"
               >
                 <Zap :size="11" />
-                自动 → {{ store.activeNodeNow ?? "选择中…" }}
+                {{ t("subscriptions.autoArrow") }} {{ store.activeNodeNow ?? t("subscriptions.selecting") }}
               </span>
             </div>
-            <div class="sub-url">{{ sub.url || "本地导入" }}</div>
+            <div class="sub-url">{{ sub.url || t("subscriptions.localImport") }}</div>
           </div>
           <div class="sub-actions">
             <button
               v-if="sub.url"
               class="btn btn-ghost icon-btn"
               :disabled="updatingId === sub.id"
-              title="更新订阅"
+              :title="t('subscriptions.updateTitle')"
               @click="updateSub(sub.id)"
             >
               <RefreshCw :size="14" :class="{ spin: updatingId === sub.id }" />
@@ -359,14 +432,22 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
             <button
               v-if="sub.url"
               class="btn btn-ghost icon-btn"
-              title="二维码分享"
+              :title="t('subscriptions.qrShareTitle')"
               @click="showQr(sub.name, sub.url)"
             >
               <QrCode :size="14" />
             </button>
             <button
+              class="btn btn-ghost icon-btn"
+              :class="{ 'filter-active': sub.include || sub.exclude || sub.group_by_region }"
+              :title="t('subscriptions.filterTitle')"
+              @click="openFilter(sub)"
+            >
+              <Filter :size="14" />
+            </button>
+            <button
               class="btn btn-ghost icon-btn danger"
-              title="删除"
+              :title="t('subscriptions.delete')"
               @click="deleteSub(sub.id, sub.name)"
             >
               <Trash2 :size="14" />
@@ -378,7 +459,7 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
         <div v-if="hasQuota(sub)" class="sub-quota">
           <div class="quota-line">
             <span class="quota-text">
-              已用 {{ formatBytes(usedBytes(sub) ?? undefined) }}
+              {{ t("subscriptions.used") }} {{ formatBytes(usedBytes(sub) ?? undefined) }}
               <template v-if="sub.total != null"> / {{ formatBytes(sub.total) }}</template>
             </span>
             <span
@@ -386,7 +467,7 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
               class="quota-expire"
               :class="{ expired: formatExpire(sub.expire).expired }"
             >
-              {{ formatExpire(sub.expire).expired ? "已过期" : "到期" }} {{ formatExpire(sub.expire).text }}
+              {{ formatExpire(sub.expire).expired ? t("subscriptions.expired") : t("subscriptions.expireOn") }} {{ formatExpire(sub.expire).text }}
             </span>
           </div>
           <div v-if="usagePercent(sub) != null" class="quota-bar">
@@ -401,7 +482,7 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
         <div v-if="sub.url" class="sub-autoupdate">
           <div class="autoupdate-left">
             <Clock :size="12" class="autoupdate-icon" />
-            <span class="autoupdate-label">自动更新</span>
+            <span class="autoupdate-label">{{ t("subscriptions.autoUpdate") }}</span>
             <span v-if="sub.auto_update" class="autoupdate-next">
               {{ formatNextUpdate(sub) }}
             </span>
@@ -420,7 +501,7 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
             <button
               class="mini-toggle"
               :class="{ on: sub.auto_update }"
-              :title="sub.auto_update ? '关闭自动更新' : '开启自动更新'"
+              :title="sub.auto_update ? t('subscriptions.autoUpdateOff') : t('subscriptions.autoUpdateOn')"
               @click="toggleAutoUpdate(sub.id, sub.auto_update, sub.update_interval)"
             >
               <span class="mini-knob" />
@@ -448,14 +529,14 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
             <div class="qr-body">
               <div class="qr-image-wrap">
                 <img v-if="qrDataUrl" :src="qrDataUrl" alt="QR Code" class="qr-image" />
-                <div v-else class="qr-placeholder">生成中...</div>
+                <div v-else class="qr-placeholder">{{ t("subscriptions.generating") }}</div>
               </div>
 
-              <div class="qr-desc">用手机扫描二维码导入订阅</div>
+              <div class="qr-desc">{{ t("subscriptions.qrScanHint") }}</div>
 
               <div class="qr-url-row">
                 <span class="qr-url-text">{{ qrSubUrl }}</span>
-                <button class="btn btn-ghost qr-copy-btn" @click="copyUrl" :title="qrCopied ? '已复制' : '复制链接'">
+                <button class="btn btn-ghost qr-copy-btn" @click="copyUrl" :title="qrCopied ? t('subscriptions.copied') : t('subscriptions.copyLink')">
                   <CheckIcon v-if="qrCopied" :size="13" class="copy-ok" />
                   <Copy v-else :size="13" />
                 </button>
@@ -466,21 +547,66 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
       </Transition>
     </Teleport>
 
+    <!-- Node filter / grouping dialog -->
+    <Teleport to="body">
+      <Transition name="qr-fade">
+        <div v-if="filterVisible" class="qr-overlay" @click.self="closeFilter">
+          <div class="qr-dialog filter-dialog">
+            <div class="qr-header">
+              <div class="qr-title">
+                <Filter :size="15" />
+                {{ t("subscriptions.filterTitle") }} — {{ filterSubName }}
+              </div>
+              <button class="qr-close" @click="closeFilter">
+                <X :size="16" />
+              </button>
+            </div>
+            <div class="filter-body">
+              <div class="form-group">
+                <label class="form-label">{{ t("subscriptions.includeLabel") }}</label>
+                <input class="input" v-model="filterInclude" :placeholder="t('subscriptions.includePlaceholder')" />
+              </div>
+              <div class="form-group">
+                <label class="form-label">{{ t("subscriptions.excludeLabel") }}</label>
+                <input class="input" v-model="filterExclude" :placeholder="t('subscriptions.excludePlaceholder')" />
+              </div>
+              <label class="filter-check">
+                <input type="checkbox" v-model="filterGroupRegion" />
+                {{ t("subscriptions.groupByRegion") }}
+              </label>
+              <div class="filter-note">{{ t("subscriptions.filterNote") }}</div>
+              <div v-if="filterError" class="form-error">
+                <AlertCircle :size="13" />
+                {{ filterError }}
+              </div>
+              <div class="dialog-actions">
+                <button class="btn btn-ghost" @click="closeFilter">{{ t("subscriptions.cancel") }}</button>
+                <button class="btn btn-primary" :disabled="filterSaving" @click="saveFilter">
+                  <RefreshCw v-if="filterSaving" :size="13" class="spin" />
+                  {{ filterSaving ? t("subscriptions.applying") : t("subscriptions.saveApply") }}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
     <!-- Supported formats hint -->
     <div class="hint-card card">
-      <div class="hint-title">支持的订阅格式</div>
+      <div class="hint-title">{{ t("subscriptions.hintTitle") }}</div>
       <div class="hint-list">
         <div class="hint-item">
           <span class="badge badge-blue">Clash</span>
-          <span>YAML 格式，支持 ss/vmess/vless/trojan/hysteria2</span>
+          <span>{{ t("subscriptions.hintClash") }}</span>
         </div>
         <div class="hint-item">
           <span class="badge badge-green">V2Ray</span>
-          <span>Base64 编码节点链接，vmess:// vless:// ss:// trojan:// hy2:// tuic:// anytls://</span>
+          <span>{{ t("subscriptions.hintV2ray") }}</span>
         </div>
         <div class="hint-item">
           <span class="badge badge-yellow">SIP008</span>
-          <span>Shadowsocks 标准订阅格式 (JSON)</span>
+          <span>{{ t("subscriptions.hintSip008") }}</span>
         </div>
       </div>
     </div>
@@ -700,4 +826,15 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
 /* QR dialog enter/leave transition */
 .qr-fade-enter-active, .qr-fade-leave-active { transition: opacity 0.18s, transform 0.18s; }
 .qr-fade-enter-from, .qr-fade-leave-to { opacity: 0; transform: scale(0.95); }
+
+/* Node filter UI */
+.filter-fold { margin: 4px 0 2px; border-top: 1px solid var(--color-border); padding-top: 8px; }
+.filter-summary { cursor: pointer; font-size: 12px; color: var(--color-text-secondary); user-select: none; }
+.filter-summary:hover { color: var(--color-text); }
+.filter-check { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--color-text-secondary); cursor: pointer; margin-top: 4px; }
+.filter-check input { width: 14px; height: 14px; }
+.icon-btn.filter-active { color: var(--color-primary); }
+.filter-dialog { width: 420px; max-width: 92vw; }
+.filter-body { padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.filter-note { font-size: 11.5px; color: var(--color-text-secondary); line-height: 1.5; }
 </style>

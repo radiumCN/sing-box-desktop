@@ -22,6 +22,18 @@ pub struct Subscription {
     pub total: Option<u64>,    // total quota in bytes
     #[serde(default)]
     pub expire: Option<i64>,   // expiry as unix timestamp (seconds)
+    /// Keyword/regex filters applied to node names after parsing. `include`: keep only
+    /// nodes whose name matches; `exclude`: drop nodes whose name matches. An empty/None
+    /// value disables that filter; an invalid regex is treated as disabled (never drops
+    /// everything). `serde(default)` keeps older subscriptions.json loadable.
+    #[serde(default)]
+    pub include: Option<String>,
+    #[serde(default)]
+    pub exclude: Option<String>,
+    /// When true, each node's `group` is set to its detected region (from name flag/keyword)
+    /// instead of the default group.
+    #[serde(default)]
+    pub group_by_region: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -141,6 +153,10 @@ pub struct AppConfig {
     /// value falls back to that default (see `config::subscription_user_agent`).
     #[serde(default = "default_subscription_user_agent")]
     pub subscription_user_agent: String,
+    /// Enable global hotkeys (toggle system proxy / TUN / cycle mode). Default off so the
+    /// app never silently grabs system-wide key combos until the user opts in.
+    #[serde(default)]
+    pub enable_global_shortcuts: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -207,6 +223,7 @@ impl Default for AppConfig {
             dns_local: default_dns_local(),
             log_to_file: false,
             subscription_user_agent: default_subscription_user_agent(),
+            enable_global_shortcuts: false,
         }
     }
 }

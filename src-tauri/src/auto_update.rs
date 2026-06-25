@@ -131,6 +131,21 @@ async fn do_update_subscription(
     let state = app_handle.state::<crate::commands::AppState>();
     let sub_type = crate::subscription::detect_sub_type(&content, url);
     let (nodes, outbounds) = crate::subscription::parse_subscription(&content, id)?;
+    // Apply the subscription's stored name filters / region grouping.
+    let (include, exclude, group_by_region) = {
+        let subs = state.subscriptions.lock().unwrap();
+        subs.iter()
+            .find(|s| s.id == id)
+            .map(|s| (s.include.clone(), s.exclude.clone(), s.group_by_region))
+            .unwrap_or((None, None, false))
+    };
+    let (nodes, outbounds) = crate::subscription::apply_node_filters(
+        nodes,
+        outbounds,
+        include.as_deref(),
+        exclude.as_deref(),
+        group_by_region,
+    );
     let node_count = nodes.len();
 
     {
