@@ -7,7 +7,7 @@ use crate::types::{AppConfig, Subscription, ProxyNode};
 pub fn app_data_dir() -> PathBuf {
     let base = dirs_next::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("sing-box-win")
+    base.join("Skylark")
 }
 
 pub fn singbox_config_path() -> PathBuf {
@@ -30,6 +30,30 @@ pub fn ensure_dirs() -> Result<()> {
     fs::create_dir_all(subscriptions_dir())?;
     fs::create_dir_all(rule_sets_dir())?;
     Ok(())
+}
+
+/// Stable random secret guarding the Clash API (`external_controller`). Generated once
+/// on first use and persisted to a dedicated file (NOT app_config.json, which round-trips
+/// through the frontend and could otherwise be wiped on a settings save). Cached for the
+/// process lifetime. Both the generated sing-box config and every Clash API caller read
+/// this same value, so the `Authorization: Bearer <secret>` header always matches.
+pub fn api_secret() -> String {
+    static API_SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    API_SECRET
+        .get_or_init(|| {
+            let path = app_data_dir().join("api_secret");
+            if let Ok(s) = fs::read_to_string(&path) {
+                let s = s.trim().to_string();
+                if !s.is_empty() {
+                    return s;
+                }
+            }
+            let secret = uuid::Uuid::new_v4().simple().to_string();
+            let _ = ensure_dirs();
+            let _ = fs::write(&path, &secret);
+            secret
+        })
+        .clone()
 }
 
 pub fn load_app_config() -> AppConfig {

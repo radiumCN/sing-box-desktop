@@ -11,6 +11,17 @@ pub struct Subscription {
     pub last_update: Option<DateTime<Utc>>,
     pub auto_update: bool,
     pub update_interval: u32, // hours
+    /// Airport usage / quota parsed from the `Subscription-Userinfo` response header.
+    /// All optional — present only when the provider returns the header. `serde(default)`
+    /// keeps older subscriptions.json (without these fields) deserializable.
+    #[serde(default)]
+    pub upload: Option<u64>,   // bytes used (upload)
+    #[serde(default)]
+    pub download: Option<u64>, // bytes used (download)
+    #[serde(default)]
+    pub total: Option<u64>,    // total quota in bytes
+    #[serde(default)]
+    pub expire: Option<i64>,   // expiry as unix timestamp (seconds)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -112,6 +123,18 @@ pub struct AppConfig {
     /// current node by more than this margin (avoids flapping between close nodes).
     #[serde(default = "default_auto_tolerance")]
     pub auto_tolerance: u32,
+    /// Enable IPv6: dual-stack DNS (`prefer_ipv4`) + fake-ip inet6 range + IPv6 TUN
+    /// address. Default off keeps the previous IPv4-only behaviour.
+    #[serde(default)]
+    pub enable_ipv6: bool,
+    /// Domestic / direct DNS resolver. A plain IP (e.g. `223.5.5.5`) maps to a UDP
+    /// server; a `https://…` URL maps to DoH; a `tls://…` URL maps to DoT.
+    #[serde(default = "default_dns_local")]
+    pub dns_local: String,
+    /// Persist core logs to a daily rolling file (`logs/skylark-YYYYMMDD.log`) as they
+    /// arrive, so they survive a crash. Default off (in-memory ring buffer only).
+    #[serde(default)]
+    pub log_to_file: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -137,6 +160,10 @@ fn default_auto_test_interval() -> u32 {
 
 fn default_auto_tolerance() -> u32 {
     50
+}
+
+fn default_dns_local() -> String {
+    "223.5.5.5".to_string()
 }
 
 impl Default for AppConfig {
@@ -166,6 +193,9 @@ impl Default for AppConfig {
             auto_test_url: default_auto_test_url(),
             auto_test_interval: default_auto_test_interval(),
             auto_tolerance: default_auto_tolerance(),
+            enable_ipv6: false,
+            dns_local: default_dns_local(),
+            log_to_file: false,
         }
     }
 }

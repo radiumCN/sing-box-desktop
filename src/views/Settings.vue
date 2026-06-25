@@ -3,9 +3,10 @@ import { ref, watch, onMounted, onUnmounted, computed } from "vue";
 import {
   Shield, Globe, Cpu, Monitor, Download,
   RefreshCw, CheckCircle, AlertCircle, Package, ExternalLink,
-  ShieldCheck, ShieldAlert, Check, Rocket, Zap
+  ShieldCheck, ShieldAlert, Check, Rocket, Zap, Save, Upload, Archive
 } from "@lucide/vue";
 import { invoke } from "@tauri-apps/api/core";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { useAppStore, type AppConfig } from "../stores/app";
@@ -32,6 +33,59 @@ function scheduleSave() {
 }
 
 watch(localConfig, scheduleSave, { deep: true });
+
+// ─── Config backup / restore ──────────────────────────────────────────
+
+const exportingConfig = ref(false);
+const importingConfig = ref(false);
+const showImportModal = ref(false);
+const importText = ref("");
+
+/** Export the full setup to a JSON file and reveal it in the file manager. */
+async function exportConfig() {
+  exportingConfig.value = true;
+  try {
+    const path = await invoke<string>("cmd_export_config");
+    try {
+      await revealItemInDir(path);
+    } catch {
+      /** Reveal may be unavailable; the file is still written. */
+    }
+    alert(`配置已导出到：\n${path}`);
+  } catch (e) {
+    alert(`导出失败：${e}`);
+  } finally {
+    exportingConfig.value = false;
+  }
+}
+
+/** Restore from pasted backup JSON, then refresh all in-memory store state. */
+async function importConfig() {
+  const content = importText.value.trim();
+  if (!content) {
+    alert("请粘贴备份文件的内容");
+    return;
+  }
+  if (!confirm("导入将覆盖当前的订阅、节点、分组、规则与设置，确定继续？")) return;
+  importingConfig.value = true;
+  try {
+    await invoke("cmd_import_config", { content });
+    await store.fetchConfig();
+    localConfig.value = { ...store.config };
+    await Promise.all([
+      store.fetchSubscriptions(),
+      store.fetchNodes(),
+      store.fetchProxyGroups(),
+    ]);
+    showImportModal.value = false;
+    importText.value = "";
+    alert("配置已导入。新的路由 / DNS 设置将在下次启动代理时生效。");
+  } catch (e) {
+    alert(`导入失败：${e}`);
+  } finally {
+    importingConfig.value = false;
+  }
+}
 
 // ─── Kernel Updater ───────────────────────────────────────────────────
 
@@ -370,7 +424,7 @@ onUnmounted(() => {
 
           <a
             class="btn btn-ghost"
-            href="https://github.com/radiumCN/sing-box-desktop/releases"
+            href="https://github.com/radiumCN/skylark/releases"
             target="_blank"
           >
             <ExternalLink :size="13" />
@@ -522,7 +576,7 @@ onUnmounted(() => {
         <div class="setting-row">
           <div class="setting-info">
             <div class="setting-label">开机自启动</div>
-            <div class="setting-desc">Windows 登录时自动启动 sing-box-win</div>
+            <div class="setting-desc">Windows 登录时自动启动 Skylark</div>
           </div>
           <label class="toggle">
             <input type="checkbox" v-model="localConfig.startup_with_system" />
@@ -575,6 +629,17 @@ onUnmounted(() => {
             <span class="toggle-track" />
           </label>
         </div>
+        <div class="setting-divider" />
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">日志写入文件</div>
+            <div class="setting-desc">将内核日志持续写入 logs/skylark-日期.log，崩溃后仍可查看；下次启动代理时生效</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" v-model="localConfig.log_to_file" />
+            <span class="toggle-track" />
+          </label>
+        </div>
       </div>
     </section>
 
@@ -615,6 +680,65 @@ onUnmounted(() => {
             <div class="setting-desc">Clash 兼容 API 监听端口</div>
           </div>
           <input class="input port-input" type="number" v-model.number="localConfig.api_port" min="1024" max="65535" />
+        </div>
+      </div>
+    </section>
+
+    <!-- DNS / 网络 -->
+    <section class="settings-section">
+      <div class="section-header">
+        <Globe :size="15" />
+        <span>DNS 与网络</span>
+      </div>
+      <div class="card settings-card">
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">国内 DNS 解析器</div>
+            <div class="setting-desc">直连域名使用；支持 IP（如 223.5.5.5）、DoH（https://…）、DoT（tls://…）</div>
+          </div>
+          <input class="input" type="text" v-model.trim="localConfig.dns_local" placeholder="223.5.5.5" style="width:220px" />
+        </div>
+        <div class="setting-divider" />
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">启用 IPv6</div>
+            <div class="setting-desc">开启后双栈解析（优先 IPv4）并接管 IPv6 流量；默认关闭为纯 IPv4</div>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" v-model="localConfig.enable_ipv6" />
+            <span class="toggle-track" />
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <!-- Config backup / restore -->
+    <section class="settings-section">
+      <div class="section-header">
+        <Archive :size="15" />
+        <span>配置备份</span>
+      </div>
+      <div class="card settings-card">
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">导出配置</div>
+            <div class="setting-desc">将订阅、节点、分组、路由规则与全部设置打包为一个 JSON 文件（不含 API 密钥）</div>
+          </div>
+          <button class="btn btn-ghost btn-sm" :disabled="exportingConfig" @click="exportConfig">
+            <Save :size="12" />
+            {{ exportingConfig ? "导出中..." : "导出" }}
+          </button>
+        </div>
+        <div class="setting-divider" />
+        <div class="setting-row">
+          <div class="setting-info">
+            <div class="setting-label">导入配置</div>
+            <div class="setting-desc">从备份文件恢复，将覆盖当前的订阅、节点、分组、规则与设置</div>
+          </div>
+          <button class="btn btn-ghost btn-sm" :disabled="importingConfig" @click="showImportModal = true">
+            <Upload :size="12" />
+            导入
+          </button>
         </div>
       </div>
     </section>
@@ -824,9 +948,30 @@ onUnmounted(() => {
         </svg>
       </div>
       <div>
-        <div class="about-name">sing-box-win</div>
-        <div class="about-desc">基于 sing-box 的 Windows 图形化管理工具</div>
+        <div class="about-name">Skylark</div>
+        <div class="about-desc">基于 sing-box 内核的跨平台图形化代理客户端</div>
         <div class="about-version">v{{ appVersion }} · {{ installedVersion ?? "sing-box 未安装" }}</div>
+      </div>
+    </div>
+
+    <!-- Import config modal -->
+    <div v-if="showImportModal" class="dialog-overlay" @click.self="showImportModal = false">
+      <div class="dialog-card">
+        <div class="dialog-title">导入配置</div>
+        <div class="dialog-hint">粘贴此前导出的备份文件（skylark-config-*.json）的完整内容。导入会覆盖现有数据。</div>
+        <textarea
+          class="input import-area"
+          v-model="importText"
+          rows="8"
+          placeholder='粘贴备份 JSON，例如 {"format":"skylark-config",...}'
+        />
+        <div class="dialog-actions">
+          <button class="btn btn-ghost" @click="showImportModal = false">取消</button>
+          <button class="btn btn-primary" :disabled="importingConfig" @click="importConfig">
+            <RefreshCw v-if="importingConfig" :size="13" class="spin" />
+            {{ importingConfig ? "导入中..." : "导入并覆盖" }}
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -998,4 +1143,22 @@ onUnmounted(() => {
 
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin { animation: spin 0.8s linear infinite; }
+
+/* Import config dialog */
+.dialog-overlay {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.4); backdrop-filter: blur(4px);
+}
+.dialog-card {
+  width: min(560px, 92vw);
+  background: var(--color-bg); border: 1px solid var(--color-border);
+  border-radius: var(--radius-md, 10px); padding: 20px;
+  display: flex; flex-direction: column; gap: 12px;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.28);
+}
+.dialog-title { font-size: 15px; font-weight: 600; }
+.dialog-hint { font-size: 12px; color: var(--color-text-secondary); line-height: 1.5; }
+.import-area { width: 100%; resize: vertical; font-family: var(--font-mono, monospace); font-size: 12px; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
 </style>

@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    sing_box_win_lib::run()
+    skylark_lib::run()
 }

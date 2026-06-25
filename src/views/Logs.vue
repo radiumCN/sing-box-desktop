@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, watch, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Trash2, ArrowDown, Copy, Download } from "@lucide/vue";
 
+const LOG_CAP = 1000;
 const logs = ref<string[]>([]);
 const autoScroll = ref(true);
 const filterLevel = ref("all");
 const logContainer = ref<HTMLElement | null>(null);
-let pollTimer: ReturnType<typeof setInterval> | null = null;
+let unlistenLog: UnlistenFn | null = null;
 
 const levelColors: Record<string, string> = {
   error: "#d13438",
@@ -89,12 +91,19 @@ async function exportLogs() {
 
 watch(filtered, scrollToBottom);
 
-onMounted(() => {
-  fetchLogs();
-  pollTimer = setInterval(fetchLogs, 1000);
+onMounted(async () => {
+  // Load the current buffer once, then receive new lines incrementally via events
+  // instead of re-cloning the whole buffer on a timer.
+  await fetchLogs();
+  unlistenLog = await listen<string>("singbox-log", (e) => {
+    logs.value.push(e.payload);
+    if (logs.value.length > LOG_CAP) {
+      logs.value.splice(0, logs.value.length - LOG_CAP);
+    }
+  });
 });
 onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer);
+  if (unlistenLog) unlistenLog();
 });
 </script>
 

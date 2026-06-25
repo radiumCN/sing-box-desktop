@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "sing-box",
+  "productName": "Skylark",
   "version": "../package.json",
-  "identifier": "com.radium.sing-box",
+  "identifier": "com.radium.skylark",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "sing-box",
+        "title": "Skylark",
         "width": 960,
         "height": 640,
         "minWidth": 800,
@@ -42,8 +42,7 @@
     ],
     "resources": [
       "resources/rule-sets/geoip-cn.srs",
-      "resources/rule-sets/geosite-cn.srs",
-      "resources/rule-sets/geosite-geolocation-noncn.srs"
+      "resources/rule-sets/geosite-cn.srs"
     ],
     "publisher": "Radium",
     "shortDescription": "基于 sing-box 的跨平台代理客户端",

@@ -2,9 +2,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 use serde_json::Value;
-use tauri::Manager;
+use tauri::{Manager, Emitter};
 use tokio::process::Command as TokioCommand;
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+/// Open today's rolling log file in append mode under `app_data_dir/logs/`. Returns
+/// `None` if the directory or file cannot be created (logging then stays in-memory only).
+fn open_daily_log_file() -> Option<std::fs::File> {
+    let dir = crate::config::app_data_dir().join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("skylark-{}.log", chrono::Local::now().format("%Y%m%d")));
+    std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
+}
 
 /// Windows CREATE_NO_WINDOW flag: prevents a console window from popping up
 /// when spawning child processes (sing-box, taskkill).
@@ -116,8 +125,11 @@ async fn kill_orphan_singbox() {
 
 #[cfg(not(target_os = "windows"))]
 async fn kill_orphan_singbox() {
+    // Match the core's invocation signature ("…/sing-box run -c …") rather than the bare
+    // name. The core is the only process ever launched with `run -c`, so this pattern
+    // targets exactly the orphaned core and never the GUI app itself.
     let killed = TokioCommand::new("pkill")
-        .args(["-f", "sing-box"])
+        .args(["-f", "sing-box run -c"])
         .output()
         .await
         .map(|o| o.status.success())
@@ -171,6 +183,7 @@ pub async fn start_singbox(
     let binary = singbox_binary_path(app_handle)?;
     let config_path = config_path.to_path_buf();
     let state_clone = state.clone();
+    let app_log = app_handle.clone();
 
     tokio::spawn(async move {
         let mut cmd = TokioCommand::new(&binary);
@@ -197,17 +210,35 @@ pub async fn start_singbox(
             s.tun_mode = tun_mode;
         }
 
-        // Read stderr for logs
+        // Read stderr for logs. Each line is (a) appended to the in-memory ring buffer,
+        // (b) optionally appended to today's rolling log file (crash-safe persistence),
+        // and (c) pushed to the UI via a `singbox-log` event so the frontend does not
+        // have to poll and re-clone the whole buffer every second.
         if let Some(stderr) = child.stderr.take() {
             let state_log = state_clone.clone();
+            let app_log = app_log.clone();
             tokio::spawn(async move {
+                // Read the persistence flag once at start; a runtime toggle takes effect
+                // on the next core (re)start, which is acceptable for this setting.
+                let mut log_file = if crate::config::load_app_config().log_to_file {
+                    open_daily_log_file()
+                } else {
+                    None
+                };
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    let mut s = state_log.lock().unwrap();
-                    s.logs.push(line.clone());
-                    if s.logs.len() > 1000 {
-                        s.logs.drain(0..100);
+                    if let Some(f) = log_file.as_mut() {
+                        use std::io::Write;
+                        let _ = writeln!(f, "{}", line);
                     }
+                    {
+                        let mut s = state_log.lock().unwrap();
+                        s.logs.push(line.clone());
+                        if s.logs.len() > 1000 {
+                            s.logs.drain(0..100);
+                        }
+                    }
+                    let _ = app_log.emit("singbox-log", line);
                 }
             });
         }
@@ -324,6 +355,7 @@ pub async fn fetch_connections(api_port: u16) -> Result<Vec<crate::types::Connec
     let url = format!("http://127.0.0.1:{}/connections", api_port);
     let client = reqwest::Client::new();
     let resp = client.get(&url)
+        .bearer_auth(crate::config::api_secret())
         .timeout(Duration::from_secs(2))
         .send()
         .await?;
@@ -367,6 +399,7 @@ pub async fn close_connection(api_port: u16, id: &str) -> Result<()> {
     let url = format!("http://127.0.0.1:{}/connections/{}", api_port, id);
     let client = reqwest::Client::new();
     client.delete(&url)
+        .bearer_auth(crate::config::api_secret())
         .timeout(Duration::from_secs(3))
         .send()
         .await?
@@ -379,6 +412,7 @@ pub async fn close_all_connections(api_port: u16) -> Result<()> {
     let url = format!("http://127.0.0.1:{}/connections", api_port);
     let client = reqwest::Client::new();
     client.delete(&url)
+        .bearer_auth(crate::config::api_secret())
         .timeout(Duration::from_secs(3))
         .send()
         .await?

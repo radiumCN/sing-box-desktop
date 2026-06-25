@@ -19,6 +19,11 @@ export interface Subscription {
   last_update?: string;
   auto_update: boolean;
   update_interval: number;
+  // Airport usage / quota from the `Subscription-Userinfo` header (optional).
+  upload?: number;   // bytes
+  download?: number; // bytes
+  total?: number;    // bytes
+  expire?: number;   // unix timestamp (seconds)
 }
 
 export interface ProxyNode {
@@ -71,6 +76,9 @@ export interface AppConfig {
   auto_test_url: string;
   auto_test_interval: number;
   auto_tolerance: number;
+  enable_ipv6: boolean;
+  dns_local: string;
+  log_to_file: boolean;
 }
 
 export interface TrafficPoint {
@@ -108,6 +116,9 @@ export const useAppStore = defineStore("app", () => {
     auto_test_url: "https://www.gstatic.com/generate_204",
     auto_test_interval: 3,
     auto_tolerance: 50,
+    enable_ipv6: false,
+    dns_local: "223.5.5.5",
+    log_to_file: false,
   });
   const trafficHistory = ref<TrafficPoint[]>([]);
   // Cumulative bytes since the core started (authoritative, from the Clash API).
@@ -189,7 +200,7 @@ export const useAppStore = defineStore("app", () => {
       ? (activeNodeNow.value ? `自动 → ${activeNodeNow.value}` : "自动选优")
       : (activeNode.value?.name ?? "未选择");
     const state = proxying.value ? "● 已连接" : "○ 未连接";
-    const tooltip = `sing-box-win\n${state}\n节点: ${node}\n模式: ${mode}`;
+    const tooltip = `Skylark\n${state}\n节点: ${node}\n模式: ${mode}`;
     invoke("cmd_update_tray_tooltip", { tooltip }).catch(() => {});
   }
 

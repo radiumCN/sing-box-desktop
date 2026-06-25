@@ -38,6 +38,55 @@ const subTypeLabel = (type: string) => {
   return map[type] ?? type;
 };
 
+// ─── Airport usage / quota (from Subscription-Userinfo header) ──────────────
+function formatBytes(bytes?: number): string {
+  if (bytes == null) return "--";
+  if (bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 2)} ${units[i]}`;
+}
+
+interface SubLike {
+  upload?: number;
+  download?: number;
+  total?: number;
+  expire?: number;
+}
+
+// Used = upload + download (bytes). Returns null when neither is known.
+function usedBytes(sub: SubLike): number | null {
+  if (sub.upload == null && sub.download == null) return null;
+  return (sub.upload ?? 0) + (sub.download ?? 0);
+}
+
+// Show a usage row only when there is something meaningful to show.
+function hasQuota(sub: SubLike): boolean {
+  return usedBytes(sub) != null || sub.total != null || sub.expire != null;
+}
+
+// Percentage of quota used (0–100), or null when total is unknown/zero.
+function usagePercent(sub: SubLike): number | null {
+  const used = usedBytes(sub);
+  if (used == null || !sub.total || sub.total <= 0) return null;
+  return Math.min(100, Math.round((used / sub.total) * 100));
+}
+
+function usageColor(pct: number | null): string {
+  if (pct == null) return "var(--color-primary)";
+  if (pct >= 90) return "#d13438";
+  if (pct >= 70) return "#ca5010";
+  return "var(--color-primary)";
+}
+
+// Format the expiry timestamp; flags expired / imminent for emphasis in the template.
+function formatExpire(expire?: number): { text: string; expired: boolean } {
+  if (expire == null) return { text: "--", expired: false };
+  const d = new Date(expire * 1000);
+  const expired = d.getTime() <= Date.now();
+  return { text: d.toLocaleDateString(), expired };
+}
+
 async function addSub() {
   const name = newSubName.value.trim();
   if (!name) {
@@ -325,6 +374,29 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
           </div>
         </div>
 
+        <!-- Airport usage / quota (only when the provider reports it) -->
+        <div v-if="hasQuota(sub)" class="sub-quota">
+          <div class="quota-line">
+            <span class="quota-text">
+              已用 {{ formatBytes(usedBytes(sub) ?? undefined) }}
+              <template v-if="sub.total != null"> / {{ formatBytes(sub.total) }}</template>
+            </span>
+            <span
+              v-if="sub.expire != null"
+              class="quota-expire"
+              :class="{ expired: formatExpire(sub.expire).expired }"
+            >
+              {{ formatExpire(sub.expire).expired ? "已过期" : "到期" }} {{ formatExpire(sub.expire).text }}
+            </span>
+          </div>
+          <div v-if="usagePercent(sub) != null" class="quota-bar">
+            <div
+              class="quota-fill"
+              :style="{ width: usagePercent(sub) + '%', background: usageColor(usagePercent(sub)) }"
+            />
+          </div>
+        </div>
+
         <!-- Auto-update row (URL subscriptions only) -->
         <div v-if="sub.url" class="sub-autoupdate">
           <div class="autoupdate-left">
@@ -488,6 +560,28 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
 .sub-actions { display: flex; gap: 4px; flex-shrink: 0; }
 .icon-btn { padding: 6px !important; }
 .icon-btn.danger:hover { color: var(--color-error); }
+
+/* Airport usage / quota */
+.sub-quota {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 18px;
+  border-top: 1px solid var(--color-border);
+}
+.quota-line {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font-size: 11px; color: var(--color-text-secondary);
+}
+.quota-text { font-weight: 500; }
+.quota-expire {
+  font-size: 11px; color: var(--color-text-muted);
+  background: rgba(128,128,128,0.1); padding: 1px 7px; border-radius: 10px;
+}
+.quota-expire.expired { color: #d13438; background: rgba(209,52,56,0.12); font-weight: 600; }
+.quota-bar {
+  height: 5px; border-radius: 3px; overflow: hidden;
+  background: rgba(128,128,128,0.18);
+}
+.quota-fill { height: 100%; border-radius: 3px; transition: width 0.3s ease; }
 
 /* Auto-update row */
 .sub-autoupdate {

@@ -1,4 +1,5 @@
 mod types;
+mod cn_direct;
 mod config;
 mod subscription;
 mod singbox;
@@ -138,7 +139,6 @@ pub fn run() {
                     for name in [
                         "geoip-cn.srs",
                         "geosite-cn.srs",
-                        "geosite-geolocation-noncn.srs",
                     ] {
                         let src = src_dir.join(name);
                         if src.exists() {
@@ -267,7 +267,7 @@ pub fn run() {
             let tray = TrayIconBuilder::with_id("tray-main")
                 .icon(tray_icon)
                 .icon_as_template(cfg!(target_os = "macos"))
-                .tooltip("sing-box-win\n● 已停止")
+                .tooltip("Skylark\n● 已停止")
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false) // left click = show window; right click = menu
                 .on_menu_event(move |app, event| {
@@ -344,6 +344,8 @@ pub fn run() {
             commands::cmd_set_connection_mode,
             commands::cmd_get_singbox_status,
             commands::cmd_get_logs,
+            commands::cmd_export_config,
+            commands::cmd_import_config,
             commands::cmd_get_subscriptions,
             commands::cmd_add_subscription,
             commands::cmd_import_subscription_from_text,

@@ -15,6 +15,34 @@ fn notify(app_handle: &tauri::AppHandle, title: &str, body: &str) {
         .show();
 }
 
+/// Compare two dotted numeric versions and report whether `latest` is strictly newer
+/// than `current`. A leading `v` and any pre-release suffix after `-` are ignored, and
+/// non-numeric / missing components are treated as 0 so a malformed value can never
+/// spuriously trigger an "update available". This replaces a plain `!=` comparison,
+/// which wrongly fired when the local version merely differed (e.g. equal-but-tagged,
+/// or a manually-installed newer build).
+fn is_newer_version(latest: &str, current: &str) -> bool {
+    fn parts(v: &str) -> Vec<u64> {
+        v.trim().trim_start_matches('v')
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .split('.')
+            .map(|s| s.trim().parse::<u64>().unwrap_or(0))
+            .collect()
+    }
+    let (a, b) = (parts(latest), parts(current));
+    let n = a.len().max(b.len());
+    for i in 0..n {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
+
 /// Background task: check for sing-box updates on startup and periodically.
 /// Emits "singbox-update-available" { version, download_url, release_notes } when a new version is found.
 pub async fn start_auto_update_checker(app_handle: tauri::AppHandle, interval_hours: u32) {
@@ -83,15 +111,20 @@ async fn do_update_subscription(
     id: &str,
     url: &str,
 ) -> anyhow::Result<usize> {
-    let content = reqwest::Client::builder()
+    let resp = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .user_agent("ClashForWindows/0.20.39")
         .build()?
         .get(url)
         .send()
-        .await?
-        .text()
         .await?;
+    // Parse the airport quota header before consuming the body (see commands::fetch_url).
+    let userinfo = resp.headers()
+        .get("subscription-userinfo")
+        .and_then(|v| v.to_str().ok())
+        .map(crate::commands::parse_userinfo)
+        .unwrap_or_default();
+    let content = resp.text().await?;
 
     crate::config::save_subscription_content(id, &content)?;
 
@@ -106,6 +139,11 @@ async fn do_update_subscription(
             sub.sub_type = sub_type;
             sub.node_count = nodes.len();
             sub.last_update = Some(chrono::Utc::now());
+            // Preserve known quota when a refresh omits the header.
+            if userinfo.upload.is_some() { sub.upload = userinfo.upload; }
+            if userinfo.download.is_some() { sub.download = userinfo.download; }
+            if userinfo.total.is_some() { sub.total = userinfo.total; }
+            if userinfo.expire.is_some() { sub.expire = userinfo.expire; }
         }
         crate::config::save_subscriptions(&subs)?;
     }
@@ -150,7 +188,7 @@ pub async fn start_app_update_checker(app_handle: tauri::AppHandle) {
         Ok(release) => {
             let current = env!("CARGO_PKG_VERSION");
             let latest = release.version.trim_start_matches('v');
-            if latest != current {
+            if is_newer_version(latest, current) {
                 let _ = app_handle.emit("app-update-available", serde_json::json!({
                     "version": release.version,
                     "download_url": release.download_url,
@@ -162,7 +200,7 @@ pub async fn start_app_update_checker(app_handle: tauri::AppHandle) {
                 notify(
                     &app_handle,
                     "发现新版本",
-                    &format!("sing-box-desktop {} 可供更新", release.version),
+                    &format!("Skylark {} 可供更新", release.version),
                 );
             }
         }
@@ -184,7 +222,7 @@ async fn check_and_emit(app_handle: &tauri::AppHandle) {
                 .unwrap_or("");
             let latest_ver = release.version.trim_start_matches('v');
 
-            if !installed_ver.is_empty() && installed_ver != latest_ver {
+            if !installed_ver.is_empty() && is_newer_version(latest_ver, installed_ver) {
                 let _ = app_handle.emit("singbox-update-available", serde_json::json!({
                     "version": release.version,
                     "download_url": release.download_url,

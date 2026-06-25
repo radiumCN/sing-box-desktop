@@ -82,7 +82,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'sing-box-desktop ${{ github.ref_name }}'
+          releaseName: 'Skylark ${{ github.ref_name }}'
           releaseBody: |
             ## 下载安装包
 
