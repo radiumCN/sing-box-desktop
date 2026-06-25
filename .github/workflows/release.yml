@@ -27,8 +27,8 @@ jobs:
             rust_targets: 'aarch64-apple-darwin'
             name: macOS Apple Silicon
 
-          # macOS Intel — DMG (.dmg x86_64)
-          - platform: macos-13
+          # macOS Intel — DMG (.dmg x86_64)，在 Apple Silicon runner 上交叉编译
+          - platform: macos-latest
             args: '--target x86_64-apple-darwin --bundles dmg'
             rust_targets: 'x86_64-apple-darwin'
             name: macOS Intel
