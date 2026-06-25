@@ -645,6 +645,18 @@ pub async fn download_and_install_app(
         "path": installer_path.to_string_lossy(),
     }));
 
+    // Cleanly tear down BEFORE the installer restarts the app. The NSIS installer
+    // force-terminates the running process, which bypasses the window-close / tray-quit
+    // handlers that normally run shutdown_core. Without this, the old core would be left
+    // orphaned (still holding the mixed/API port and TUN adapter) and the Windows system
+    // proxy would stay pointing at it — so the upgraded app restores "proxy on" on top of
+    // a stale/dead core and ends up with no network. Stopping here clears both.
+    {
+        use tauri::Manager;
+        let state = app_handle.state::<crate::commands::AppState>();
+        crate::commands::shutdown_core(state.inner()).await;
+    }
+
     // Launch the installer.
     // Windows: the NSIS installer handles closing and restarting the app.
     // Use CREATE_NO_WINDOW so the helper `cmd` doesn't flash a black console window.

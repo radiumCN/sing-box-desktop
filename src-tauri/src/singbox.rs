@@ -131,7 +131,7 @@ async fn kill_orphan_singbox() {
 /// sing-box has finished starting up. Returns as soon as the port is reachable (typically
 /// ~100-200ms) instead of blocking on a fixed delay. Caps out after ~2s so a config that
 /// never binds the port doesn't hang the caller indefinitely.
-async fn wait_until_ready(api_port: u16) {
+async fn wait_until_ready(api_port: u16) -> bool {
     let addr = format!("127.0.0.1:{}", api_port);
     for _ in 0..40 {
         if tokio::time::timeout(
@@ -142,10 +142,11 @@ async fn wait_until_ready(api_port: u16) {
         .map(|r| r.is_ok())
         .unwrap_or(false)
         {
-            return;
+            return true;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    false
 }
 
 /// Start sing-box with the given config file
@@ -219,8 +220,25 @@ pub async fn start_singbox(
         s.tun_mode = false;
     });
 
-    // Return as soon as the control port is up instead of a fixed 500ms wait.
-    wait_until_ready(api_port).await;
+    // Confirm the core actually came up: the Clash API control port must accept a
+    // connection. If it never binds — invalid config, the port still held by an orphan
+    // right after an app upgrade, or TUN failing without admin rights — the process has
+    // effectively failed even though `spawn()` succeeded. Returning Err here is critical:
+    // otherwise the caller (apply_connection_mode) would enable the system proxy / treat
+    // TUN as active on top of a DEAD core, which presents as "proxy on, but no network".
+    if !wait_until_ready(api_port).await {
+        kill_orphan_singbox().await;
+        {
+            let mut s = state.lock().unwrap();
+            s.running = false;
+            s.pid = None;
+            s.start_time = None;
+            s.tun_mode = false;
+        }
+        return Err(anyhow!(
+            "sing-box 启动失败：控制端口未就绪（配置无效 / 端口被占用 / TUN 需要管理员权限）"
+        ));
+    }
 
     Ok(())
 }
