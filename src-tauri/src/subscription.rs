@@ -1889,10 +1889,18 @@ pub fn build_singbox_config(
             },
             /* Persist routing/fake-ip state across restarts. store_fakeip keeps the
                domain↔fake-IP mapping stable so long-lived connections survive a
-               proxy restart instead of resolving to a stale address. */
+               proxy restart instead of resolving to a stale address.
+
+               `path` MUST be absolute: sing-box otherwise opens `cache.db` relative to
+               its working directory, which for a GUI app launched from /Applications is
+               `/` (read-only). That made the core abort at startup with
+               "initialize cache-file: open cache.db: read-only file system" → the Clash
+               control port never bound → "控制端口未就绪". Pin it under the writable app
+               data dir so it works regardless of the inherited cwd. */
             "cache_file": {
                 "enabled": true,
-                "store_fakeip": true
+                "store_fakeip": true,
+                "path": crate::config::app_data_dir().join("cache.db").to_string_lossy().replace('\\', "/")
             }
         }
     });

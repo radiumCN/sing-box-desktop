@@ -183,8 +183,18 @@ const isAdmin = ref(false);
 const wintunAvailable = ref(false);
 const downloadingWintun = ref(false);
 const wintunError = ref("");
+// macOS: whether the one-time privileged TUN service is installed (passwordless sudo).
+const tunServiceReady = ref(false);
+const installingService = ref(false);
+const serviceError = ref("");
 
 async function refreshTunStatus() {
+  if (isMacOS) {
+    // macOS uses the privileged-service model: the GUI stays non-root, so report whether
+    // the service is installed rather than whether the process is elevated.
+    tunServiceReady.value = await invoke<boolean>("cmd_tun_service_installed");
+    return;
+  }
   [isAdmin.value, wintunAvailable.value] = await Promise.all([
     invoke<boolean>("cmd_is_elevated"),
     invoke<boolean>("cmd_wintun_available"),
@@ -197,6 +207,21 @@ async function requestAdmin() {
     // Process exits and re-opens elevated; if we reach here, user cancelled
   } catch (e) {
     // UAC cancelled - ignore
+  }
+}
+
+// macOS: install the privileged TUN service. Prompts for the admin password ONCE; after
+// that, enabling TUN needs no further authorization.
+async function installTunService() {
+  installingService.value = true;
+  serviceError.value = "";
+  try {
+    await invoke("cmd_install_tun_service");
+    tunServiceReady.value = await invoke<boolean>("cmd_tun_service_installed");
+  } catch (e) {
+    serviceError.value = String(e);
+  } finally {
+    installingService.value = false;
   }
 }
 
@@ -981,8 +1006,8 @@ onUnmounted(() => {
 
         <!-- TUN requirements (show when enabled) -->
         <div v-if="localConfig.tun_enabled" class="tun-checklist">
-          <!-- Admin status -->
-          <div class="tun-check-row">
+          <!-- Admin status (Windows/Linux: the process must run elevated) -->
+          <div v-if="!isMacOS" class="tun-check-row">
             <div class="check-status">
               <ShieldCheck v-if="isAdmin" :size="15" class="check-ok" />
               <ShieldAlert v-else :size="15" class="check-bad" />
@@ -1028,17 +1053,31 @@ onUnmounted(() => {
             <div v-if="wintunError" class="tun-error">{{ wintunError }}</div>
           </template>
 
-          <!-- macOS TUN note -->
+          <!-- macOS privileged TUN service: authorize once, then passwordless -->
           <template v-else-if="isMacOS">
-            <div class="tun-divider" />
             <div class="tun-check-row">
+              <div class="check-status">
+                <ShieldCheck v-if="tunServiceReady" :size="15" class="check-ok" />
+                <ShieldAlert v-else :size="15" class="check-bad" />
+              </div>
               <div class="check-info">
-                <div class="check-label">{{ t('settings.macosTun') }}</div>
+                <div class="check-label">{{ t('settings.tunService') }}</div>
                 <div class="check-desc">
-                  <span class="text-ok">{{ t('settings.macosTunDesc') }}</span>
+                  <span v-if="tunServiceReady" class="text-ok">{{ t('settings.tunServiceReady') }}</span>
+                  <span v-else class="text-bad">{{ t('settings.tunServiceNotReady') }}</span>
                 </div>
               </div>
+              <button
+                v-if="!tunServiceReady"
+                class="btn btn-primary btn-sm"
+                :disabled="installingService"
+                @click="installTunService"
+              >
+                <ShieldCheck :size="12" />
+                {{ installingService ? t('settings.installingTunService') : t('settings.installTunService') }}
+              </button>
             </div>
+            <div v-if="serviceError" class="tun-error">{{ serviceError }}</div>
           </template>
         </div>
       </div>
