@@ -173,6 +173,16 @@ async fn kill_orphan_singbox() {
         .await
         .map(|o| o.status.success())
         .unwrap_or(false);
+    // On macOS the previous run's TUN core was root-owned, so the user-level pkill above
+    // can't reap it. Clear it through the passwordless rule (no-op when the service isn't
+    // installed, or when no such orphan exists). Best-effort; failure is ignored.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = TokioCommand::new("sudo")
+            .args(["-n", "/usr/bin/pkill", "-KILL", "-f", crate::tun::TUN_ROOT_BIN])
+            .output()
+            .await;
+    }
     if killed {
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
@@ -225,8 +235,33 @@ pub async fn start_singbox(
     let app_log = app_handle.clone();
 
     tokio::spawn(async move {
-        let mut cmd = TokioCommand::new(&binary);
-        cmd.args(["run", "-c", config_path.to_str().unwrap_or("")])
+        let cfg_arg = config_path.to_str().unwrap_or("");
+        // On macOS, TUN needs root. We launch the ROOT-OWNED core via passwordless `sudo -n`
+        // (set up once by tun::install_tun_service) instead of running the whole GUI as root.
+        // stderr is still piped straight to us, so the log view keeps working. Non-TUN runs,
+        // and all runs on Windows/Linux, spawn the user-owned binary directly as before.
+        #[cfg(target_os = "macos")]
+        let mut cmd = if tun_mode {
+            let mut c = TokioCommand::new("sudo");
+            c.args(["-n", crate::tun::TUN_ROOT_BIN, "run", "-c", cfg_arg]);
+            c
+        } else {
+            let mut c = TokioCommand::new(&binary);
+            c.args(["run", "-c", cfg_arg]);
+            c
+        };
+        #[cfg(not(target_os = "macos"))]
+        let mut cmd = {
+            let mut c = TokioCommand::new(&binary);
+            c.args(["run", "-c", cfg_arg]);
+            c
+        };
+        // Pin the working directory to the writable app data dir. A GUI app launched
+        // from /Applications inherits cwd `/` (read-only on macOS), so any config field
+        // that resolves a relative path — cache_file's db, external_ui — would otherwise
+        // fail there. The config already passes absolute paths, but setting cwd makes the
+        // core robust against any relative default sing-box might use.
+        cmd.current_dir(crate::config::app_data_dir())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         #[cfg(windows)]
@@ -362,7 +397,39 @@ pub async fn stop_singbox(state: SharedState, graceful: bool) -> Result<()> {
                     .await;
             }
         }
-        #[cfg(not(target_os = "windows"))]
+        // macOS: a TUN core runs as root (via sudo), so a direct `kill` from the non-root
+        // GUI would be denied — and `pid` is sudo's, not sing-box's. Signal it through the
+        // passwordless pkill rule instead. A non-TUN core runs as the user, so kill its pid.
+        #[cfg(target_os = "macos")]
+        {
+            if graceful {
+                // SIGTERM lets sing-box tear the utun device + auto_route down cleanly.
+                let _ = TokioCommand::new("sudo")
+                    .args(["-n", "/usr/bin/pkill", "-TERM", "-f", crate::tun::TUN_ROOT_BIN])
+                    .output()
+                    .await;
+                let mut exited = false;
+                for _ in 0..60 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    if !state.lock().unwrap().running {
+                        exited = true;
+                        break;
+                    }
+                }
+                if !exited {
+                    let _ = TokioCommand::new("sudo")
+                        .args(["-n", "/usr/bin/pkill", "-KILL", "-f", crate::tun::TUN_ROOT_BIN])
+                        .output()
+                        .await;
+                }
+            } else {
+                let _ = TokioCommand::new("kill")
+                    .args(["-SIGKILL", &pid.to_string()])
+                    .output()
+                    .await;
+            }
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
         {
             let signal = if graceful { "-SIGTERM" } else { "-SIGKILL" };
             let _ = TokioCommand::new("kill")

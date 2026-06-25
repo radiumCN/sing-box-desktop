@@ -46,8 +46,16 @@ pub async fn ensure_core(
     state: &AppState,
     want_tun: bool,
 ) -> Result<(), String> {
-    // TUN preconditions: elevated privileges (+ WinTun driver on Windows).
+    // TUN preconditions differ by platform:
+    //   • macOS — a one-time privileged service (passwordless sudo for the root-owned core)
+    //     must be installed; the GUI itself stays non-root.
+    //   • Windows/Linux — the process must be elevated (+ WinTun driver on Windows).
     if want_tun {
+        #[cfg(target_os = "macos")]
+        if !crate::tun::tun_service_installed() {
+            return Err("TUN 模式需要先安装 TUN 服务（仅首次需要授权一次）。请在「设置 → TUN 模式」中点击「安装 TUN 服务」。".to_string());
+        }
+        #[cfg(not(target_os = "macos"))]
         if !crate::tun::is_elevated() {
             return Err("TUN 模式需要管理员/root 权限。请在「设置 → TUN 模式」中点击「以管理员身份重启」后再启动。".to_string());
         }
@@ -1467,6 +1475,55 @@ pub fn cmd_is_elevated() -> bool {
 #[tauri::command]
 pub fn cmd_relaunch_as_admin() -> Result<(), String> {
     crate::tun::relaunch_as_admin().map_err(|e| e.to_string())
+}
+
+/// Whether TUN is ready to start without a fresh authorization prompt. On macOS that means
+/// the one-time privileged service is installed; on Windows/Linux it means the process is
+/// already elevated. Lets the frontend show a single "TUN ready" indicator cross-platform.
+#[tauri::command]
+pub fn cmd_tun_service_installed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        crate::tun::tun_service_installed()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        crate::tun::is_elevated()
+    }
+}
+
+/// macOS only: install the privileged TUN service (one admin prompt, then passwordless).
+/// No-op error on other platforms, which use the elevation flow instead.
+#[tauri::command]
+pub async fn cmd_install_tun_service() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        // Runs osascript (blocking) on a worker thread so the UI stays responsive.
+        tokio::task::spawn_blocking(|| crate::tun::install_tun_service())
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("当前平台不需要安装 TUN 服务".to_string())
+    }
+}
+
+/// macOS only: remove the privileged TUN service (one admin prompt).
+#[tauri::command]
+pub async fn cmd_uninstall_tun_service() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        tokio::task::spawn_blocking(|| crate::tun::uninstall_tun_service())
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err("当前平台无 TUN 服务".to_string())
+    }
 }
 
 #[tauri::command]

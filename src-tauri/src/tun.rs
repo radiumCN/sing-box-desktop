@@ -106,6 +106,142 @@ pub fn relaunch_as_admin() -> Result<()> {
     Err(anyhow!("不支持此平台"))
 }
 
+// ─── macOS TUN privileged service (authorize once) ──────────────────
+//
+// macOS TUN (utun) needs root. Rather than relaunching the WHOLE GUI as root on every
+// launch — a password prompt each time, and a root-owned GUI is itself a security smell —
+// we install a one-time privileged "service":
+//   • the sing-box binary is copied to a root-owned location (`/Library/Skylark/sing-box`,
+//     root:wheel 0755 — NOT user-writable, so the NOPASSWD rule below can't be hijacked by
+//     swapping the binary), and
+//   • a sudoers drop-in grants the current user NOPASSWD rights to run EXACTLY that binary
+//     and to pkill it.
+// After the single install prompt, starting/stopping TUN needs no password: the core is
+// launched via `sudo -n` and the GUI stays as the normal user. Updating the kernel later
+// requires re-running the install so the root-owned copy is refreshed.
+
+/// Absolute path of the root-owned sing-box used for TUN. Referenced verbatim by the
+/// sudoers rule, the `sudo -n` launch, and the pkill teardown — they must all agree.
+#[cfg(target_os = "macos")]
+pub const TUN_ROOT_BIN: &str = "/Library/Skylark/sing-box";
+#[cfg(target_os = "macos")]
+const TUN_SUDOERS_PATH: &str = "/etc/sudoers.d/skylark";
+
+/// The login user's short name. The GUI runs as this user; we must capture it HERE in the
+/// (non-elevated) GUI process — inside the elevated install script `whoami` would be `root`.
+#[cfg(target_os = "macos")]
+fn current_username() -> Option<String> {
+    if let Ok(u) = std::env::var("USER") {
+        if !u.is_empty() && u != "root" {
+            return Some(u);
+        }
+    }
+    let out = std::process::Command::new("id").arg("-un").output().ok()?;
+    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!name.is_empty() && name != "root").then_some(name)
+}
+
+/// True when the privileged TUN service is installed AND usable: the user can run the
+/// root-owned sing-box via `sudo -n` with no password. Probing the real allowed command
+/// confirms both the binary's presence and that the NOPASSWD sudoers rule is active.
+#[cfg(target_os = "macos")]
+pub fn tun_service_installed() -> bool {
+    if !std::path::Path::new(TUN_ROOT_BIN).exists() {
+        return false;
+    }
+    std::process::Command::new("sudo")
+        .args(["-n", TUN_ROOT_BIN, "version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Install the privileged TUN service with a SINGLE admin prompt. Copies the currently
+/// downloaded sing-box to the root-owned path and installs a `visudo`-validated sudoers
+/// drop-in. The privileged steps run from a temp script executed via one `osascript … with
+/// administrator privileges` call (a script file keeps the shell quoting sane).
+#[cfg(target_os = "macos")]
+pub fn install_tun_service() -> Result<()> {
+    let user = current_username().ok_or_else(|| anyhow!("无法确定当前用户"))?;
+    let src = crate::updater::singbox_binary_path();
+    if !src.exists() {
+        return Err(anyhow!("请先在「设置」中下载 sing-box 内核，再安装 TUN 服务"));
+    }
+    let src_str = src.to_string_lossy().to_string();
+
+    // `user` and the paths are baked into the script as literals; the sudoers heredoc uses a
+    // quoted delimiter so the shell performs no expansion on the line.
+    let script = format!(
+        "#!/bin/sh\n\
+         set -e\n\
+         mkdir -p /Library/Skylark\n\
+         cp \"{src}\" \"{bin}\"\n\
+         chown root:wheel \"{bin}\"\n\
+         chmod 755 \"{bin}\"\n\
+         xattr -dr com.apple.quarantine \"{bin}\" 2>/dev/null || true\n\
+         TMP=$(mktemp)\n\
+         cat > \"$TMP\" <<'EOF'\n\
+         {user} ALL=(root) NOPASSWD: {bin}, /usr/bin/pkill -TERM -f {bin}, /usr/bin/pkill -KILL -f {bin}\n\
+         EOF\n\
+         chmod 440 \"$TMP\"\n\
+         if /usr/sbin/visudo -cf \"$TMP\" >/dev/null 2>&1; then\n\
+           chown root:wheel \"$TMP\"\n\
+           mv \"$TMP\" {sudoers}\n\
+         else\n\
+           rm -f \"$TMP\"\n\
+           echo 'sudoers validation failed' >&2\n\
+           exit 1\n\
+         fi\n",
+        src = src_str,
+        bin = TUN_ROOT_BIN,
+        user = user,
+        sudoers = TUN_SUDOERS_PATH,
+    );
+
+    let tmp_script = std::env::temp_dir().join("skylark-install-tun.sh");
+    std::fs::write(&tmp_script, script).map_err(|e| anyhow!("无法写入安装脚本: {}", e))?;
+    let tmp_str = tmp_script.to_string_lossy().to_string();
+
+    // Single-quote the script path inside the AppleScript command so spaces are handled.
+    let osa = format!(
+        "do shell script \"/bin/sh '{}'\" with administrator privileges",
+        tmp_str
+    );
+    let status = std::process::Command::new("osascript")
+        .args(["-e", &osa])
+        .status();
+    let _ = std::fs::remove_file(&tmp_script);
+
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(_) => Err(anyhow!("管理员授权被取消或安装失败")),
+        Err(e) => Err(anyhow!("无法运行授权: {}", e)),
+    }
+}
+
+/// Remove the privileged TUN service (sudoers drop-in + root-owned binary). One admin prompt.
+#[cfg(target_os = "macos")]
+pub fn uninstall_tun_service() -> Result<()> {
+    let script = format!(
+        "rm -f {sudoers}; rm -f {bin}; rmdir /Library/Skylark 2>/dev/null || true",
+        sudoers = TUN_SUDOERS_PATH,
+        bin = TUN_ROOT_BIN,
+    );
+    let osa = format!(
+        "do shell script \"{}\" with administrator privileges",
+        script.replace('"', "\\\"")
+    );
+    let status = std::process::Command::new("osascript")
+        .args(["-e", &osa])
+        .status()
+        .map_err(|e| anyhow!("无法运行授权: {}", e))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(anyhow!("管理员授权被取消"))
+    }
+}
+
 /// Remove leftover "skylark-tun*" network adapters from previous runs (fast path).
 ///
 /// Because each start now uses a UNIQUE interface name, an orphaned adapter can no longer
