@@ -1,5 +1,47 @@
 use std::time::Duration;
 use tauri::{Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
+
+/// Show a native desktop notification. These fire from background tasks that may run
+/// while the window is hidden/minimized, so a system notification is the only way the
+/// user sees them. Failures (e.g. OS permission denied) are ignored — a missing toast
+/// must never break the update flow.
+fn notify(app_handle: &tauri::AppHandle, title: &str, body: &str) {
+    let _ = app_handle
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show();
+}
+
+/// Compare two dotted numeric versions and report whether `latest` is strictly newer
+/// than `current`. A leading `v` and any pre-release suffix after `-` are ignored, and
+/// non-numeric / missing components are treated as 0 so a malformed value can never
+/// spuriously trigger an "update available". This replaces a plain `!=` comparison,
+/// which wrongly fired when the local version merely differed (e.g. equal-but-tagged,
+/// or a manually-installed newer build).
+fn is_newer_version(latest: &str, current: &str) -> bool {
+    fn parts(v: &str) -> Vec<u64> {
+        v.trim().trim_start_matches('v')
+            .split('-')
+            .next()
+            .unwrap_or("")
+            .split('.')
+            .map(|s| s.trim().parse::<u64>().unwrap_or(0))
+            .collect()
+    }
+    let (a, b) = (parts(latest), parts(current));
+    let n = a.len().max(b.len());
+    for i in 0..n {
+        let x = a.get(i).copied().unwrap_or(0);
+        let y = b.get(i).copied().unwrap_or(0);
+        if x != y {
+            return x > y;
+        }
+    }
+    false
+}
 
 /// Background task: check for sing-box updates on startup and periodically.
 /// Emits "singbox-update-available" { version, download_url, release_notes } when a new version is found.
@@ -30,7 +72,7 @@ pub async fn start_subscription_auto_updater(app_handle: tauri::AppHandle) {
     loop {
         let state = app_handle.state::<crate::commands::AppState>();
 
-        let to_update: Vec<(String, String)> = {
+        let to_update: Vec<(String, String, String)> = {
             let subs = state.subscriptions.lock().unwrap();
             let now = chrono::Utc::now();
             subs.iter()
@@ -39,14 +81,24 @@ pub async fn start_subscription_auto_updater(app_handle: tauri::AppHandle) {
                     None => true,
                     Some(last) => (now - last).num_hours() >= s.update_interval as i64,
                 })
-                .map(|s| (s.id.clone(), s.url.clone()))
+                .map(|s| (s.id.clone(), s.url.clone(), s.name.clone()))
                 .collect()
         };
 
-        for (id, url) in to_update {
+        for (id, url, name) in to_update {
             match do_update_subscription(&app_handle, &id, &url).await {
-                Ok(_) => log::info!("订阅自动更新成功: {}", id),
-                Err(e) => log::warn!("订阅自动更新失败 [{}]: {}", id, e),
+                Ok(count) => {
+                    log::info!("订阅自动更新成功: {}", id);
+                    notify(
+                        &app_handle,
+                        "订阅已更新",
+                        &format!("{} 更新成功，共 {} 个节点", name, count),
+                    );
+                }
+                Err(e) => {
+                    log::warn!("订阅自动更新失败 [{}]: {}", id, e);
+                    notify(&app_handle, "订阅更新失败", &format!("{}：{}", name, e));
+                }
             }
         }
 
@@ -58,22 +110,28 @@ async fn do_update_subscription(
     app_handle: &tauri::AppHandle,
     id: &str,
     url: &str,
-) -> anyhow::Result<()> {
-    let content = reqwest::Client::builder()
+) -> anyhow::Result<usize> {
+    let resp = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
-        .user_agent("ClashForWindows/0.20.39")
+        .user_agent(crate::config::subscription_user_agent())
         .build()?
         .get(url)
         .send()
-        .await?
-        .text()
         .await?;
+    // Parse the airport quota header before consuming the body (see commands::fetch_url).
+    let userinfo = resp.headers()
+        .get("subscription-userinfo")
+        .and_then(|v| v.to_str().ok())
+        .map(crate::commands::parse_userinfo)
+        .unwrap_or_default();
+    let content = resp.text().await?;
 
     crate::config::save_subscription_content(id, &content)?;
 
     let state = app_handle.state::<crate::commands::AppState>();
     let sub_type = crate::subscription::detect_sub_type(&content, url);
     let (nodes, outbounds) = crate::subscription::parse_subscription(&content, id)?;
+    let node_count = nodes.len();
 
     {
         let mut subs = state.subscriptions.lock().unwrap();
@@ -81,6 +139,11 @@ async fn do_update_subscription(
             sub.sub_type = sub_type;
             sub.node_count = nodes.len();
             sub.last_update = Some(chrono::Utc::now());
+            // Preserve known quota when a refresh omits the header.
+            if userinfo.upload.is_some() { sub.upload = userinfo.upload; }
+            if userinfo.download.is_some() { sub.download = userinfo.download; }
+            if userinfo.total.is_some() { sub.total = userinfo.total; }
+            if userinfo.expire.is_some() { sub.expire = userinfo.expire; }
         }
         crate::config::save_subscriptions(&subs)?;
     }
@@ -104,7 +167,7 @@ async fn do_update_subscription(
         crate::config::save_outbounds(&all_outbounds)?;
     }
 
-    Ok(())
+    Ok(node_count)
 }
 
 // ─── App Self-Update Checker ─────────────────────────────────────────
@@ -125,7 +188,7 @@ pub async fn start_app_update_checker(app_handle: tauri::AppHandle) {
         Ok(release) => {
             let current = env!("CARGO_PKG_VERSION");
             let latest = release.version.trim_start_matches('v');
-            if latest != current {
+            if is_newer_version(latest, current) {
                 let _ = app_handle.emit("app-update-available", serde_json::json!({
                     "version": release.version,
                     "download_url": release.download_url,
@@ -134,6 +197,11 @@ pub async fn start_app_update_checker(app_handle: tauri::AppHandle) {
                     "is_prerelease": release.is_prerelease,
                     "current_version": current,
                 }));
+                notify(
+                    &app_handle,
+                    "发现新版本",
+                    &format!("Skylark {} 可供更新", release.version),
+                );
             }
         }
         Err(e) => {
@@ -154,13 +222,18 @@ async fn check_and_emit(app_handle: &tauri::AppHandle) {
                 .unwrap_or("");
             let latest_ver = release.version.trim_start_matches('v');
 
-            if !installed_ver.is_empty() && installed_ver != latest_ver {
+            if !installed_ver.is_empty() && is_newer_version(latest_ver, installed_ver) {
                 let _ = app_handle.emit("singbox-update-available", serde_json::json!({
                     "version": release.version,
                     "download_url": release.download_url,
                     "release_notes": release.release_notes,
                     "installed_version": installed_ver,
                 }));
+                notify(
+                    app_handle,
+                    "内核可更新",
+                    &format!("sing-box 内核 {} 可供更新", release.version),
+                );
             } else if installed_ver.is_empty() {
                 // Not installed at all — notify frontend
                 let _ = app_handle.emit("singbox-not-installed", serde_json::json!({

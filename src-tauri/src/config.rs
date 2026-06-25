@@ -4,10 +4,32 @@ use anyhow::Result;
 use serde_json::Value;
 use crate::types::{AppConfig, Subscription, ProxyNode};
 
+/// User-Agent used when fetching subscriptions. Many airports gate the returned content
+/// on the client UA: a legacy "Clash" identifier (e.g. `ClashForWindows`) makes
+/// protocol-rich airports (vless-reality / hysteria2 / tuic) serve a "please switch
+/// client" placeholder config (fake `ss` nodes on 127.0.0.1) instead of the real nodes,
+/// because the original Clash core cannot handle those protocols. A modern, widely
+/// whitelisted client identifier makes them return the universal Base64 node list (or a
+/// Clash.Meta YAML), both of which the parser fully supports. Our core is sing-box, which
+/// supports every protocol these airports serve.
+pub const SUBSCRIPTION_USER_AGENT: &str = "v2rayN/6.45";
+
+/// Effective subscription User-Agent: the user-configured value, or the built-in default
+/// when it is unset/blank. Read fresh from the persisted config so a settings change takes
+/// effect on the next fetch without restarting.
+pub fn subscription_user_agent() -> String {
+    let ua = load_app_config().subscription_user_agent;
+    if ua.trim().is_empty() {
+        SUBSCRIPTION_USER_AGENT.to_string()
+    } else {
+        ua
+    }
+}
+
 pub fn app_data_dir() -> PathBuf {
     let base = dirs_next::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("sing-box-win")
+    base.join("Skylark")
 }
 
 pub fn singbox_config_path() -> PathBuf {
@@ -30,6 +52,30 @@ pub fn ensure_dirs() -> Result<()> {
     fs::create_dir_all(subscriptions_dir())?;
     fs::create_dir_all(rule_sets_dir())?;
     Ok(())
+}
+
+/// Stable random secret guarding the Clash API (`external_controller`). Generated once
+/// on first use and persisted to a dedicated file (NOT app_config.json, which round-trips
+/// through the frontend and could otherwise be wiped on a settings save). Cached for the
+/// process lifetime. Both the generated sing-box config and every Clash API caller read
+/// this same value, so the `Authorization: Bearer <secret>` header always matches.
+pub fn api_secret() -> String {
+    static API_SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    API_SECRET
+        .get_or_init(|| {
+            let path = app_data_dir().join("api_secret");
+            if let Ok(s) = fs::read_to_string(&path) {
+                let s = s.trim().to_string();
+                if !s.is_empty() {
+                    return s;
+                }
+            }
+            let secret = uuid::Uuid::new_v4().simple().to_string();
+            let _ = ensure_dirs();
+            let _ = fs::write(&path, &secret);
+            secret
+        })
+        .clone()
 }
 
 pub fn load_app_config() -> AppConfig {
@@ -96,6 +142,23 @@ pub fn save_outbounds(outbounds: &[Value]) -> Result<()> {
     ensure_dirs()?;
     let path = app_data_dir().join("outbounds.json");
     let data = serde_json::to_string_pretty(outbounds)?;
+    fs::write(path, data)?;
+    Ok(())
+}
+
+pub fn load_proxy_groups() -> Vec<crate::types::ProxyGroup> {
+    let path = app_data_dir().join("proxy_groups.json");
+    if let Ok(data) = fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or_default()
+    } else {
+        Vec::new()
+    }
+}
+
+pub fn save_proxy_groups(groups: &[crate::types::ProxyGroup]) -> Result<()> {
+    ensure_dirs()?;
+    let path = app_data_dir().join("proxy_groups.json");
+    let data = serde_json::to_string_pretty(groups)?;
     fs::write(path, data)?;
     Ok(())
 }

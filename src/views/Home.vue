@@ -137,15 +137,27 @@ const formatBytes = (bytes: number) => {
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 };
 
-const formatUptime = (sec?: number) => {
-  if (!sec) return "--";
+// Proxy session timer — tracks how long the proxy has been actively proxying in the
+// current session. Resets each time proxying transitions from off → on, and freezes
+// (shows "--") when proxying is off. This is intentionally decoupled from the backend's
+// process uptime, which counts from core start and keeps ticking even in idle mode.
+const proxySessionStart = ref<number | null>(null);
+const sessionElapsed = ref(0);
+let uptimeTick: ReturnType<typeof setInterval> | null = null;
+
+function formatUptime(sec: number) {
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = sec % 60;
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
-};
+}
+
+const displayUptime = computed(() => {
+  if (!store.proxying || proxySessionStart.value === null) return "--";
+  return formatUptime(sessionElapsed.value);
+});
 
 const proxyModeLabel = computed(() => {
   const map: Record<string, string> = {
@@ -167,6 +179,17 @@ onMounted(async () => {
   store.ensureActiveNowPoller();
   store.ensureTrafficPoller();
 
+  // Initialize session timer if already proxying when the page mounts.
+  if (store.proxying) {
+    proxySessionStart.value = Date.now();
+    sessionElapsed.value = 0;
+    uptimeTick = setInterval(() => {
+      if (proxySessionStart.value !== null) {
+        sessionElapsed.value = Math.floor((Date.now() - proxySessionStart.value) / 1000);
+      }
+    }, 1000);
+  }
+
   let lastProxying = store.proxying;
 
   pollTimer = setInterval(async () => {
@@ -174,11 +197,31 @@ onMounted(async () => {
     // before the backend finished setting the proxy on auto-restore startup.
     fetchSystemProxy();
 
-    // React to proxy connect/disconnect transitions (tray tooltip only — traffic/totals
-    // are handled by the store's global traffic monitor).
+    // React to proxy connect/disconnect transitions.
     if (store.proxying !== lastProxying) {
       lastProxying = store.proxying;
       store.updateTrayTooltip();
+
+      if (store.proxying) {
+        // Proxy turned on: start a fresh session timer.
+        proxySessionStart.value = Date.now();
+        sessionElapsed.value = 0;
+        if (!uptimeTick) {
+          uptimeTick = setInterval(() => {
+            if (proxySessionStart.value !== null) {
+              sessionElapsed.value = Math.floor((Date.now() - proxySessionStart.value) / 1000);
+            }
+          }, 1000);
+        }
+      } else {
+        // Proxy turned off: freeze the display and stop the timer.
+        proxySessionStart.value = null;
+        sessionElapsed.value = 0;
+        if (uptimeTick) {
+          clearInterval(uptimeTick);
+          uptimeTick = null;
+        }
+      }
     }
 
     memoryUsage.value = store.status.running
@@ -189,6 +232,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer);
+  if (uptimeTick) clearInterval(uptimeTick);
 });
 </script>
 
@@ -267,7 +311,7 @@ onUnmounted(() => {
         </div>
         <div class="stat-content">
           <div class="stat-label">运行时长</div>
-          <div class="stat-value">{{ formatUptime(store.status.uptime) }}</div>
+          <div class="stat-value">{{ displayUptime }}</div>
           <div class="stat-sub">
             <template v-if="memoryUsage !== null">
               内存 {{ formatBytes(memoryUsage) }} · {{ store.status.version ?? "sing-box" }}

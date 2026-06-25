@@ -1,4 +1,5 @@
 mod types;
+mod cn_direct;
 mod config;
 mod subscription;
 mod singbox;
@@ -33,6 +34,35 @@ fn sync_tray_checks(
     let sys_on = crate::proxy::get_system_proxy_status();
     let _ = sys_item.set_checked(sys_on && !in_tun);
     let _ = tun_item.set_checked(in_tun);
+}
+
+/// Reconcile the tray checks by pulling the menu-item handles out of `TrayState`.
+/// Used where we don't hold direct references — notably at the end of the async
+/// startup restore, so the initial checkmarks reflect the REAL running state
+/// (`singbox_state`) rather than the persisted `tun_enabled` flag.
+fn sync_tray_from_state(app: &tauri::AppHandle) {
+    let ts = app.state::<TrayState>();
+    let sys = ts.sys_proxy_item.lock().unwrap().clone();
+    let tun = ts.tun_item.lock().unwrap().clone();
+    if let (Some(sys), Some(tun)) = (sys, tun) {
+        sync_tray_checks(app, &sys, &tun);
+    }
+}
+
+/// Push the outcome of a tray-driven connection-mode change to the frontend so the
+/// dashboard reconciles its reactive state (tray toggles previously never reached the
+/// UI) and surfaces failures (e.g. enabling TUN without admin rights, which used to
+/// fail silently from the tray).
+fn emit_tray_mode_result(app: &tauri::AppHandle, res: Result<(), String>) {
+    use tauri::Emitter;
+    match res {
+        Ok(()) => {
+            let _ = app.emit("connection-mode-changed", ());
+        }
+        Err(e) => {
+            let _ = app.emit("connection-mode-error", e);
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -138,13 +168,21 @@ pub fn run() {
                     for name in [
                         "geoip-cn.srs",
                         "geosite-cn.srs",
-                        "geosite-geolocation-noncn.srs",
                     ] {
                         let src = src_dir.join(name);
                         if src.exists() {
                             let _ = std::fs::copy(&src, dst_dir.join(name));
                         }
                     }
+                }
+            }
+
+            // "Start minimized": hide the main window on launch so the app lives in the
+            // tray only. The window is created visible by tauri.conf.json, so we hide it
+            // here rather than starting hidden (keeps the normal show/focus path intact).
+            if crate::config::load_app_config().startup_minimized {
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
                 }
             }
 
@@ -180,6 +218,10 @@ pub fn run() {
                     } else {
                         let _ = crate::commands::start_idle_core(&handle, state.inner()).await;
                     }
+                    // Tray is built after this task is spawned but before the 1s delay
+                    // elapses, so its item handles are available here. Reconcile the
+                    // checkmarks with the real running state instead of the persisted flag.
+                    sync_tray_from_state(&handle);
                 });
             }
 
@@ -258,7 +300,7 @@ pub fn run() {
             let tray = TrayIconBuilder::with_id("tray-main")
                 .icon(tray_icon)
                 .icon_as_template(cfg!(target_os = "macos"))
-                .tooltip("sing-box-win\n● 已停止")
+                .tooltip("Skylark\n● 已停止")
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false) // left click = show window; right click = menu
                 .on_menu_event(move |app, event| {
@@ -278,8 +320,9 @@ pub fn run() {
                             tauri::async_runtime::spawn(async move {
                                 let state = app_c.state::<AppState>();
                                 let mode = if enabled { "system" } else { "off" };
-                                let _ = crate::commands::apply_connection_mode(&app_c, &state, mode).await;
+                                let res = crate::commands::apply_connection_mode(&app_c, &state, mode).await;
                                 sync_tray_checks(&app_c, &sys_item, &tun_it);
+                                emit_tray_mode_result(&app_c, res);
                             });
                         }
                         "tun_mode" => {
@@ -291,8 +334,9 @@ pub fn run() {
                             tauri::async_runtime::spawn(async move {
                                 let state = app_c.state::<AppState>();
                                 let mode = if enabled { "tun" } else { "off" };
-                                let _ = crate::commands::apply_connection_mode(&app_c, &state, mode).await;
+                                let res = crate::commands::apply_connection_mode(&app_c, &state, mode).await;
                                 sync_tray_checks(&app_c, &sys_item, &tun_it);
+                                emit_tray_mode_result(&app_c, res);
                             });
                         }
                         "quit" => {
@@ -335,8 +379,11 @@ pub fn run() {
             commands::cmd_set_connection_mode,
             commands::cmd_get_singbox_status,
             commands::cmd_get_logs,
+            commands::cmd_export_config,
+            commands::cmd_import_config,
             commands::cmd_get_subscriptions,
             commands::cmd_add_subscription,
+            commands::cmd_import_subscription_from_text,
             commands::cmd_update_subscription,
             commands::cmd_delete_subscription,
             commands::cmd_get_nodes,
@@ -349,7 +396,10 @@ pub fn run() {
             commands::cmd_get_app_config,
             commands::cmd_save_app_config,
             commands::cmd_set_proxy_mode,
+            commands::cmd_export_logs,
             commands::cmd_get_connections,
+            commands::cmd_close_connection,
+            commands::cmd_close_all_connections,
             commands::cmd_get_traffic_total,
             commands::cmd_parse_subscription_from_text,
             commands::cmd_check_singbox_update,
@@ -366,6 +416,12 @@ pub fn run() {
             commands::cmd_delete_rule,
             commands::cmd_toggle_rule,
             commands::cmd_reset_rules,
+            commands::cmd_get_rule_providers,
+            commands::cmd_add_rule_provider,
+            commands::cmd_delete_rule_provider,
+            commands::cmd_toggle_rule_provider,
+            commands::cmd_get_proxy_groups,
+            commands::cmd_save_proxy_groups,
             commands::cmd_update_tray_tooltip,
             commands::cmd_get_system_proxy_status,
             commands::cmd_set_system_proxy,

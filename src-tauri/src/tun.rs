@@ -106,7 +106,7 @@ pub fn relaunch_as_admin() -> Result<()> {
     Err(anyhow!("不支持此平台"))
 }
 
-/// Remove leftover "sing-box-tun*" network adapters from previous runs (fast path).
+/// Remove leftover "skylark-tun*" network adapters from previous runs (fast path).
 ///
 /// Because each start now uses a UNIQUE interface name, an orphaned adapter can no longer
 /// cause the "Cannot create a file when that file already exists" conflict — so this cleanup
@@ -124,7 +124,7 @@ pub async fn cleanup_stale_tun_adapter() {
     use tokio::process::Command as TokioCommand;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    let ps = "Get-NetAdapter -Name 'sing-box-tun*' -ErrorAction SilentlyContinue | \
+    let ps = "Get-NetAdapter -Name 'skylark-tun*' -ErrorAction SilentlyContinue | \
               Remove-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue";
     let _ = TokioCommand::new("powershell")
         .args(["-NonInteractive", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps])
@@ -162,7 +162,7 @@ pub async fn download_wintun(dest_dir: &std::path::Path) -> Result<()> {
     let url = "https://www.wintun.net/builds/wintun-0.14.1.zip";
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
-        .user_agent("sing-box-win/0.1.0")
+        .user_agent(concat!("skylark/", env!("CARGO_PKG_VERSION")))
         .no_proxy()
         .build()?;
 

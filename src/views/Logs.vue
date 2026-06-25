@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick, watch, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { Trash2, ArrowDown, Copy } from "@lucide/vue";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { Trash2, ArrowDown, Copy, Download } from "@lucide/vue";
 
+const LOG_CAP = 1000;
 const logs = ref<string[]>([]);
 const autoScroll = ref(true);
 const filterLevel = ref("all");
 const logContainer = ref<HTMLElement | null>(null);
-let pollTimer: ReturnType<typeof setInterval> | null = null;
+let unlistenLog: UnlistenFn | null = null;
 
 const levelColors: Record<string, string> = {
   error: "#d13438",
@@ -68,14 +71,39 @@ async function copyAllLogs() {
   }
 }
 
+const exporting = ref(false);
+async function exportLogs() {
+  exporting.value = true;
+  try {
+    const path = await invoke<string>("cmd_export_logs");
+    try {
+      await revealItemInDir(path);
+    } catch {
+      // Reveal may be unavailable; the file is still written.
+    }
+    alert(`日志已导出到：\n${path}`);
+  } catch (e) {
+    alert(`导出失败：${e}`);
+  } finally {
+    exporting.value = false;
+  }
+}
+
 watch(filtered, scrollToBottom);
 
-onMounted(() => {
-  fetchLogs();
-  pollTimer = setInterval(fetchLogs, 1000);
+onMounted(async () => {
+  // Load the current buffer once, then receive new lines incrementally via events
+  // instead of re-cloning the whole buffer on a timer.
+  await fetchLogs();
+  unlistenLog = await listen<string>("singbox-log", (e) => {
+    logs.value.push(e.payload);
+    if (logs.value.length > LOG_CAP) {
+      logs.value.splice(0, logs.value.length - LOG_CAP);
+    }
+  });
 });
 onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer);
+  if (unlistenLog) unlistenLog();
 });
 </script>
 
@@ -102,6 +130,10 @@ onUnmounted(() => {
         <button class="btn btn-ghost" @click="copyAllLogs" :title="copySuccess ? '已复制!' : '复制全部日志'">
           <Copy :size="14" :style="{ color: copySuccess ? '#107c10' : undefined }" />
           {{ copySuccess ? '已复制' : '复制' }}
+        </button>
+        <button class="btn btn-ghost" @click="exportLogs" :disabled="exporting" title="导出日志到文件">
+          <Download :size="14" />
+          {{ exporting ? '导出中...' : '导出' }}
         </button>
         <button class="btn btn-ghost" @click="logs = []" title="清空日志">
           <Trash2 :size="14" />

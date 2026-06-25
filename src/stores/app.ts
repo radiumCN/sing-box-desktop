@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 
 export interface SingboxStatus {
@@ -19,6 +20,11 @@ export interface Subscription {
   last_update?: string;
   auto_update: boolean;
   update_interval: number;
+  // Airport usage / quota from the `Subscription-Userinfo` header (optional).
+  upload?: number;   // bytes
+  download?: number; // bytes
+  total?: number;    // bytes
+  expire?: number;   // unix timestamp (seconds)
 }
 
 export interface ProxyNode {
@@ -32,6 +38,13 @@ export interface ProxyNode {
   download_speed?: number; // KB/s
   is_active: boolean;
   subscription_id?: string;
+}
+
+export interface ProxyGroup {
+  id: string;
+  name: string;
+  group_type: string; // "selector" | "urltest"
+  nodes: string[];    // member node names
 }
 
 export interface SpeedResult {
@@ -64,6 +77,10 @@ export interface AppConfig {
   auto_test_url: string;
   auto_test_interval: number;
   auto_tolerance: number;
+  enable_ipv6: boolean;
+  dns_local: string;
+  log_to_file: boolean;
+  subscription_user_agent: string;
 }
 
 export interface TrafficPoint {
@@ -76,6 +93,7 @@ export const useAppStore = defineStore("app", () => {
   const status = ref<SingboxStatus>({ running: false });
   const subscriptions = ref<Subscription[]>([]);
   const nodes = ref<ProxyNode[]>([]);
+  const proxyGroups = ref<ProxyGroup[]>([]);
   const config = ref<AppConfig>({
     proxy_mode: "rule",
     startup_with_system: false,
@@ -100,6 +118,10 @@ export const useAppStore = defineStore("app", () => {
     auto_test_url: "https://www.gstatic.com/generate_204",
     auto_test_interval: 3,
     auto_tolerance: 50,
+    enable_ipv6: false,
+    dns_local: "223.5.5.5",
+    log_to_file: false,
+    subscription_user_agent: "v2rayN/6.45",
   });
   const trafficHistory = ref<TrafficPoint[]>([]);
   // Cumulative bytes since the core started (authoritative, from the Clash API).
@@ -181,7 +203,7 @@ export const useAppStore = defineStore("app", () => {
       ? (activeNodeNow.value ? `自动 → ${activeNodeNow.value}` : "自动选优")
       : (activeNode.value?.name ?? "未选择");
     const state = proxying.value ? "● 已连接" : "○ 未连接";
-    const tooltip = `sing-box-win\n${state}\n节点: ${node}\n模式: ${mode}`;
+    const tooltip = `Skylark\n${state}\n节点: ${node}\n模式: ${mode}`;
     invoke("cmd_update_tray_tooltip", { tooltip }).catch(() => {});
   }
 
@@ -283,6 +305,13 @@ export const useAppStore = defineStore("app", () => {
     return sub;
   }
 
+  async function importSubscriptionFromText(name: string, content: string) {
+    const sub = await invoke<Subscription>("cmd_import_subscription_from_text", { name, content });
+    subscriptions.value.push(sub);
+    await fetchNodes();
+    return sub;
+  }
+
   async function updateSubscription(id: string) {
     const sub = await invoke<Subscription>("cmd_update_subscription", { id });
     const idx = subscriptions.value.findIndex((s) => s.id === id);
@@ -329,6 +358,18 @@ export const useAppStore = defineStore("app", () => {
     await fetchNodes();
     updateTrayTooltip();
     await refreshActiveNow();
+  }
+
+  // ── Custom proxy groups ──────────────────────────────────────────
+  async function fetchProxyGroups() {
+    proxyGroups.value = await invoke<ProxyGroup[]>("cmd_get_proxy_groups");
+  }
+
+  // Persist the full group list. Changes apply on the next config rebuild
+  // (reconnect / mode switch), like routing rules.
+  async function saveProxyGroups(groups: ProxyGroup[]) {
+    await invoke("cmd_save_proxy_groups", { groups });
+    proxyGroups.value = groups;
   }
 
   // The concrete node the auto group is currently routing through (resolved via the
@@ -566,12 +607,37 @@ export const useAppStore = defineStore("app", () => {
     // Start the app-lifetime traffic monitor so cumulative stats are tracked
     // regardless of which page the user is viewing.
     ensureTrafficPoller();
+    // React to connection-mode changes driven from the tray menu. The tray mutates
+    // the system proxy / TUN core directly in the backend; without these listeners the
+    // dashboard's reactive state (especially config.tun_enabled, which no poller
+    // refreshes) would stay stale, and tray-side failures would be invisible.
+    await listenTrayConnectionEvents();
+  }
+
+  // Idempotent: register once for the app lifetime. `listen` returns an unlisten fn we
+  // intentionally never call — the store lives as long as the app.
+  let trayEventsBound = false;
+  async function listenTrayConnectionEvents() {
+    if (trayEventsBound) return;
+    trayEventsBound = true;
+    await listen("connection-mode-changed", async () => {
+      await fetchConfig();
+      await fetchStatus();
+      await refreshSystemProxy();
+      updateTrayTooltip();
+    });
+    await listen<string>("connection-mode-error", (event) => {
+      error.value = event.payload || "切换连接模式失败";
+    });
   }
 
   return {
     status,
     subscriptions,
     nodes,
+    proxyGroups,
+    fetchProxyGroups,
+    saveProxyGroups,
     config,
     trafficHistory,
     totalUpload,
@@ -592,6 +658,7 @@ export const useAppStore = defineStore("app", () => {
     setConnectionMode,
     fetchSubscriptions,
     addSubscription,
+    importSubscriptionFromText,
     updateSubscription,
     deleteSubscription,
     saveSubscriptionSettings,

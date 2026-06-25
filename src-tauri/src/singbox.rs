@@ -2,9 +2,18 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use anyhow::{Result, anyhow};
 use serde_json::Value;
-use tauri::Manager;
+use tauri::{Manager, Emitter};
 use tokio::process::Command as TokioCommand;
 use tokio::io::{AsyncBufReadExt, BufReader};
+
+/// Open today's rolling log file in append mode under `app_data_dir/logs/`. Returns
+/// `None` if the directory or file cannot be created (logging then stays in-memory only).
+fn open_daily_log_file() -> Option<std::fs::File> {
+    let dir = crate::config::app_data_dir().join("logs");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("skylark-{}.log", chrono::Local::now().format("%Y%m%d")));
+    std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
+}
 
 /// Windows CREATE_NO_WINDOW flag: prevents a console window from popping up
 /// when spawning child processes (sing-box, taskkill).
@@ -116,8 +125,11 @@ async fn kill_orphan_singbox() {
 
 #[cfg(not(target_os = "windows"))]
 async fn kill_orphan_singbox() {
+    // Match the core's invocation signature ("…/sing-box run -c …") rather than the bare
+    // name. The core is the only process ever launched with `run -c`, so this pattern
+    // targets exactly the orphaned core and never the GUI app itself.
     let killed = TokioCommand::new("pkill")
-        .args(["-f", "sing-box"])
+        .args(["-f", "sing-box run -c"])
         .output()
         .await
         .map(|o| o.status.success())
@@ -131,7 +143,7 @@ async fn kill_orphan_singbox() {
 /// sing-box has finished starting up. Returns as soon as the port is reachable (typically
 /// ~100-200ms) instead of blocking on a fixed delay. Caps out after ~2s so a config that
 /// never binds the port doesn't hang the caller indefinitely.
-async fn wait_until_ready(api_port: u16) {
+async fn wait_until_ready(api_port: u16) -> bool {
     let addr = format!("127.0.0.1:{}", api_port);
     for _ in 0..40 {
         if tokio::time::timeout(
@@ -142,10 +154,11 @@ async fn wait_until_ready(api_port: u16) {
         .map(|r| r.is_ok())
         .unwrap_or(false)
         {
-            return;
+            return true;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    false
 }
 
 /// Start sing-box with the given config file
@@ -170,6 +183,7 @@ pub async fn start_singbox(
     let binary = singbox_binary_path(app_handle)?;
     let config_path = config_path.to_path_buf();
     let state_clone = state.clone();
+    let app_log = app_handle.clone();
 
     tokio::spawn(async move {
         let mut cmd = TokioCommand::new(&binary);
@@ -196,17 +210,35 @@ pub async fn start_singbox(
             s.tun_mode = tun_mode;
         }
 
-        // Read stderr for logs
+        // Read stderr for logs. Each line is (a) appended to the in-memory ring buffer,
+        // (b) optionally appended to today's rolling log file (crash-safe persistence),
+        // and (c) pushed to the UI via a `singbox-log` event so the frontend does not
+        // have to poll and re-clone the whole buffer every second.
         if let Some(stderr) = child.stderr.take() {
             let state_log = state_clone.clone();
+            let app_log = app_log.clone();
             tokio::spawn(async move {
+                // Read the persistence flag once at start; a runtime toggle takes effect
+                // on the next core (re)start, which is acceptable for this setting.
+                let mut log_file = if crate::config::load_app_config().log_to_file {
+                    open_daily_log_file()
+                } else {
+                    None
+                };
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
-                    let mut s = state_log.lock().unwrap();
-                    s.logs.push(line.clone());
-                    if s.logs.len() > 1000 {
-                        s.logs.drain(0..100);
+                    if let Some(f) = log_file.as_mut() {
+                        use std::io::Write;
+                        let _ = writeln!(f, "{}", line);
                     }
+                    {
+                        let mut s = state_log.lock().unwrap();
+                        s.logs.push(line.clone());
+                        if s.logs.len() > 1000 {
+                            s.logs.drain(0..100);
+                        }
+                    }
+                    let _ = app_log.emit("singbox-log", line);
                 }
             });
         }
@@ -219,8 +251,25 @@ pub async fn start_singbox(
         s.tun_mode = false;
     });
 
-    // Return as soon as the control port is up instead of a fixed 500ms wait.
-    wait_until_ready(api_port).await;
+    // Confirm the core actually came up: the Clash API control port must accept a
+    // connection. If it never binds — invalid config, the port still held by an orphan
+    // right after an app upgrade, or TUN failing without admin rights — the process has
+    // effectively failed even though `spawn()` succeeded. Returning Err here is critical:
+    // otherwise the caller (apply_connection_mode) would enable the system proxy / treat
+    // TUN as active on top of a DEAD core, which presents as "proxy on, but no network".
+    if !wait_until_ready(api_port).await {
+        kill_orphan_singbox().await;
+        {
+            let mut s = state.lock().unwrap();
+            s.running = false;
+            s.pid = None;
+            s.start_time = None;
+            s.tun_mode = false;
+        }
+        return Err(anyhow!(
+            "sing-box 启动失败：控制端口未就绪（配置无效 / 端口被占用 / TUN 需要管理员权限）"
+        ));
+    }
 
     Ok(())
 }
@@ -300,36 +349,13 @@ pub async fn stop_singbox(state: SharedState, graceful: bool) -> Result<()> {
     Ok(())
 }
 
-/// Fetch real-time stats from sing-box API (Clash API compatible)
-#[allow(dead_code)]
-pub async fn fetch_traffic_stats(api_port: u16) -> Result<crate::types::TrafficStats> {
-    let url = format!("http://127.0.0.1:{}/traffic", api_port);
-    let client = reqwest::Client::new();
-
-    // The traffic endpoint is a streaming endpoint; for simplicity we use /memory
-    let memory_url = format!("http://127.0.0.1:{}/memory", api_port);
-    let resp = client.get(&memory_url)
-        .timeout(Duration::from_secs(2))
-        .send()
-        .await?;
-    let _body: Value = resp.json().await?;
-
-    let _ = url;
-    // Return placeholder — real traffic data comes via WebSocket stream
-    Ok(crate::types::TrafficStats {
-        upload_bytes: 0,
-        download_bytes: 0,
-        upload_speed: 0,
-        download_speed: 0,
-        connections: 0,
-    })
-}
 
 /// Fetch connections from Clash API
 pub async fn fetch_connections(api_port: u16) -> Result<Vec<crate::types::ConnectionInfo>> {
     let url = format!("http://127.0.0.1:{}/connections", api_port);
     let client = reqwest::Client::new();
     let resp = client.get(&url)
+        .bearer_auth(crate::config::api_secret())
         .timeout(Duration::from_secs(2))
         .send()
         .await?;
@@ -366,4 +392,30 @@ pub async fn fetch_connections(api_port: u16) -> Result<Vec<crate::types::Connec
     }
 
     Ok(result)
+}
+
+/// Close a single active connection via the Clash API (`DELETE /connections/{id}`).
+pub async fn close_connection(api_port: u16, id: &str) -> Result<()> {
+    let url = format!("http://127.0.0.1:{}/connections/{}", api_port, id);
+    let client = reqwest::Client::new();
+    client.delete(&url)
+        .bearer_auth(crate::config::api_secret())
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
+}
+
+/// Close all active connections via the Clash API (`DELETE /connections`).
+pub async fn close_all_connections(api_port: u16) -> Result<()> {
+    let url = format!("http://127.0.0.1:{}/connections", api_port);
+    let client = reqwest::Client::new();
+    client.delete(&url)
+        .bearer_auth(crate::config::api_secret())
+        .timeout(Duration::from_secs(3))
+        .send()
+        .await?
+        .error_for_status()?;
+    Ok(())
 }

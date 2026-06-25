@@ -77,15 +77,15 @@ const SIDEBAR_SVG = `
   <path d="M70,100 L86,100 M80,93 L87,100 L80,107"
         fill="none" stroke="white" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
 
-  <!-- sing-box title -->
+  <!-- Skylark title -->
   <text x="82" y="155"
         font-family="Arial,sans-serif" font-size="19" font-weight="bold"
-        text-anchor="middle" fill="white" letter-spacing="0.5">sing-box</text>
+        text-anchor="middle" fill="white" letter-spacing="0.5">Skylark</text>
 
   <!-- Subtitle -->
   <text x="82" y="172"
         font-family="Arial,sans-serif" font-size="9.5"
-        text-anchor="middle" fill="#94a3b8" letter-spacing="1">代理客户端</text>
+        text-anchor="middle" fill="#94a3b8" letter-spacing="1">云雀 · 代理客户端</text>
 
   <!-- Divider -->
   <line x1="32" y1="272" x2="132" y2="272" stroke="#1e3a5f" stroke-width="1"/>
@@ -126,7 +126,7 @@ const HEADER_SVG = `
   <!-- Product name -->
   <text x="48" y="27"
         font-family="Arial,sans-serif" font-size="14" font-weight="bold"
-        fill="white" letter-spacing="0.3">sing-box</text>
+        fill="white" letter-spacing="0.3">Skylark</text>
 
   <!-- Subtitle -->
   <text x="48" y="41"
@@ -177,7 +177,7 @@ const DMG_SVG = `
   <!-- Title -->
   <text x="330" y="64"
         font-family="-apple-system,'PingFang SC','Helvetica Neue',Arial,sans-serif"
-        font-size="20" font-weight="600" fill="#1f2d4d" text-anchor="middle">将 sing-box 拖入「应用程序」完成安装</text>
+        font-size="20" font-weight="600" fill="#1f2d4d" text-anchor="middle">将 Skylark 拖入「应用程序」完成安装</text>
 
   <!-- Curved arrow from the app icon (180,200) toward Applications (480,200) -->
   <path d="M252,208 C300,180 360,180 400,198"

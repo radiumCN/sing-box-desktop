@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from "vue";
-import { Gauge, RefreshCw, CheckCircle, Signal, Zap, ArrowUpDown } from "@lucide/vue";
+import { Gauge, RefreshCw, CheckCircle, Signal, Zap, ArrowUpDown, Plus, Trash2, Pencil, Layers } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
 
 const store = useAppStore();
@@ -30,7 +30,57 @@ onMounted(() => {
   validateSubFilter();
   // Use the store's single shared poller for the active auto group's current node.
   store.ensureActiveNowPoller();
+  store.fetchProxyGroups();
 });
+
+// ─── Custom proxy groups ─────────────────────────────────────────────
+const showGroupEditor = ref(false);
+const editingGroupId = ref<string | null>(null);
+const groupForm = ref<{ name: string; group_type: string; nodes: string[] }>({
+  name: "",
+  group_type: "urltest",
+  nodes: [],
+});
+const allNodeNames = computed(() => Array.from(new Set(store.nodes.map((n) => n.name))));
+
+function openNewGroup() {
+  editingGroupId.value = null;
+  groupForm.value = { name: "", group_type: "urltest", nodes: [] };
+  showGroupEditor.value = true;
+}
+function openEditGroup(g: { id: string; name: string; group_type: string; nodes: string[] }) {
+  editingGroupId.value = g.id;
+  groupForm.value = { name: g.name, group_type: g.group_type, nodes: [...g.nodes] };
+  showGroupEditor.value = true;
+}
+function toggleMember(name: string) {
+  const arr = groupForm.value.nodes;
+  const i = arr.indexOf(name);
+  if (i >= 0) arr.splice(i, 1);
+  else arr.push(name);
+}
+async function saveGroup() {
+  const name = groupForm.value.name.trim();
+  if (!name || groupForm.value.nodes.length === 0) return;
+  const groups = store.proxyGroups.map((g) => ({ ...g }));
+  if (editingGroupId.value) {
+    const idx = groups.findIndex((g) => g.id === editingGroupId.value);
+    if (idx >= 0) {
+      groups[idx] = { ...groups[idx], name, group_type: groupForm.value.group_type, nodes: [...groupForm.value.nodes] };
+    }
+  } else {
+    groups.push({ id: crypto.randomUUID(), name, group_type: groupForm.value.group_type, nodes: [...groupForm.value.nodes] });
+  }
+  await store.saveProxyGroups(groups);
+  showGroupEditor.value = false;
+}
+async function deleteGroup(id: string) {
+  if (!confirm("确认删除此代理组？")) return;
+  await store.saveProxyGroups(store.proxyGroups.filter((g) => g.id !== id));
+}
+async function useGroup(name: string) {
+  await store.setAutoNode(name);
+}
 
 const nodesForSub = computed(() => {
   if (filterSubId.value === "all") return store.nodes;
@@ -204,6 +254,89 @@ const autoNowName = computed(() => store.activeNodeNow);
           {{ sub.name }}
           <span class="sub-count">{{ store.nodes.filter(n => n.subscription_id === sub.id).length }}</span>
         </button>
+      </div>
+    </div>
+
+    <!-- Custom proxy groups -->
+    <div v-if="store.nodes.length > 0" class="card group-card">
+      <div class="group-head">
+        <div class="group-title">
+          <Layers :size="14" />
+          <span>自定义代理组</span>
+        </div>
+        <button class="btn btn-ghost btn-sm" @click="openNewGroup">
+          <Plus :size="13" />
+          新建组
+        </button>
+      </div>
+
+      <div v-if="store.proxyGroups.length === 0 && !showGroupEditor" class="group-empty">
+        创建自定义组（手动选择 / 自动选优），保存后在下次重连生效
+      </div>
+
+      <div v-if="store.proxyGroups.length > 0" class="group-list">
+        <div
+          v-for="g in store.proxyGroups"
+          :key="g.id"
+          class="group-item"
+          :class="{ active: store.activeProxyTag === g.name }"
+        >
+          <div class="group-info">
+            <div class="group-name">
+              {{ g.name }}
+              <span class="group-badge">{{ g.group_type === "urltest" ? "自动选优" : "手动选择" }}</span>
+            </div>
+            <div class="group-members">{{ g.nodes.length }} 个节点</div>
+          </div>
+          <div class="group-actions">
+            <button class="btn btn-ghost btn-sm" @click="useGroup(g.name)">
+              {{ store.activeProxyTag === g.name ? "使用中" : "使用此组" }}
+            </button>
+            <button class="icon-btn" title="编辑" @click="openEditGroup(g)">
+              <Pencil :size="14" />
+            </button>
+            <button class="icon-btn danger" title="删除" @click="deleteGroup(g.id)">
+              <Trash2 :size="14" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Group editor -->
+      <div v-if="showGroupEditor" class="group-editor">
+        <div class="editor-row">
+          <input class="input" v-model="groupForm.name" placeholder="组名称（需唯一，勿与节点同名）" />
+          <select class="input editor-type" v-model="groupForm.group_type">
+            <option value="urltest">自动选优（按延迟）</option>
+            <option value="selector">手动选择</option>
+          </select>
+        </div>
+        <div class="member-label">选择成员节点（{{ groupForm.nodes.length }}）</div>
+        <div class="member-grid">
+          <label
+            v-for="name in allNodeNames"
+            :key="name"
+            class="member-chip"
+            :class="{ on: groupForm.nodes.includes(name) }"
+          >
+            <input
+              type="checkbox"
+              :checked="groupForm.nodes.includes(name)"
+              @change="toggleMember(name)"
+            />
+            {{ name }}
+          </label>
+        </div>
+        <div class="editor-actions">
+          <button class="btn btn-ghost" @click="showGroupEditor = false">取消</button>
+          <button
+            class="btn btn-primary"
+            :disabled="!groupForm.name.trim() || groupForm.nodes.length === 0"
+            @click="saveGroup"
+          >
+            {{ editingGroupId ? "保存修改" : "创建" }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -420,4 +553,56 @@ const autoNowName = computed(() => store.activeNodeNow);
 }
 .sort-btn:hover { background: rgba(128,128,128,0.1); }
 .sort-btn.active { background: var(--color-primary); color: white; border-radius: var(--radius-sm); }
+
+/* ─── Custom proxy groups ─── */
+.group-card { padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.group-head { display: flex; align-items: center; justify-content: space-between; }
+.group-title { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; }
+.btn-sm { padding: 3px 10px !important; font-size: 12px; }
+.group-empty { font-size: 12px; color: var(--color-text-muted); }
+.group-list { display: flex; flex-direction: column; gap: 8px; }
+.group-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 12px; border: 1px solid var(--color-border);
+  border-radius: var(--radius-md); background: rgba(128,128,128,0.03);
+}
+.group-item.active { border-color: var(--color-primary); background: rgba(0,120,212,0.06); }
+.group-info { min-width: 0; }
+.group-name { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.group-badge {
+  font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 100px;
+  background: rgba(240,192,64,0.14); color: #b8860b;
+}
+.group-members { font-size: 11px; color: var(--color-text-muted); margin-top: 2px; }
+.group-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border: none; border-radius: var(--radius-sm);
+  background: transparent; color: var(--color-text-secondary); cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.icon-btn:hover { background: rgba(128,128,128,0.1); color: var(--color-text); }
+.icon-btn.danger:hover { background: rgba(209,52,56,0.1); color: var(--color-error); }
+
+.group-editor {
+  display: flex; flex-direction: column; gap: 10px;
+  padding: 12px; border: 1px dashed var(--color-border); border-radius: var(--radius-md);
+}
+.editor-row { display: flex; gap: 8px; }
+.editor-type { max-width: 180px; }
+.member-label { font-size: 12px; font-weight: 500; color: var(--color-text-secondary); }
+.member-grid {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  max-height: 180px; overflow-y: auto;
+}
+.member-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 4px 9px; border: 1px solid var(--color-border);
+  border-radius: 100px; font-size: 12px; cursor: pointer;
+  transition: all 0.15s; user-select: none;
+}
+.member-chip.on { border-color: var(--color-primary); background: rgba(0,120,212,0.08); color: var(--color-primary); }
+.member-chip input { margin: 0; }
+.editor-actions { display: flex; gap: 8px; justify-content: flex-end; }
 </style>

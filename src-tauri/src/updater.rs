@@ -5,9 +5,9 @@ use tauri::Emitter;
 
 const GITHUB_API: &str = "https://api.github.com/repos/SagerNet/sing-box/releases/latest";
 const APP_GITHUB_STABLE_API: &str =
-    "https://api.github.com/repos/radiumCN/sing-box-desktop/releases/latest";
+    "https://api.github.com/repos/radiumCN/skylark/releases/latest";
 const APP_GITHUB_ALL_API: &str =
-    "https://api.github.com/repos/radiumCN/sing-box-desktop/releases";
+    "https://api.github.com/repos/radiumCN/skylark/releases";
 /// Cache validity duration in seconds (1 hour)
 const CACHE_TTL_SECS: u64 = 3600;
 
@@ -122,7 +122,7 @@ pub async fn fetch_latest_release(force_refresh: bool) -> Result<ReleaseInfo> {
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .user_agent(concat!("sing-box-win/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("skylark/", env!("CARGO_PKG_VERSION")))
         .no_proxy()
         .build()?;
 
@@ -226,7 +226,7 @@ pub async fn download_singbox(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
-        .user_agent(concat!("sing-box-win/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("skylark/", env!("CARGO_PKG_VERSION")))
         .no_proxy()
         .build()?;
 
@@ -463,7 +463,7 @@ fn find_app_installer_url(assets: &[serde_json::Value]) -> Option<String> {
 
     #[cfg(target_os = "macos")]
     {
-        // sing-box-desktop releases ship per-arch .dmg files; match the running arch.
+        // skylark releases ship per-arch .dmg files; match the running arch.
         let arch_kw = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x64" };
         let arch_alt = if cfg!(target_arch = "aarch64") { "arm64" } else { "x86_64" };
         assets
@@ -535,7 +535,7 @@ pub async fn fetch_app_release(channel: &str, force_refresh: bool) -> Result<App
     // Bypass system proxy (which points to sing-box itself) to avoid circular dependency.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .user_agent(concat!("sing-box-win/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("skylark/", env!("CARGO_PKG_VERSION")))
         .no_proxy()
         .build()?;
 
@@ -595,7 +595,7 @@ pub async fn download_and_install_app(
     // Bypass system proxy (which points to sing-box itself) to avoid circular dependency.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
-        .user_agent(concat!("sing-box-win/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("skylark/", env!("CARGO_PKG_VERSION")))
         .no_proxy()
         .build()?;
 
@@ -611,7 +611,7 @@ pub async fn download_and_install_app(
     let file_name = download_url
         .split('/')
         .last()
-        .unwrap_or("sing-box-win-setup.exe")
+        .unwrap_or("skylark-setup.exe")
         .to_string();
     let installer_path = temp_dir.join(&file_name);
 
@@ -644,6 +644,18 @@ pub async fn download_and_install_app(
         "message": "下载完成，即将启动安装程序",
         "path": installer_path.to_string_lossy(),
     }));
+
+    // Cleanly tear down BEFORE the installer restarts the app. The NSIS installer
+    // force-terminates the running process, which bypasses the window-close / tray-quit
+    // handlers that normally run shutdown_core. Without this, the old core would be left
+    // orphaned (still holding the mixed/API port and TUN adapter) and the Windows system
+    // proxy would stay pointing at it — so the upgraded app restores "proxy on" on top of
+    // a stale/dead core and ends up with no network. Stopping here clears both.
+    {
+        use tauri::Manager;
+        let state = app_handle.state::<crate::commands::AppState>();
+        crate::commands::shutdown_core(state.inner()).await;
+    }
 
     // Launch the installer.
     // Windows: the NSIS installer handles closing and restarting the app.

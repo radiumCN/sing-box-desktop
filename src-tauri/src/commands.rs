@@ -153,7 +153,7 @@ pub async fn cmd_stop_singbox(
     // Clearing the system proxy is enough for a system-proxy session; a TUN session
     // additionally needs the core rebuilt to idle, which the dashboard does via
     // setConnectionMode("off") → apply_connection_mode. Here we just clear + persist.
-    let _ = proxy::set_system_proxy(false, 0);
+    let _ = proxy::set_system_proxy(false, 0, false);
     {
         let mut cfg = state.app_config.lock().unwrap();
         cfg.last_proxy_running = false;
@@ -177,7 +177,7 @@ pub async fn apply_connection_mode(
     mode: &str,
 ) -> Result<(), String> {
     if mode == "off" {
-        let _ = proxy::set_system_proxy(false, 0);
+        let _ = proxy::set_system_proxy(false, 0, false);
         // If TUN is active, return the core to the idle mixed-only state.
         let in_tun = {
             let s = state.singbox_state.lock().unwrap();
@@ -215,10 +215,13 @@ pub async fn apply_connection_mode(
     // Apply the routing path: system proxy ON for "system", cleared for "tun".
     let enable_sys_proxy = !want_tun;
     if enable_sys_proxy {
-        let port = state.app_config.lock().unwrap().mixed_port;
-        proxy::set_system_proxy(true, port).map_err(|e| e.to_string())?;
+        let (port, global_mode) = {
+            let cfg = state.app_config.lock().unwrap();
+            (cfg.mixed_port, cfg.proxy_mode == ProxyMode::Global)
+        };
+        proxy::set_system_proxy(true, port, global_mode).map_err(|e| e.to_string())?;
     } else {
-        let _ = proxy::set_system_proxy(false, 0);
+        let _ = proxy::set_system_proxy(false, 0, false);
     }
 
     {
@@ -250,7 +253,7 @@ pub async fn shutdown_core(state: &AppState) {
         s.running && s.tun_mode
     };
     let _ = stop_singbox(state.singbox_state.clone(), graceful).await;
-    let _ = proxy::set_system_proxy(false, 0);
+    let _ = proxy::set_system_proxy(false, 0, false);
 }
 
 #[tauri::command]
@@ -271,6 +274,133 @@ pub fn cmd_get_logs(state: State<'_, AppState>) -> Vec<String> {
     state.singbox_state.lock().unwrap().logs.clone()
 }
 
+/// Export the current in-memory logs to a timestamped `.log` file under the app data
+/// dir's `logs/` folder and return the absolute path. The frontend reveals it via the
+/// opener plugin. Returns an error if there is nothing to export.
+#[tauri::command]
+pub fn cmd_export_logs(state: State<'_, AppState>) -> Result<String, String> {
+    let logs = state.singbox_state.lock().unwrap().logs.clone();
+    if logs.is_empty() {
+        return Err("暂无日志可导出".to_string());
+    }
+    let dir = config::app_data_dir().join("logs");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let filename = format!("singbox-{}.log", chrono::Local::now().format("%Y%m%d-%H%M%S"));
+    let path = dir.join(filename);
+    std::fs::write(&path, logs.join("\n")).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+// ─── Config backup / restore ────────────────────────────────────────
+
+/// Marker so import can reject unrelated JSON files.
+const CONFIG_BUNDLE_FORMAT: &str = "skylark-config";
+
+/// Export the full user setup (settings, subscriptions + their raw content, nodes,
+/// outbounds, proxy groups, routing rules) to a single timestamped JSON file under the
+/// app data dir's `backups/` folder and return the absolute path. The frontend reveals
+/// it via the opener plugin. The Clash API secret is intentionally NOT exported — it is
+/// machine-local and regenerated on demand.
+#[tauri::command]
+pub fn cmd_export_config(state: State<'_, AppState>) -> Result<String, String> {
+    let app_config = state.app_config.lock().unwrap().clone();
+    let subscriptions = state.subscriptions.lock().unwrap().clone();
+    let nodes = state.nodes.lock().unwrap().clone();
+    let outbounds = state.outbounds.lock().unwrap().clone();
+    let proxy_groups = config::load_proxy_groups();
+    let rules = crate::rules::load_rules();
+
+    // Bundle each subscription's cached raw text so text-imported subs survive a restore.
+    let mut contents = serde_json::Map::new();
+    for sub in &subscriptions {
+        if let Some(text) = config::load_subscription_content(&sub.id) {
+            contents.insert(sub.id.clone(), Value::String(text));
+        }
+    }
+
+    let bundle = serde_json::json!({
+        "format": CONFIG_BUNDLE_FORMAT,
+        "version": 1,
+        "exported_at": chrono::Local::now().to_rfc3339(),
+        "app_version": env!("CARGO_PKG_VERSION"),
+        "app_config": app_config,
+        "subscriptions": subscriptions,
+        "nodes": nodes,
+        "outbounds": outbounds,
+        "proxy_groups": proxy_groups,
+        "rules": rules,
+        "subscription_contents": Value::Object(contents),
+    });
+
+    let dir = config::app_data_dir().join("backups");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let filename = format!(
+        "skylark-config-{}.json",
+        chrono::Local::now().format("%Y%m%d-%H%M%S")
+    );
+    let path = dir.join(filename);
+    let data = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
+    std::fs::write(&path, data).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Restore a configuration bundle produced by `cmd_export_config` from pasted JSON text.
+/// Each section is applied independently and tolerantly — a malformed/missing section is
+/// skipped rather than aborting the whole restore — and both the on-disk files and the
+/// in-memory `AppState` are updated so the UI reflects the change without a relaunch.
+/// Takes effect on the next core (re)start. Ports/secret unaffected mid-session.
+#[tauri::command]
+pub fn cmd_import_config(content: String, state: State<'_, AppState>) -> Result<(), String> {
+    let bundle: Value = serde_json::from_str(&content)
+        .map_err(|_| "无效的备份文件（JSON 解析失败）".to_string())?;
+    if bundle["format"] != CONFIG_BUNDLE_FORMAT {
+        return Err("不是 Skylark 配置备份文件".to_string());
+    }
+
+    if let Some(v) = bundle.get("app_config") {
+        if let Ok(cfg) = serde_json::from_value::<AppConfig>(v.clone()) {
+            config::save_app_config(&cfg).map_err(|e| e.to_string())?;
+            *state.app_config.lock().unwrap() = cfg;
+        }
+    }
+    if let Some(v) = bundle.get("subscriptions") {
+        if let Ok(subs) = serde_json::from_value::<Vec<Subscription>>(v.clone()) {
+            config::save_subscriptions(&subs).map_err(|e| e.to_string())?;
+            *state.subscriptions.lock().unwrap() = subs;
+        }
+    }
+    if let Some(v) = bundle.get("nodes") {
+        if let Ok(ns) = serde_json::from_value::<Vec<ProxyNode>>(v.clone()) {
+            config::save_nodes(&ns).map_err(|e| e.to_string())?;
+            *state.nodes.lock().unwrap() = ns;
+        }
+    }
+    if let Some(v) = bundle.get("outbounds") {
+        if let Ok(obs) = serde_json::from_value::<Vec<Value>>(v.clone()) {
+            config::save_outbounds(&obs).map_err(|e| e.to_string())?;
+            *state.outbounds.lock().unwrap() = obs;
+        }
+    }
+    if let Some(v) = bundle.get("proxy_groups") {
+        if let Ok(groups) = serde_json::from_value::<Vec<ProxyGroup>>(v.clone()) {
+            config::save_proxy_groups(&groups).map_err(|e| e.to_string())?;
+        }
+    }
+    if let Some(v) = bundle.get("rules") {
+        if let Ok(rules) = serde_json::from_value::<Vec<crate::rules::RouteRule>>(v.clone()) {
+            crate::rules::save_rules(&rules).map_err(|e| e.to_string())?;
+        }
+    }
+    if let Some(Value::Object(map)) = bundle.get("subscription_contents") {
+        for (id, text) in map {
+            if let Some(s) = text.as_str() {
+                let _ = config::save_subscription_content(id, s);
+            }
+        }
+    }
+    Ok(())
+}
+
 // ─── Subscriptions ──────────────────────────────────────────────────
 
 #[tauri::command]
@@ -285,7 +415,7 @@ pub async fn cmd_add_subscription(
     state: State<'_, AppState>,
 ) -> Result<Subscription, String> {
     let id = uuid::Uuid::new_v4().to_string();
-    let content = fetch_url(&url).await.map_err(|e| e.to_string())?;
+    let (content, userinfo) = fetch_url(&url).await.map_err(|e| e.to_string())?;
     config::save_subscription_content(&id, &content).map_err(|e| e.to_string())?;
     let sub_type = subscription::detect_sub_type(&content, &url);
     let (nodes, outbounds) = subscription::parse_subscription(&content, &id)
@@ -300,6 +430,63 @@ pub async fn cmd_add_subscription(
         last_update: Some(chrono::Utc::now()),
         auto_update: true,
         update_interval: 24,
+        upload: userinfo.upload,
+        download: userinfo.download,
+        total: userinfo.total,
+        expire: userinfo.expire,
+    };
+
+    {
+        let mut subs = state.subscriptions.lock().unwrap();
+        subs.push(sub.clone());
+        config::save_subscriptions(&subs).map_err(|e| e.to_string())?;
+    }
+    {
+        let mut all_nodes = state.nodes.lock().unwrap();
+        all_nodes.retain(|n| n.subscription_id.as_deref() != Some(&id));
+        all_nodes.extend(nodes);
+        config::save_nodes(&all_nodes).map_err(|e| e.to_string())?;
+    }
+    {
+        let mut all_outbounds = state.outbounds.lock().unwrap();
+        all_outbounds.retain(|ob| {
+            !outbounds.iter().any(|new| new["tag"] == ob["tag"])
+        });
+        all_outbounds.extend(outbounds);
+        config::save_outbounds(&all_outbounds).map_err(|e| e.to_string())?;
+    }
+
+    Ok(sub)
+}
+
+/// Import a subscription from pasted text (single node links / Base64 / Clash YAML /
+/// SIP008) instead of a remote URL. Persisted as a local subscription with no URL and
+/// auto-update disabled — there is no remote source to re-fetch from.
+#[tauri::command]
+pub async fn cmd_import_subscription_from_text(
+    name: String,
+    content: String,
+    state: State<'_, AppState>,
+) -> Result<Subscription, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let (nodes, outbounds) = subscription::parse_subscription(&content, &id)
+        .map_err(|e| e.to_string())?;
+    let sub_type = subscription::detect_sub_type(&content, "");
+    config::save_subscription_content(&id, &content).map_err(|e| e.to_string())?;
+
+    let sub = Subscription {
+        id: id.clone(),
+        name,
+        url: String::new(),
+        sub_type,
+        node_count: nodes.len(),
+        last_update: Some(chrono::Utc::now()),
+        auto_update: false,
+        update_interval: 0,
+        upload: None,
+        download: None,
+        total: None,
+        expire: None,
     };
 
     {
@@ -338,7 +525,7 @@ pub async fn cmd_update_subscription(
             .ok_or_else(|| "订阅不存在".to_string())?
     };
 
-    let content = fetch_url(&url).await.map_err(|e| e.to_string())?;
+    let (content, userinfo) = fetch_url(&url).await.map_err(|e| e.to_string())?;
     config::save_subscription_content(&id, &content).map_err(|e| e.to_string())?;
     let sub_type = subscription::detect_sub_type(&content, &url);
     let (nodes, outbounds) = subscription::parse_subscription(&content, &id)
@@ -352,6 +539,12 @@ pub async fn cmd_update_subscription(
         sub.sub_type = sub_type;
         sub.node_count = nodes.len();
         sub.last_update = Some(chrono::Utc::now());
+        // Only overwrite quota fields when the provider actually returned them, so a
+        // missing header on one refresh doesn't wipe previously-known usage.
+        if userinfo.upload.is_some() { sub.upload = userinfo.upload; }
+        if userinfo.download.is_some() { sub.download = userinfo.download; }
+        if userinfo.total.is_some() { sub.total = userinfo.total; }
+        if userinfo.expire.is_some() { sub.expire = userinfo.expire; }
         let cloned = sub.clone();
         config::save_subscriptions(&subs).map_err(|e| e.to_string())?;
         cloned
@@ -437,18 +630,25 @@ pub async fn cmd_test_node_latency(
     node_id: String,
     state: State<'_, AppState>,
 ) -> Result<u32, String> {
-    let (server, port, mixed_port, is_running) = {
+    let (name, server, port, api_port, test_url, is_running) = {
         let nodes = state.nodes.lock().unwrap();
         let node = nodes.iter().find(|n| n.id == node_id)
             .ok_or_else(|| "节点不存在".to_string())?;
         let cfg = state.app_config.lock().unwrap();
         let running = state.singbox_state.lock().unwrap().running;
-        (node.server.clone(), node.port, cfg.mixed_port, running)
+        let url = if cfg.auto_test_url.trim().is_empty() {
+            "https://www.gstatic.com/generate_204".to_string()
+        } else {
+            cfg.auto_test_url.trim().to_string()
+        };
+        (node.name.clone(), node.server.clone(), node.port, cfg.api_port, url, running)
     };
 
     let latency_ms = if is_running {
-        // Proxy is running: test via proxy to a reliable URL
-        test_via_proxy(mixed_port).await
+        // Proxy is running: measure THIS specific node via the Clash delay API. Routing
+        // through the local mixed port would only ever exercise the currently selected
+        // proxy, so every node would report the same latency.
+        clash_proxy_delay(api_port, &name, &test_url).await
     } else {
         // Proxy not running: TCP connect to the server itself
         test_tcp_connect(&server, port).await
@@ -474,27 +674,35 @@ pub async fn cmd_test_node_latency(
     }
 }
 
-/// Test latency by routing an HTTP request through the local mixed proxy port.
-async fn test_via_proxy(mixed_port: u16) -> Option<u32> {
-    let proxy_url = format!("http://127.0.0.1:{}", mixed_port);
-    let proxy = reqwest::Proxy::http(&proxy_url).ok()?;
+/// Measure a single node's latency through the running core via the Clash API
+/// `GET /proxies/{name}/delay`. This probes the SPECIFIC node regardless of which
+/// proxy is currently selected — unlike routing a request through the local mixed
+/// port, which only ever exercises the active selection. The node name is appended
+/// as a path segment so names with spaces / unicode / slashes are encoded safely.
+/// Returns None on timeout, error, or an unreachable node.
+async fn clash_proxy_delay(api_port: u16, name: &str, test_url: &str) -> Option<u32> {
+    let mut endpoint = reqwest::Url::parse(
+        &format!("http://127.0.0.1:{}/proxies", api_port)
+    ).ok()?;
+    if let Ok(mut seg) = endpoint.path_segments_mut() {
+        seg.push(name).push("delay");
+    }
+    endpoint.query_pairs_mut()
+        .append_pair("url", test_url)
+        .append_pair("timeout", "5000");
+
     let client = reqwest::Client::builder()
-        .proxy(proxy)
-        .timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(8))
         .build()
         .ok()?;
-    let start = std::time::Instant::now();
-    let result = client
-        .get("http://cp.cloudflare.com/generate_204")
-        .send()
-        .await;
-    match result {
-        Ok(_) => {
-            let ms = start.elapsed().as_millis() as u32;
-            Some(ms.max(1))
-        }
-        Err(_) => None,
+    let resp = client.get(endpoint)
+        .bearer_auth(crate::config::api_secret())
+        .send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
     }
+    let body: Value = resp.json().await.ok()?;
+    body["delay"].as_u64().map(|d| (d as u32).max(1))
 }
 
 /// Measure download speed in KB/s by downloading a file through the proxy.
@@ -527,19 +735,27 @@ pub async fn cmd_test_node_speed(
     node_id: String,
     state: State<'_, AppState>,
 ) -> Result<types::SpeedResult, String> {
-    let (server, port, mixed_port, is_running) = {
+    let (name, server, port, mixed_port, api_port, test_url, is_running) = {
         let nodes = state.nodes.lock().unwrap();
         let node = nodes.iter().find(|n| n.id == node_id)
             .ok_or_else(|| "节点不存在".to_string())?;
         let cfg = state.app_config.lock().unwrap();
         let running = state.singbox_state.lock().unwrap().running;
-        (node.server.clone(), node.port, cfg.mixed_port, running)
+        let url = if cfg.auto_test_url.trim().is_empty() {
+            "https://www.gstatic.com/generate_204".to_string()
+        } else {
+            cfg.auto_test_url.trim().to_string()
+        };
+        (node.name.clone(), node.server.clone(), node.port, cfg.mixed_port, cfg.api_port, url, running)
     };
 
     let (latency_ms, download_kbps) = if is_running {
-        // Run latency and download speed in parallel
+        // Latency probes THIS node via the Clash delay API; download speed is measured
+        // through the local mixed port and therefore reflects the currently SELECTED
+        // node's throughput (sing-box cannot route a one-off download via an arbitrary
+        // node without selecting it). Run both in parallel.
         let (lat, spd) = tokio::join!(
-            test_via_proxy(mixed_port),
+            clash_proxy_delay(api_port, &name, &test_url),
             measure_download_speed(mixed_port),
         );
         (lat, spd)
@@ -589,6 +805,7 @@ async fn clash_select_proxy(api_port: u16, group: &str, name: &str) -> Result<()
         .map_err(|e| e.to_string())?;
     let resp = client
         .put(&url)
+        .bearer_auth(crate::config::api_secret())
         .json(&serde_json::json!({ "name": name }))
         .send()
         .await
@@ -664,7 +881,9 @@ pub async fn cmd_test_group_delay(
                 .query_pairs_mut()
                 .append_pair("url", &url)
                 .append_pair("timeout", "5000");
-            let _ = client.get(endpoint).send().await;
+            let _ = client.get(endpoint)
+                .bearer_auth(crate::config::api_secret())
+                .send().await;
         }));
     }
     for t in tasks {
@@ -762,7 +981,9 @@ pub async fn cmd_get_active_proxy_now(
         .timeout(std::time::Duration::from_secs(3))
         .build()
         .map_err(|e| e.to_string())?;
-    let resp = client.get(&url).send().await.map_err(|e| e.to_string())?;
+    let resp = client.get(&url)
+        .bearer_auth(crate::config::api_secret())
+        .send().await.map_err(|e| e.to_string())?;
     let json: Value = resp.json().await.map_err(|e| e.to_string())?;
     let proxies = match json.get("proxies") {
         Some(p) => p,
@@ -820,6 +1041,7 @@ async fn clash_set_mode(api_port: u16, mode: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let resp = client
         .patch(&url)
+        .bearer_auth(crate::config::api_secret())
         .json(&serde_json::json!({ "mode": mode }))
         .send()
         .await
@@ -865,6 +1087,19 @@ pub async fn cmd_set_proxy_mode(
             let _ = clash_set_mode(api_port, m).await;
         }
     }
+
+    // The Windows system-proxy bypass list depends on whether we're in Global mode, so
+    // when the system proxy is currently active (non-TUN) rewrite it to match the new
+    // mode right away instead of waiting for the next reconnect. No-op on macOS (no
+    // per-domain bypass) and when the system proxy is off.
+    let (mixed_port, tun_enabled) = {
+        let cfg = state.app_config.lock().unwrap();
+        (cfg.mixed_port, cfg.tun_enabled)
+    };
+    if !tun_enabled && crate::proxy::get_system_proxy_status() {
+        let global_mode = proxy_mode == ProxyMode::Global;
+        let _ = crate::proxy::set_system_proxy(true, mixed_port, global_mode);
+    }
     Ok(())
 }
 
@@ -874,6 +1109,29 @@ pub async fn cmd_get_connections(
 ) -> Result<Vec<ConnectionInfo>, String> {
     let port = state.app_config.lock().unwrap().api_port;
     crate::singbox::fetch_connections(port)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Close a single active connection by id.
+#[tauri::command]
+pub async fn cmd_close_connection(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let port = state.app_config.lock().unwrap().api_port;
+    crate::singbox::close_connection(port, &id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// Close all active connections at once.
+#[tauri::command]
+pub async fn cmd_close_all_connections(
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let port = state.app_config.lock().unwrap().api_port;
+    crate::singbox::close_all_connections(port)
         .await
         .map_err(|e| e.to_string())
 }
@@ -915,7 +1173,10 @@ pub async fn cmd_get_traffic_total(
 
     /* Best-effort: a transient API hiccup should not surface as a hard error in the
        UI — fall back to zeros so the poller simply keeps the last good display. */
-    let body: Value = match client.get(&url).send().await {
+    let body: Value = match client.get(&url)
+        .bearer_auth(crate::config::api_secret())
+        .send().await
+    {
         Ok(resp) => match resp.json().await {
             Ok(v) => v,
             Err(_) => return Ok(TrafficTotal::default()),
@@ -1012,6 +1273,66 @@ pub fn cmd_reset_rules() -> Result<Vec<crate::rules::RouteRule>, String> {
     Ok(rules)
 }
 
+// ─── Remote rule-set providers ───────────────────────────────────────
+
+#[tauri::command]
+pub fn cmd_get_rule_providers() -> Vec<crate::rules::RuleProvider> {
+    crate::rules::load_rule_providers()
+}
+
+#[tauri::command]
+pub fn cmd_add_rule_provider(
+    name: String,
+    url: String,
+    action: crate::rules::RuleAction,
+) -> Result<Vec<crate::rules::RuleProvider>, String> {
+    let mut providers = crate::rules::load_rule_providers();
+    providers.push(crate::rules::RuleProvider {
+        id: uuid::Uuid::new_v4().to_string(),
+        format: crate::rules::guess_provider_format(&url),
+        name,
+        url,
+        action,
+        enabled: true,
+    });
+    crate::rules::save_rule_providers(&providers).map_err(|e| e.to_string())?;
+    Ok(providers)
+}
+
+#[tauri::command]
+pub fn cmd_delete_rule_provider(id: String) -> Result<Vec<crate::rules::RuleProvider>, String> {
+    let mut providers = crate::rules::load_rule_providers();
+    providers.retain(|p| p.id != id);
+    crate::rules::save_rule_providers(&providers).map_err(|e| e.to_string())?;
+    Ok(providers)
+}
+
+#[tauri::command]
+pub fn cmd_toggle_rule_provider(id: String) -> Result<Vec<crate::rules::RuleProvider>, String> {
+    let mut providers = crate::rules::load_rule_providers();
+    if let Some(p) = providers.iter_mut().find(|p| p.id == id) {
+        p.enabled = !p.enabled;
+    }
+    crate::rules::save_rule_providers(&providers).map_err(|e| e.to_string())?;
+    Ok(providers)
+}
+
+// ─── Custom proxy groups ─────────────────────────────────────────────
+
+#[tauri::command]
+pub fn cmd_get_proxy_groups() -> Vec<crate::types::ProxyGroup> {
+    config::load_proxy_groups()
+}
+
+/// Replace the full list of custom proxy groups. Takes effect on the next config
+/// rebuild (reconnect / mode switch), like routing rules.
+#[tauri::command]
+pub fn cmd_save_proxy_groups(
+    groups: Vec<crate::types::ProxyGroup>,
+) -> Result<(), String> {
+    config::save_proxy_groups(&groups).map_err(|e| e.to_string())
+}
+
 // ─── Updater ────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1089,8 +1410,11 @@ pub fn cmd_set_system_proxy(
             return Err("TUN 模式已接管全部流量，无需且不能再开启系统代理".to_string());
         }
     }
-    let port = state.app_config.lock().unwrap().mixed_port;
-    crate::proxy::set_system_proxy(enabled, if enabled { port } else { 0 })
+    let (port, global_mode) = {
+        let cfg = state.app_config.lock().unwrap();
+        (cfg.mixed_port, cfg.proxy_mode == ProxyMode::Global)
+    };
+    crate::proxy::set_system_proxy(enabled, if enabled { port } else { 0 }, global_mode)
         .map_err(|e| e.to_string())
 }
 
@@ -1175,14 +1499,50 @@ pub fn cmd_get_memory_usage(state: State<AppState>) -> Option<u64> {
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
-async fn fetch_url(url: &str) -> Result<String, anyhow::Error> {
+/// Airport usage / quota parsed from a subscription's `Subscription-Userinfo` header.
+/// All fields optional — present only when the provider sends the header.
+#[derive(Default, Clone)]
+pub(crate) struct SubUserinfo {
+    pub upload: Option<u64>,
+    pub download: Option<u64>,
+    pub total: Option<u64>,
+    pub expire: Option<i64>,
+}
+
+/// Parse a `Subscription-Userinfo` header value, e.g.
+/// `upload=455727941; download=6174903220; total=214748364800; expire=1762524000`.
+/// Unknown keys and malformed numbers are ignored so a partial header still yields
+/// whatever fields are valid.
+pub(crate) fn parse_userinfo(header: &str) -> SubUserinfo {
+    let mut info = SubUserinfo::default();
+    for part in header.split(';') {
+        let Some((k, v)) = part.split_once('=') else { continue };
+        match k.trim() {
+            "upload" => info.upload = v.trim().parse().ok(),
+            "download" => info.download = v.trim().parse().ok(),
+            "total" => info.total = v.trim().parse().ok(),
+            "expire" => info.expire = v.trim().parse().ok(),
+            _ => {}
+        }
+    }
+    info
+}
+
+async fn fetch_url(url: &str) -> Result<(String, SubUserinfo), anyhow::Error> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
-        .user_agent("ClashForWindows/0.20.39")
+        .user_agent(config::subscription_user_agent())
         .build()?;
     let resp = client.get(url).send().await?;
     if !resp.status().is_success() {
         return Err(anyhow!("HTTP {}", resp.status()));
     }
-    Ok(resp.text().await?)
+    // Capture the quota header (case-insensitive lookup) before consuming the body.
+    let userinfo = resp.headers()
+        .get("subscription-userinfo")
+        .and_then(|v| v.to_str().ok())
+        .map(parse_userinfo)
+        .unwrap_or_default();
+    let content = resp.text().await?;
+    Ok((content, userinfo))
 }
