@@ -212,6 +212,17 @@
 - **影响文件**：`types.rs`、`config.rs`、`commands.rs`、`auto_update.rs`、`subscription.rs`、`src/stores/app.ts`、`src/views/Settings.vue`。
 - **次要遗留**：~~hysteria2 链接的端口跳跃 `mport` 与 `pinSHA256` 证书指纹暂未映射~~ → 已在 F2 批次 3 完成（mport→`server_ports`、pinSHA256→`insecure`、salamander obfs）。
 
+### F6. 托盘连接控制三处缺陷 ✅ 已完成（2026-06-25）
+- **问题 1（TUN 从托盘静默失败）**：托盘点「TUN 模式」时 `let _ = apply_connection_mode(...)` 吞掉错误，非管理员/缺 WinTun 时勾选框闪一下复位、无任何提示（仪表盘路径有 `error` 提示，托盘没有）。
+- **问题 2（托盘切换不回流前端）**：托盘只改了注册表/内核与托盘勾选，未通知前端；而 Home 轮询每秒只刷新系统代理、**不刷新 config**，导致从托盘切 TUN 后仪表盘 `tun_enabled` 长期 stale（`tunOn = running && config.tun_enabled` 显示错误）。
+- **问题 3（启动初值口径不一致）**：托盘初值用持久化的 `app_config.tun_enabled`，真实判定却是 `singbox_state.running && tun_mode`，且启动时未同步一次 → 权限丢失等场景勾选框短暂错误。
+- **修复（后端 `lib.rs`）**：
+  - 新增 `emit_tray_mode_result()`：托盘 apply 成功→ emit `connection-mode-changed`、失败→ emit `connection-mode-error`（携带原因）；两个托盘 handler 改为捕获 `Result` 后调用。
+  - 新增 `sync_tray_from_state()`：从 `TrayState` 取菜单项句柄并按真实运行态回写；在启动恢复 task 末尾调用一次（修问题 3）。
+- **修复（前端 `stores/app.ts`）**：`init()` 注册 `listenTrayConnectionEvents()`（幂等）——`connection-mode-changed` → `fetchConfig + fetchStatus + refreshSystemProxy + updateTrayTooltip`；`connection-mode-error` → 写入 `error`。仪表盘路径不 emit，无重复刷新。
+- **影响文件**：`src-tauri/src/lib.rs`、`src/stores/app.ts`。
+- **验证**：`cargo check` 无警告、`vue-tsc` 通过。
+
 ---
 
 ## 建议执行顺序

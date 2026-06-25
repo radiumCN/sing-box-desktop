@@ -36,6 +36,35 @@ fn sync_tray_checks(
     let _ = tun_item.set_checked(in_tun);
 }
 
+/// Reconcile the tray checks by pulling the menu-item handles out of `TrayState`.
+/// Used where we don't hold direct references — notably at the end of the async
+/// startup restore, so the initial checkmarks reflect the REAL running state
+/// (`singbox_state`) rather than the persisted `tun_enabled` flag.
+fn sync_tray_from_state(app: &tauri::AppHandle) {
+    let ts = app.state::<TrayState>();
+    let sys = ts.sys_proxy_item.lock().unwrap().clone();
+    let tun = ts.tun_item.lock().unwrap().clone();
+    if let (Some(sys), Some(tun)) = (sys, tun) {
+        sync_tray_checks(app, &sys, &tun);
+    }
+}
+
+/// Push the outcome of a tray-driven connection-mode change to the frontend so the
+/// dashboard reconciles its reactive state (tray toggles previously never reached the
+/// UI) and surfaces failures (e.g. enabling TUN without admin rights, which used to
+/// fail silently from the tray).
+fn emit_tray_mode_result(app: &tauri::AppHandle, res: Result<(), String>) {
+    use tauri::Emitter;
+    match res {
+        Ok(()) => {
+            let _ = app.emit("connection-mode-changed", ());
+        }
+        Err(e) => {
+            let _ = app.emit("connection-mode-error", e);
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     config::ensure_dirs().expect("无法创建数据目录");
@@ -189,6 +218,10 @@ pub fn run() {
                     } else {
                         let _ = crate::commands::start_idle_core(&handle, state.inner()).await;
                     }
+                    // Tray is built after this task is spawned but before the 1s delay
+                    // elapses, so its item handles are available here. Reconcile the
+                    // checkmarks with the real running state instead of the persisted flag.
+                    sync_tray_from_state(&handle);
                 });
             }
 
@@ -287,8 +320,9 @@ pub fn run() {
                             tauri::async_runtime::spawn(async move {
                                 let state = app_c.state::<AppState>();
                                 let mode = if enabled { "system" } else { "off" };
-                                let _ = crate::commands::apply_connection_mode(&app_c, &state, mode).await;
+                                let res = crate::commands::apply_connection_mode(&app_c, &state, mode).await;
                                 sync_tray_checks(&app_c, &sys_item, &tun_it);
+                                emit_tray_mode_result(&app_c, res);
                             });
                         }
                         "tun_mode" => {
@@ -300,8 +334,9 @@ pub fn run() {
                             tauri::async_runtime::spawn(async move {
                                 let state = app_c.state::<AppState>();
                                 let mode = if enabled { "tun" } else { "off" };
-                                let _ = crate::commands::apply_connection_mode(&app_c, &state, mode).await;
+                                let res = crate::commands::apply_connection_mode(&app_c, &state, mode).await;
                                 sync_tray_checks(&app_c, &sys_item, &tun_it);
+                                emit_tray_mode_result(&app_c, res);
                             });
                         }
                         "quit" => {

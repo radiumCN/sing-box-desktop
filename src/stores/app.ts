@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 
 export interface SingboxStatus {
@@ -606,6 +607,28 @@ export const useAppStore = defineStore("app", () => {
     // Start the app-lifetime traffic monitor so cumulative stats are tracked
     // regardless of which page the user is viewing.
     ensureTrafficPoller();
+    // React to connection-mode changes driven from the tray menu. The tray mutates
+    // the system proxy / TUN core directly in the backend; without these listeners the
+    // dashboard's reactive state (especially config.tun_enabled, which no poller
+    // refreshes) would stay stale, and tray-side failures would be invisible.
+    await listenTrayConnectionEvents();
+  }
+
+  // Idempotent: register once for the app lifetime. `listen` returns an unlisten fn we
+  // intentionally never call — the store lives as long as the app.
+  let trayEventsBound = false;
+  async function listenTrayConnectionEvents() {
+    if (trayEventsBound) return;
+    trayEventsBound = true;
+    await listen("connection-mode-changed", async () => {
+      await fetchConfig();
+      await fetchStatus();
+      await refreshSystemProxy();
+      updateTrayTooltip();
+    });
+    await listen<string>("connection-mode-error", (event) => {
+      error.value = event.payload || "切换连接模式失败";
+    });
   }
 
   return {
