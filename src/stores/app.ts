@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
 import { register, unregisterAll } from "@tauri-apps/plugin-global-shortcut";
+import { detectLocale } from "../i18n";
 
 export interface SingboxStatus {
   running: boolean;
@@ -118,7 +119,9 @@ export const useAppStore = defineStore("app", () => {
     tun_enabled: false,
     log_level: "info",
     theme: "system",
-    language: "zh-CN",
+    // Placeholder until fetchConfig() loads the backend value. Detect from the OS so the
+    // App.vue immediate locale watch matches the first paint instead of forcing zh-CN.
+    language: detectLocale(),
     active_nodes: {},
     auto_update_interval: 24,
     auto_update_notify: true,

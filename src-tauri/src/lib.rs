@@ -252,12 +252,35 @@ pub fn run() {
                             crate::tun::cleanup_stale_tun_adapter().await;
                             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
                         }
-                        // Fall back to an idle core if restoring the saved mode fails
-                        // (e.g. TUN without admin rights this session).
-                        if crate::commands::apply_connection_mode(&handle, state.inner(), mode)
-                            .await
-                            .is_err()
-                        {
+                        // Restore the saved mode, falling back to an idle core if it can't be
+                        // brought up. For TUN we RETRY before giving up: right after an in-app
+                        // upgrade the NSIS installer force-kills the old core, and the WinTun
+                        // adapter/driver can take a few seconds to become creatable again. The
+                        // first attempt then fails its readiness check and `apply_connection_mode`
+                        // returns Err; without a retry we'd silently drop to a non-TUN idle core,
+                        // so the session looks "restored / running" but carries no traffic until
+                        // the user toggles TUN by hand. A few spaced retries (only on a
+                        // just-upgraded launch, where the race exists) ride out the adapter
+                        // settling — automating exactly that manual off→on recovery. Non-TUN
+                        // modes and steady-state launches keep the original single-shot behaviour.
+                        let tun_attempts = if mode == "tun" && just_upgraded { 5 } else { 1 };
+                        let mut applied = false;
+                        for attempt in 0..tun_attempts {
+                            if crate::commands::apply_connection_mode(&handle, state.inner(), mode)
+                                .await
+                                .is_ok()
+                            {
+                                applied = true;
+                                break;
+                            }
+                            if attempt + 1 < tun_attempts {
+                                // Clear whatever half-created adapter the failed start left
+                                // behind, then let Windows settle before the next attempt.
+                                crate::tun::cleanup_stale_tun_adapter().await;
+                                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                            }
+                        }
+                        if !applied {
                             let _ = crate::commands::start_idle_core(&handle, state.inner()).await;
                         } else if mode == "tun" && just_upgraded {
                             // Restored TUN on a just-upgraded launch: auto-heal the

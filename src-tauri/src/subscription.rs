@@ -1718,6 +1718,9 @@ fn build_tun_inbound(config: &crate::types::AppConfig) -> Value {
     } else {
         json!(["172.19.0.1/30"])
     };
+    // `mut` is only exercised on Windows, where a unique interface_name is injected below;
+    // on macOS/Linux that block is cfg'd out, so the binding is never mutated there.
+    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
     let mut tun_in = json!({
         "type": "tun",
         "tag": "tun-in",
