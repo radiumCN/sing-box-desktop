@@ -243,6 +243,29 @@ pub async fn apply_connection_mode(
     Ok(())
 }
 
+/// Post-upgrade TUN self-heal. Replicates, automatically and exactly once, the manual
+/// "toggle TUN off then on" that users have to do today after an in-app upgrade.
+///
+/// Why it's needed: the NSIS installer force-kills the old core, so even with the
+/// pre-install graceful stop + adapter cleanup, the freshly-restored tunnel can layer onto
+/// routing state left by the dying core and black-hole all traffic (TUN shows "on", 0
+/// connections, 0 B). A graceful "off" runs sing-box's own auto_route/strict_route teardown
+/// (the same cleanup the manual toggle triggers), and the subsequent "on" rebuilds the
+/// tunnel on a converged routing table. Only invoked on the just-upgraded launch, so normal
+/// restarts keep their instant, blip-free restore.
+pub async fn heal_tun_after_upgrade(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    // Drop the restored TUN core back to idle: this is the route-clearing half of the manual
+    // off→on. Graceful teardown (Ctrl+C / SIGTERM) lets sing-box remove the routes it set.
+    apply_connection_mode(app_handle, state, "off").await?;
+    // Let Windows settle the routing table before re-creating the tunnel.
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    // Bring TUN back up on the now-clean table.
+    apply_connection_mode(app_handle, state, "tun").await
+}
+
 /// Dashboard / unified entry point for switching the connection mode. Delegates to
 /// `apply_connection_mode` so the dashboard and the tray menu share identical logic.
 #[tauri::command]
