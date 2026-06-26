@@ -1,4 +1,8 @@
 fn main() {
+    // Rebuild when the (optional) GitHub API token changes so a new build picks up the
+    // value baked in via option_env!("SKYLARK_GH_TOKEN") in updater.rs.
+    println!("cargo:rerun-if-env-changed=SKYLARK_GH_TOKEN");
+
     let mut windows = tauri_build::WindowsAttributes::new();
     windows = windows.app_manifest(r#"
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">

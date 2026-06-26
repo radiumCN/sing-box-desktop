@@ -11,6 +11,27 @@ const APP_GITHUB_ALL_API: &str =
 /// Cache validity duration in seconds (1 hour)
 const CACHE_TTL_SECS: u64 = 3600;
 
+/// Optional GitHub API token, injected at BUILD time via the `SKYLARK_GH_TOKEN` env var
+/// (e.g. `SKYLARK_GH_TOKEN=github_pat_xxx npm run tauri build`).
+///
+/// Never hardcode a literal token here: committing a `github_pat_*` string trips GitHub's
+/// secret scanning / push protection and gets the token auto-revoked, and a shipped binary
+/// can be unpacked by users. When set, it raises the api.github.com rate limit from
+/// 60/hour to 5000/hour; when unset, requests stay anonymous exactly as before.
+fn github_token() -> Option<&'static str> {
+    option_env!("SKYLARK_GH_TOKEN").filter(|t| !t.is_empty())
+}
+
+/// Attach the bearer token (if configured) to an **api.github.com** request. Only use this
+/// for the JSON metadata endpoints — never for asset downloads, which 302-redirect to a
+/// CDN host (objects.githubusercontent.com) where the Authorization header must not be sent.
+fn with_github_auth(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    match github_token() {
+        Some(token) => req.bearer_auth(token),
+        None => req,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReleaseInfo {
     pub version: String,
@@ -151,7 +172,7 @@ pub async fn fetch_latest_release(force_refresh: bool) -> Result<ReleaseInfo> {
         .no_proxy()
         .build()?;
 
-    let resp = client.get(GITHUB_API).send().await?;
+    let resp = with_github_auth(client.get(GITHUB_API)).send().await?;
 
     // Detect rate limit (HTTP 403 or 429)
     if resp.status() == reqwest::StatusCode::FORBIDDEN
@@ -658,7 +679,7 @@ pub async fn fetch_app_release(channel: &str, force_refresh: bool) -> Result<App
         APP_GITHUB_STABLE_API
     };
 
-    let resp = client.get(url).send().await?;
+    let resp = with_github_auth(client.get(url)).send().await?;
 
     if resp.status() == reqwest::StatusCode::FORBIDDEN
         || resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS

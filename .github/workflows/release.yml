@@ -122,6 +122,10 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional: authenticates the app's own api.github.com update checks (60→5000/hr).
+          # Stored as a repo Actions secret, baked in at compile time via option_env!.
+          # If the secret is unset this is empty and the app stays anonymous (no build failure).
+          SKYLARK_GH_TOKEN: ${{ secrets.SKYLARK_GH_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: 'Skylark ${{ github.ref_name }}'
