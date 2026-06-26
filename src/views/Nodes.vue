@@ -8,6 +8,7 @@ const { t } = useI18n();
 const store = useAppStore();
 const testingAll = ref(false);
 const testingGroup = ref(false);
+const refreshing = ref(false);
 const testingIds = ref<string[]>([]);
 const filterSubId = ref<string>(localStorage.getItem("nodes_filter_sub") ?? "all");
 const sortBy = ref<"none" | "latency" | "speed">(
@@ -34,6 +35,17 @@ onMounted(() => {
   store.ensureActiveNowPoller();
   store.fetchProxyGroups();
 });
+
+// Keep the refresh spin visible for at least 600ms — the fetch is near-instant.
+async function manualRefresh() {
+  if (refreshing.value) return;
+  refreshing.value = true;
+  try {
+    await Promise.all([store.fetchNodes(), new Promise((r) => setTimeout(r, 600))]);
+  } finally {
+    refreshing.value = false;
+  }
+}
 
 // ─── Custom proxy groups ─────────────────────────────────────────────
 const showGroupEditor = ref(false);
@@ -226,8 +238,8 @@ const autoNowName = computed(() => store.activeNodeNow);
           >{{ label }}</button>
         </div>
 
-        <button class="btn btn-ghost" @click="store.fetchNodes">
-          <RefreshCw :size="14" />
+        <button class="btn btn-ghost" @click="manualRefresh" :disabled="refreshing">
+          <RefreshCw :size="14" :class="{ spin: refreshing }" />
           {{ t("nodes.refresh") }}
         </button>
       </div>
