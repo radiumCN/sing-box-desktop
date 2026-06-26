@@ -78,12 +78,27 @@ pub fn api_secret() -> String {
         .clone()
 }
 
+/// Preferred UI language for a fresh install, derived from the OS locale. A Chinese
+/// system (`zh*`) maps to `zh-CN`; everything else falls back to English. Only used when
+/// no `app_config.json` exists yet — once the user has a config, their saved choice wins.
+fn detect_system_language() -> String {
+    let locale = sys_locale::get_locale().unwrap_or_default().to_lowercase();
+    if locale.starts_with("zh") {
+        "zh-CN".to_string()
+    } else {
+        "en".to_string()
+    }
+}
+
 pub fn load_app_config() -> AppConfig {
     let path = app_data_dir().join("app_config.json");
     if let Ok(data) = fs::read_to_string(&path) {
         serde_json::from_str(&data).unwrap_or_default()
     } else {
-        AppConfig::default()
+        AppConfig {
+            language: detect_system_language(),
+            ..AppConfig::default()
+        }
     }
 }
 
