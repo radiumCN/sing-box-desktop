@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
-import { Bar } from "vue-chartjs";
+import { Line } from "vue-chartjs";
 import {
   Chart as ChartJS,
   Title,
   Tooltip,
   Legend,
-  BarElement,
+  LineElement,
+  PointElement,
+  Filler,
   CategoryScale,
   LinearScale,
   type TooltipItem,
@@ -17,11 +19,12 @@ import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
 
-ChartJS.register(Title, Tooltip, Legend, BarElement, CategoryScale, LinearScale);
+ChartJS.register(Title, Tooltip, Legend, LineElement, PointElement, Filler, CategoryScale, LinearScale);
 
 const store = useAppStore();
 const history = ref<TrafficDay[]>([]);
 const loading = ref(false);
+const refreshing = ref(false);
 const rangeDays = ref(30);
 
 function formatBytes(bytes: number): string {
@@ -59,16 +62,24 @@ const chartData = computed(() => ({
     {
       label: t("stats.download"),
       data: shown.value.map((d) => d.download),
-      backgroundColor: "rgba(16, 137, 62, 0.75)",
-      borderRadius: 3,
-      stack: "t",
+      borderColor: "rgba(16, 137, 62, 1)",
+      backgroundColor: "rgba(16, 137, 62, 0.12)",
+      borderWidth: 2,
+      tension: 0.35,
+      fill: true,
+      pointRadius: 2,
+      pointHoverRadius: 4,
     },
     {
       label: t("stats.upload"),
       data: shown.value.map((d) => d.upload),
-      backgroundColor: "rgba(0, 120, 212, 0.75)",
-      borderRadius: 3,
-      stack: "t",
+      borderColor: "rgba(0, 120, 212, 1)",
+      backgroundColor: "rgba(0, 120, 212, 0.12)",
+      borderWidth: 2,
+      tension: 0.35,
+      fill: true,
+      pointRadius: 2,
+      pointHoverRadius: 4,
     },
   ],
 }));
@@ -81,15 +92,15 @@ const chartOptions = computed(() => ({
     legend: { position: "top" as const, labels: { boxWidth: 12, font: { size: 11 } } },
     tooltip: {
       callbacks: {
-        label: (ctx: TooltipItem<"bar">) =>
+        label: (ctx: TooltipItem<"line">) =>
           `${ctx.dataset.label}: ${formatBytes(Number(ctx.parsed.y ?? 0))}`,
       },
     },
   },
   scales: {
-    x: { stacked: true, grid: { display: false }, ticks: { font: { size: 10 }, maxRotation: 0, autoSkip: true } },
+    x: { grid: { display: false }, ticks: { font: { size: 10 }, maxRotation: 0, autoSkip: true } },
     y: {
-      stacked: true,
+      beginAtZero: true,
       ticks: {
         font: { size: 10 },
         callback: (v: number | string) => formatBytes(Number(v)),
@@ -104,6 +115,17 @@ async function load() {
     history.value = await store.fetchTrafficHistory();
   } finally {
     loading.value = false;
+  }
+}
+
+// Keep the refresh spin visible for at least 600ms — the fetch is near-instant.
+async function manualRefresh() {
+  if (refreshing.value) return;
+  refreshing.value = true;
+  try {
+    await Promise.all([load(), new Promise((r) => setTimeout(r, 600))]);
+  } finally {
+    refreshing.value = false;
   }
 }
 
@@ -126,8 +148,8 @@ onMounted(load);
             {{ t('stats.daysN', { n: d }) }}
           </button>
         </div>
-        <button class="btn btn-ghost" :disabled="loading" @click="load">
-          <RefreshCw :size="13" :class="{ spin: loading }" />
+        <button class="btn btn-ghost" :disabled="refreshing" @click="manualRefresh">
+          <RefreshCw :size="13" :class="{ spin: refreshing }" />
           {{ t('stats.refresh') }}
         </button>
       </div>
@@ -171,7 +193,7 @@ onMounted(load);
     <div class="card chart-card">
       <div class="chart-title">{{ t('stats.dailyTraffic') }}</div>
       <div v-if="shown.length > 0" class="chart-wrap">
-        <Bar :data="chartData" :options="chartOptions" />
+        <Line :data="chartData" :options="chartOptions" />
       </div>
       <div v-else class="empty-hint">
         {{ t('stats.emptyHint') }}
@@ -181,6 +203,8 @@ onMounted(load);
 </template>
 
 <style scoped>
+@keyframes spin { to { transform: rotate(360deg); } }
+.spin { animation: spin 0.8s linear infinite; }
 .range-tabs { display: flex; gap: 2px; background: var(--color-bg-secondary); border-radius: 8px; padding: 2px; }
 .range-tab {
   border: none; background: transparent; cursor: pointer; font-size: 12px;

@@ -23,6 +23,7 @@ interface ConnectionInfo {
 
 const connections = ref<ConnectionInfo[]>([]);
 const loading = ref(false);
+const refreshing = ref(false);
 const search = ref("");
 const grouped = ref(false);
 type SortKey = "default" | "host" | "upload" | "download" | "proto";
@@ -160,6 +161,18 @@ async function fetchConnections() {
   }
 }
 
+// Manual refresh keeps the spin visible for at least 600ms — the 2s poll
+// otherwise toggles `loading` too briefly for the animation to register.
+async function manualRefresh() {
+  if (refreshing.value) return;
+  refreshing.value = true;
+  try {
+    await Promise.all([fetchConnections(), new Promise((r) => setTimeout(r, 600))]);
+  } finally {
+    refreshing.value = false;
+  }
+}
+
 async function closeConnection(id: string) {
   try {
     await invoke("cmd_close_connection", { id });
@@ -210,8 +223,8 @@ onUnmounted(() => {
           <Ban :size="14" />
           {{ t('connections.closeAll') }}
         </button>
-        <button class="btn btn-ghost" @click="fetchConnections" :disabled="loading">
-          <RefreshCw :size="14" :class="{ spin: loading }" />
+        <button class="btn btn-ghost" @click="manualRefresh" :disabled="refreshing">
+          <RefreshCw :size="14" :class="{ spin: refreshing }" />
           {{ t('connections.refresh') }}
         </button>
       </div>

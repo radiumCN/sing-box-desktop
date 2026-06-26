@@ -359,11 +359,25 @@ const appTotalBytes = ref(0);
 const appDownloadDone = ref(false);
 const appDownloadError = ref("");
 
+// Compare two dotted numeric versions; true only if `latest` is strictly newer than
+// `current`. Mirrors the Rust `is_newer_version` so a beta channel whose latest release
+// is OLDER than the installed build (e.g. 0.3.4 vs 0.3.5) is not flagged as an update.
+function isNewerVersion(latest: string, current: string): boolean {
+  const parts = (v: string) =>
+    v.trim().replace(/^v/, "").split("-")[0].split(".").map((s) => parseInt(s, 10) || 0);
+  const a = parts(latest);
+  const b = parts(current);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const x = a[i] ?? 0;
+    const y = b[i] ?? 0;
+    if (x !== y) return x > y;
+  }
+  return false;
+}
+
 const hasAppUpdate = computed(() => {
   if (!appLatestRelease.value || !appVersion.value) return false;
-  const installed = appVersion.value.replace(/^v/, "");
-  const latest = appLatestRelease.value.version.replace(/^v/, "");
-  return installed !== latest && installed !== "";
+  return isNewerVersion(appLatestRelease.value.version, appVersion.value);
 });
 
 async function checkAppUpdate(forceRefresh = false) {
@@ -381,6 +395,13 @@ async function checkAppUpdate(forceRefresh = false) {
     checkingAppUpdate.value = false;
   }
 }
+
+// Switching the update channel (stable ↔ beta) must re-detect against the new
+// channel — otherwise the previous channel's result lingers. checkAppUpdate already
+// clears the prior result, and forceRefresh avoids returning the other channel's cache.
+watch(() => localConfig.value.update_channel, () => {
+  checkAppUpdate(true);
+});
 
 async function startAppDownload() {
   if (!appLatestRelease.value) return;
@@ -434,8 +455,9 @@ onMounted(async () => {
     getVersion().then((v) => (appVersion.value = v)),
   ]);
 
-  // Silently check for app update in background (uses 1-hour cache, won't spam API).
-  checkAppUpdate(false);
+  // Force a fresh check on every entry so the result reflects the latest release
+  // rather than a stale value left over from a previous visit (bypasses the 1-hour cache).
+  checkAppUpdate(true);
 
   // Also listen for the background checker's event (fired ~45s after launch).
   unlistenAppUpdate = await listen<{

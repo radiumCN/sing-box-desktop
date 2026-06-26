@@ -4,9 +4,9 @@
   "version": "../package.json",
   "identifier": "com.radium.skylark",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run sync-version && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run prepare-installer && npm run build",
+    "beforeBuildCommand": "npm run sync-version && npm run prepare-installer && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
