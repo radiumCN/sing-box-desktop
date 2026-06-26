@@ -232,7 +232,8 @@ pub fn run() {
                         };
                         let _ = crate::config::save_app_config(&cfg_clone);
                     }
-                    let restore = cfg.restore_proxy_on_startup && cfg.last_proxy_running;
+                    let has_nodes = cfg.selected_subscription.is_some() && !cfg.active_nodes.is_empty();
+                    let restore = cfg.restore_proxy_on_startup && cfg.last_proxy_running && has_nodes;
                     if restore {
                         let mode = if cfg.last_system_proxy {
                             "system"
