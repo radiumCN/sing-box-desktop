@@ -243,17 +243,18 @@ pub async fn apply_connection_mode(
     Ok(())
 }
 
-/// Startup TUN self-heal. Replicates, automatically and exactly once, the manual "toggle TUN
-/// off then on" that users otherwise have to do after a restart/upgrade to get traffic flowing.
+/// TUN self-heal: replays the manual "toggle TUN off then on" that fixes a black-holed tunnel
+/// (TUN shows "on", 0 connections, 0 B) caused by a freshly created tunnel layering onto stale
+/// routes left by a force-killed predecessor core. The graceful "off" runs sing-box's own
+/// auto_route/strict_route teardown, and the "on" rebuilds the tunnel on a converged table.
 ///
-/// Why it's needed: a freshly restored TUN tunnel can layer onto stale routing state — left by
-/// a force-killed core after an in-app upgrade, OR by the previous session / a prior TUN adapter
-/// on an ordinary restart — and black-hole all traffic (TUN shows "on", 0 connections, 0 B). A
-/// graceful "off" runs sing-box's own auto_route/strict_route teardown (the same cleanup the
-/// manual toggle triggers), and the subsequent "on" rebuilds the tunnel on a converged routing
-/// table. Invoked after ANY startup TUN restore (see lib.rs); it's a one-time startup cold path,
-/// so manual toggles keep their instant, blip-free behaviour. (Name kept for history; despite
-/// `_after_upgrade` it is no longer upgrade-specific.)
+/// ⚠️ MUST be called from a command / UI-thread context (e.g. a Tauri command), NEVER from a
+/// background task such as the startup restore block. The graceful stop uses `send_ctrl_c`,
+/// which broadcasts CTRL_C_EVENT to the console group; from a background context that self-kills
+/// the GUI (the same crash that forced the updater onto a force kill — see updater.rs and the
+/// note in lib.rs restore). It is currently UNUSED, kept as the building block for a future
+/// frontend-triggered "reconnect / repair" action that runs in the safe context.
+#[allow(dead_code)]
 pub async fn heal_tun_after_upgrade(
     app_handle: &tauri::AppHandle,
     state: &AppState,

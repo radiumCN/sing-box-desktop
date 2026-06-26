@@ -300,26 +300,18 @@ pub fn run() {
                                 mode, tun_attempts
                             ));
                             let _ = crate::commands::start_idle_core(&handle, state.inner()).await;
-                        } else if mode == "tun" {
-                            // A freshly restored TUN tunnel can layer onto stale routing state —
-                            // left by a force-killed core after an upgrade, OR by the previous
-                            // session / a prior TUN adapter on an ordinary restart — and
-                            // black-hole all traffic (TUN shows "on", 0 connections, 0 B) until a
-                            // manual off→on. This is NOT upgrade-specific, so after ANY startup
-                            // TUN restore we replay that off→on settle once, rebuilding the tunnel
-                            // on a converged routing table. It's a one-time startup cold path, so
-                            // it never touches manual-toggle latency. Best-effort — on failure the
-                            // user can still toggle manually, exactly as before.
-                            crate::updater::update_log(&format!(
-                                "startup restore: TUN restored (just_upgraded={}), running off→on heal",
-                                just_upgraded
-                            ));
-                            let _ = crate::commands::heal_tun_after_upgrade(
-                                &handle,
-                                state.inner(),
-                            )
-                            .await;
                         }
+                        // NOTE: we deliberately do NOT auto-run an off→on "heal" here. A freshly
+                        // restored TUN can black-hole (TUN shows "on", 0 B) when stale routes were
+                        // left behind by a force-killed core — e.g. after an in-app upgrade. The
+                        // cure is sing-box's graceful (Ctrl+C) teardown, but `send_ctrl_c`
+                        // broadcasts CTRL_C_EVENT to the console group and, when invoked from this
+                        // startup background task, takes the GUI down with it (the same self-kill
+                        // that made the updater switch to a force kill — see updater.rs). A clean
+                        // exit already runs that graceful teardown, so a normal restart restores a
+                        // working tunnel; only a force-killed predecessor (upgrade) may need a
+                        // manual off→on, which runs safely from the command/UI thread. A safe
+                        // auto-heal must be driven from that context (frontend-triggered), not here.
                     } else {
                         // No restore: either the user didn't opt in, or the proxy was off last
                         // session. On a post-upgrade launch log why, so "proxy didn't come back
