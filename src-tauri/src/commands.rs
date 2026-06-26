@@ -243,16 +243,17 @@ pub async fn apply_connection_mode(
     Ok(())
 }
 
-/// Post-upgrade TUN self-heal. Replicates, automatically and exactly once, the manual
-/// "toggle TUN off then on" that users have to do today after an in-app upgrade.
+/// Startup TUN self-heal. Replicates, automatically and exactly once, the manual "toggle TUN
+/// off then on" that users otherwise have to do after a restart/upgrade to get traffic flowing.
 ///
-/// Why it's needed: the NSIS installer force-kills the old core, so even with the
-/// pre-install graceful stop + adapter cleanup, the freshly-restored tunnel can layer onto
-/// routing state left by the dying core and black-hole all traffic (TUN shows "on", 0
-/// connections, 0 B). A graceful "off" runs sing-box's own auto_route/strict_route teardown
-/// (the same cleanup the manual toggle triggers), and the subsequent "on" rebuilds the
-/// tunnel on a converged routing table. Only invoked on the just-upgraded launch, so normal
-/// restarts keep their instant, blip-free restore.
+/// Why it's needed: a freshly restored TUN tunnel can layer onto stale routing state — left by
+/// a force-killed core after an in-app upgrade, OR by the previous session / a prior TUN adapter
+/// on an ordinary restart — and black-hole all traffic (TUN shows "on", 0 connections, 0 B). A
+/// graceful "off" runs sing-box's own auto_route/strict_route teardown (the same cleanup the
+/// manual toggle triggers), and the subsequent "on" rebuilds the tunnel on a converged routing
+/// table. Invoked after ANY startup TUN restore (see lib.rs); it's a one-time startup cold path,
+/// so manual toggles keep their instant, blip-free behaviour. (Name kept for history; despite
+/// `_after_upgrade` it is no longer upgrade-specific.)
 pub async fn heal_tun_after_upgrade(
     app_handle: &tauri::AppHandle,
     state: &AppState,
