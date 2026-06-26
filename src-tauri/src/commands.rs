@@ -278,6 +278,12 @@ pub async fn cmd_set_connection_mode(
 }
 
 /// Full teardown of the core for app exit. Stops the process and clears the system proxy.
+///
+/// NOTE: this clears the OS system proxy but deliberately does NOT touch `last_proxy_running`
+/// / `last_system_proxy`. Those persist the last *user-intended* state so the next launch can
+/// restore it (see the restore block in lib.rs). Clearing them here would make every clean
+/// exit look like "user turned proxy off" and silently break restore-on-startup — do not "fix"
+/// this by persisting an off-state on exit.
 pub async fn shutdown_core(state: &AppState) {
     let graceful = {
         let s = state.singbox_state.lock().unwrap();
@@ -373,6 +379,21 @@ fn build_config_bundle(state: &AppState) -> Value {
     })
 }
 
+/// Merge an incoming (frontend snapshot / imported bundle) `AppConfig` with the backend's
+/// authoritative runtime fields. `last_proxy_running`, `last_system_proxy` and
+/// `last_app_version` are owned by the backend — they're written on proxy start/stop and on
+/// upgrade detection — and the frontend only ever holds a stale snapshot of them. A config
+/// save or import must therefore NOT overwrite them, or the "restore proxy on startup" state
+/// gets clobbered and recovery silently stops working. See docs/proxy-tun-lifecycle-plan.md.
+fn merge_runtime_fields(incoming: AppConfig, current: &AppConfig) -> AppConfig {
+    AppConfig {
+        last_proxy_running: current.last_proxy_running,
+        last_system_proxy: current.last_system_proxy,
+        last_app_version: current.last_app_version.clone(),
+        ..incoming
+    }
+}
+
 /// Apply a config bundle to both on-disk files and the in-memory `AppState`. Each section
 /// is applied tolerantly (a bad section is skipped, not fatal). Shared by config import
 /// and profile loading. Takes effect on the next core (re)start.
@@ -382,8 +403,10 @@ fn apply_config_bundle(bundle: &Value, state: &AppState) -> Result<(), String> {
     }
     if let Some(v) = bundle.get("app_config") {
         if let Ok(cfg) = serde_json::from_value::<AppConfig>(v.clone()) {
-            config::save_app_config(&cfg).map_err(|e| e.to_string())?;
-            *state.app_config.lock().unwrap() = cfg;
+            let mut guard = state.app_config.lock().unwrap();
+            let merged = merge_runtime_fields(cfg, &guard);
+            config::save_app_config(&merged).map_err(|e| e.to_string())?;
+            *guard = merged;
         }
     }
     if let Some(v) = bundle.get("subscriptions") {
@@ -1217,8 +1240,10 @@ pub fn cmd_save_app_config(
     new_config: AppConfig,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    config::save_app_config(&new_config).map_err(|e| e.to_string())?;
-    *state.app_config.lock().unwrap() = new_config;
+    let mut guard = state.app_config.lock().unwrap();
+    let merged = merge_runtime_fields(new_config, &guard);
+    config::save_app_config(&merged).map_err(|e| e.to_string())?;
+    *guard = merged;
     Ok(())
 }
 

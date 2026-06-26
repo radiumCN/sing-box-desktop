@@ -241,6 +241,15 @@ pub fn run() {
                         } else {
                             "system"
                         };
+                        // On a post-upgrade launch, record the restore decision to update.log
+                        // (the upgrade diagnostic sink) so a "didn't reconnect after updating"
+                        // report can be traced. Gated on just_upgraded → no noise on normal launches.
+                        if just_upgraded {
+                            crate::updater::update_log(&format!(
+                                "startup restore (post-upgrade): mode={}, last_system_proxy={}, tun_enabled={}",
+                                mode, cfg.last_system_proxy, cfg.tun_enabled
+                            ));
+                        }
                         // Restoring TUN right after an app upgrade is the one case where a
                         // previous, force-killed core may have left a stale TUN adapter and
                         // strict routes behind (a pre-fix old version won't have cleaned up
@@ -259,11 +268,17 @@ pub fn run() {
                         // first attempt then fails its readiness check and `apply_connection_mode`
                         // returns Err; without a retry we'd silently drop to a non-TUN idle core,
                         // so the session looks "restored / running" but carries no traffic until
-                        // the user toggles TUN by hand. A few spaced retries (only on a
-                        // just-upgraded launch, where the race exists) ride out the adapter
-                        // settling — automating exactly that manual off→on recovery. Non-TUN
-                        // modes and steady-state launches keep the original single-shot behaviour.
-                        let tun_attempts = if mode == "tun" && just_upgraded { 5 } else { 1 };
+                        // the user toggles TUN by hand. The same readiness race also hits a cold
+                        // start / boot autostart, where TUN can come up before the network stack
+                        // and WinTun driver are ready — so any TUN restore gets a few spaced
+                        // retries, just more of them right after an upgrade (force-killed core +
+                        // settling adapter). Each retry rides out the settling, automating exactly
+                        // that manual off→on recovery. Non-TUN modes stay single-shot.
+                        let tun_attempts = if mode == "tun" {
+                            if just_upgraded { 5 } else { 3 }
+                        } else {
+                            1
+                        };
                         let mut applied = false;
                         for attempt in 0..tun_attempts {
                             if crate::commands::apply_connection_mode(&handle, state.inner(), mode)
@@ -281,12 +296,21 @@ pub fn run() {
                             }
                         }
                         if !applied {
+                            if just_upgraded {
+                                crate::updater::update_log(&format!(
+                                    "startup restore (post-upgrade): mode={} FAILED after {} attempt(s), falling back to idle core",
+                                    mode, tun_attempts
+                                ));
+                            }
                             let _ = crate::commands::start_idle_core(&handle, state.inner()).await;
                         } else if mode == "tun" && just_upgraded {
                             // Restored TUN on a just-upgraded launch: auto-heal the
                             // installer-induced "TUN on, no network" black hole by replaying
                             // the manual off→on cycle once. Best-effort — on failure the user
                             // can still toggle manually, exactly as before.
+                            crate::updater::update_log(
+                                "startup restore (post-upgrade): TUN restored, running heal_tun_after_upgrade",
+                            );
                             let _ = crate::commands::heal_tun_after_upgrade(
                                 &handle,
                                 state.inner(),
@@ -294,6 +318,15 @@ pub fn run() {
                             .await;
                         }
                     } else {
+                        // No restore: either the user didn't opt in, or the proxy was off last
+                        // session. On a post-upgrade launch log why, so "proxy didn't come back
+                        // after updating" can be told apart from a genuine restore failure.
+                        if just_upgraded {
+                            crate::updater::update_log(&format!(
+                                "startup restore (post-upgrade): skipped (restore_on_startup={}, last_proxy_running={})",
+                                cfg.restore_proxy_on_startup, cfg.last_proxy_running
+                            ));
+                        }
                         let _ = crate::commands::start_idle_core(&handle, state.inner()).await;
                     }
                     // Tray is built after this task is spawned but before the 1s delay

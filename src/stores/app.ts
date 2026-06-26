@@ -84,8 +84,9 @@ export interface AppConfig {
   update_channel: string;
   close_to_tray: boolean;
   restore_proxy_on_startup: boolean;
-  last_proxy_running: boolean;
-  last_system_proxy: boolean;
+  // last_proxy_running / last_system_proxy / last_app_version are backend-owned runtime
+  // state. They're intentionally NOT modelled here so the UI can't bind or send them; the
+  // backend ignores them on save anyway (see merge_runtime_fields in commands.rs).
   auto_test_url: string;
   auto_test_interval: number;
   auto_tolerance: number;
@@ -128,8 +129,6 @@ export const useAppStore = defineStore("app", () => {
     update_channel: "stable",
     close_to_tray: true,
     restore_proxy_on_startup: false,
-    last_proxy_running: false,
-    last_system_proxy: false,
     auto_test_url: "https://www.gstatic.com/generate_204",
     auto_test_interval: 3,
     auto_tolerance: 50,

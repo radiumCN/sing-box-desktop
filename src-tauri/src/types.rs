@@ -119,10 +119,13 @@ pub struct AppConfig {
     pub close_to_tray: bool,
     /// Restore proxy running state (sing-box + system proxy) on next startup
     pub restore_proxy_on_startup: bool,
-    /// Last known sing-box running state (written on start/stop)
+    /// Last known sing-box running state (written on start/stop). Backend-owned runtime
+    /// state: never overwritten from a frontend save / config import — see
+    /// `merge_runtime_fields` in commands.rs.
     #[serde(default)]
     pub last_proxy_running: bool,
-    /// Last known system proxy enabled state (written on start/stop)
+    /// Last known system proxy enabled state (written on start/stop). Backend-owned, same
+    /// rule as `last_proxy_running`.
     #[serde(default)]
     pub last_system_proxy: bool,
     /// URLTest probe URL for the auto-select (urltest) groups.
