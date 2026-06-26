@@ -871,13 +871,22 @@ pub async fn download_and_install_app(
             let s = state.singbox_state.lock().unwrap();
             s.running && s.tun_mode
         };
-        crate::commands::shutdown_core(state.inner()).await;
+        update_log(&format!("teardown: begin, was_tun={}", was_tun));
+        // FORCED stop (no graceful Ctrl+C). The graceful TUN path broadcasts a console
+        // CTRL_C_EVENT to sing-box's process group, which on this worker thread was killing
+        // the GUI itself mid-teardown — the app "crashed" right after the "download done" log
+        // and never reached the installer launch. The adapter is removed deterministically
+        // below, so we don't lose anything by force-killing.
+        crate::commands::shutdown_core_forced(state.inner()).await;
+        update_log("teardown: core stopped");
         // Deterministically remove the leftover TUN adapter NOW, while this (still elevated)
         // process is alive. The subsequent install runs for several seconds, giving Windows
         // ample time to settle the routing table before the relaunched app re-creates TUN —
         // breaking the rapid-restart race that the new app's own cleanup can't win on its own.
         if was_tun {
+            update_log("teardown: cleaning stale TUN adapter");
             crate::tun::cleanup_stale_tun_adapter().await;
+            update_log("teardown: TUN adapter cleaned");
         }
     }
     update_log(&format!("teardown done: was_tun={}", was_tun));

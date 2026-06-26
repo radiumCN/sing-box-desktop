@@ -287,6 +287,18 @@ pub async fn shutdown_core(state: &AppState) {
     let _ = proxy::set_system_proxy(false, 0, false);
 }
 
+/// Like `shutdown_core` but ALWAYS force-kills the core — never the graceful Ctrl+C path.
+/// Used by the in-app updater. The graceful TUN stop calls `send_ctrl_c`, which broadcasts a
+/// console CTRL_C_EVENT to sing-box's whole process group; on the updater's worker thread that
+/// was terminating THIS GUI process mid-teardown (observed: the app "crashed" right after the
+/// "download done" log line, before the installer ever launched). We don't need a graceful core
+/// stop during an update anyway — the updater removes the TUN adapter deterministically via
+/// `tun::cleanup_stale_tun_adapter` — so a force kill is both safe and avoids self-termination.
+pub async fn shutdown_core_forced(state: &AppState) {
+    let _ = stop_singbox(state.singbox_state.clone(), false).await;
+    let _ = proxy::set_system_proxy(false, 0, false);
+}
+
 #[tauri::command]
 pub fn cmd_get_singbox_status(
     state: State<'_, AppState>,
