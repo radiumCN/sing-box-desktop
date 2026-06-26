@@ -717,6 +717,61 @@ pub async fn fetch_app_release(channel: &str, force_refresh: bool) -> Result<App
     Ok(release)
 }
 
+/// Append a timestamped line to `app_data/logs/update.log`. The self-update handoff (download
+/// → teardown → launch installer → self-exit) is notoriously hard to debug because the app is
+/// gone by the time anything goes wrong, so we leave a breadcrumb trail on disk. Best-effort:
+/// a logging error must never abort the update.
+fn update_log(msg: &str) {
+    let dir = crate::config::app_data_dir().join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    let line = format!(
+        "{} {}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+        msg
+    );
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("update.log"))
+    {
+        use std::io::Write;
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
+/// Whether this process holds an elevated (admin) token. Logged at install time to confirm the
+/// TUN-on elevation theory against real data. Returns None if the token can't be queried.
+#[cfg(target_os = "windows")]
+fn process_is_elevated() -> Option<bool> {
+    use winapi::um::handleapi::CloseHandle;
+    use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
+    use winapi::um::securitybaseapi::GetTokenInformation;
+    use winapi::um::winnt::{TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
+
+    unsafe {
+        // `token` is inferred as winnt::HANDLE from OpenProcessToken's PHANDLE parameter, so we
+        // avoid naming the type (its import path varies across winapi module features).
+        let mut token = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return None;
+        }
+        let mut elevation: TOKEN_ELEVATION = std::mem::zeroed();
+        let mut ret_len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevation,
+            &mut elevation as *mut _ as *mut _,
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut ret_len,
+        );
+        CloseHandle(token);
+        if ok == 0 {
+            return None;
+        }
+        Some(elevation.TokenIsElevated != 0)
+    }
+}
+
 /// Download app installer to temp directory and launch it.
 /// Emits: "app-download-progress" { percent, downloaded, total }
 /// Emits: "app-download-done"     { success, message }
@@ -795,6 +850,7 @@ pub async fn download_and_install_app(
         "message": "下载完成，即将启动安装程序",
         "path": installer_path.to_string_lossy(),
     }));
+    update_log(&format!("download done: installer={:?}", installer_path));
 
     // Cleanly tear down BEFORE the installer restarts the app. The NSIS installer
     // force-terminates the running process, which bypasses the window-close / tray-quit
@@ -802,15 +858,16 @@ pub async fn download_and_install_app(
     // orphaned (still holding the mixed/API port and TUN adapter) and the Windows system
     // proxy would stay pointing at it — so the upgraded app restores "proxy on" on top of
     // a stale/dead core and ends up with no network. Stopping here clears both.
+    // Capture TUN status BEFORE teardown (used for adapter cleanup below and the launch log).
+    // The graceful `taskkill` (no /F) can't reach sing-box — a windowless console process —
+    // so the core is always force-killed, which skips its WintunDeleteAdapter() + strict_route
+    // route cleanup. That leaves the TUN adapter and its strict routes behind. If the upgraded
+    // app then restores TUN on top of that stale adapter, traffic is black-holed.
+    let was_tun;
     {
         use tauri::Manager;
         let state = app_handle.state::<crate::commands::AppState>();
-        // Capture TUN status BEFORE teardown. The graceful `taskkill` (no /F) can't reach
-        // sing-box — a windowless console process — so the core is always force-killed,
-        // which skips its WintunDeleteAdapter() + strict_route route cleanup. That leaves
-        // the TUN adapter and its strict routes behind. If the upgraded app then restores
-        // TUN on top of that stale adapter, traffic is black-holed → "TUN on, no network".
-        let was_tun = {
+        was_tun = {
             let s = state.singbox_state.lock().unwrap();
             s.running && s.tun_mode
         };
@@ -823,41 +880,52 @@ pub async fn download_and_install_app(
             crate::tun::cleanup_stale_tun_adapter().await;
         }
     }
+    update_log(&format!("teardown done: was_tun={}", was_tun));
 
     // Launch the installer.
     // Windows: we close this app ourselves (see below) and the NSIS installer restarts it.
     //
-    // Launch THROUGH explorer.exe, not ShellExecuteW/`cmd start`. The real failure behind
-    // "下载完成但不弹安装器" is an integrity-level mismatch, not the console: TUN mode
-    // relaunches this whole GUI elevated (runas, see tun::relaunch_as_admin), and the update
-    // path that breaks is exactly the TUN-on one. Launching the installer from an elevated
-    // process — via ShellExecuteW or `start` — keeps that elevation, so our `currentUser`
-    // (RequestExecutionLevel user) NSIS installer ends up running under an admin token. It
-    // starts far enough to kill the running app (so the app "exits") but then misbehaves and
-    // never shows its UI. explorer.exe runs at the normal medium integrity level, so the
-    // child it spawns de-elevates back to the interactive user — the same context a manual
-    // double-click would use. It's also console- and COM-independent, so it subsumes the
-    // earlier FreeConsole concern. explorer returns immediately with an unreliable exit code,
-    // so we only check that the spawn itself succeeded.
+    // Launch the installer DIRECTLY via CreateProcess (Command::spawn) — not explorer.exe,
+    // not ShellExecuteW, not `cmd /C start`. History of this bug:
+    //   • `cmd /C start` — broke because send_ctrl_c's FreeConsole left us console-less.
+    //   • ShellExecuteW   — under TUN the app runs elevated (runas, tun::relaunch_as_admin),
+    //                       so it launched the installer elevated; it killed the running app
+    //                       but its UI never showed.
+    //   • explorer.exe    — meant to de-elevate via the medium-IL shell, but that hand-off is
+    //                       unreliable FROM an elevated process and the installer often never
+    //                       started at all (observed: app exits, version stays old).
+    // A direct CreateProcess simply inherits our token: when elevated (TUN on) it runs the
+    // installer elevated — no ELEVATION_REQUIRED since we already hold admin; when not elevated
+    // the `currentUser` (RequestExecutionLevel user) installer needs no elevation anyway. It
+    // reliably starts in both cases, needs no console/COM/shell, and — crucially — we EXIT
+    // ourselves right after, so the installer finds the exe unlocked and shows its full wizard
+    // instead of stalling on a locked file or fighting a still-running same-or-higher-IL app.
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("explorer.exe")
-            .arg(&installer_path)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| anyhow!("无法启动安装程序: {}", e))?;
+        update_log(&format!(
+            "launch: installer={:?} exists={} was_tun={} elevated={:?}",
+            installer_path,
+            installer_path.exists(),
+            was_tun,
+            process_is_elevated(),
+        ));
 
-        // Exit ourselves so the installer can replace the locked binary. Previously the
-        // (elevated) installer force-closed the running app for us, but now that it runs at
-        // medium integrity it CANNOT terminate this process when TUN mode left us elevated
-        // (high IL) — UIPI and TerminateProcess both block a lower-IL process from killing a
-        // higher-IL one — so the install would stall on a locked exe. The core was already
-        // torn down and the system proxy cleared above (shutdown_core), so exiting now is the
-        // same clean teardown the quit handler performs. A short grace lets explorer hand off
-        // to the installer before we vanish; the installer is an independent process and
+        match std::process::Command::new(&installer_path).spawn() {
+            Ok(child) => update_log(&format!("launch: installer spawned, pid={}", child.id())),
+            Err(e) => {
+                update_log(&format!("launch: spawn FAILED: {}", e));
+                return Err(anyhow!("无法启动安装程序: {}", e));
+            }
+        }
+
+        // Exit ourselves so the installer can replace the (possibly locked) binary and run its
+        // full wizard. We don't rely on the installer force-closing us: under TUN we're
+        // elevated, and leaving a running same-/higher-IL app is exactly what made the wizard
+        // fail to appear before. The core was already torn down and the system proxy cleared
+        // (shutdown_core), so exiting now is the same clean teardown the quit handler performs.
+        // A short grace lets the installer fully start; it's an independent process and
         // survives our exit. The relaunched app restores proxy/TUN on next start as usual.
+        update_log("launch: scheduling self-exit in 1500ms");
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
             std::process::exit(0);
