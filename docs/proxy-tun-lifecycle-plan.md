@@ -246,3 +246,36 @@ off→on，但它**只在 `just_upgraded` 那一次启动才跑**。普通重启
 
 **验证**：需在 Windows 重新构建（建议 bump 到 v0.3.12）后回归：开 TUN + 记住 → 重启应用
 → 应自动恢复 TUN **且直接有流量**，无需手动 off→on。
+
+---
+
+## 7. 回归修复(v0.3.12 实测:自动 heal 导致升级后闪退)
+
+**现象**(update.log）：
+```
+startup restore: mode=tun, just_upgraded=true ...
+startup restore: TUN restored (just_upgraded=true), running off→on heal
+   ← 应用闪退；用户手动重启后可正常手动开启 TUN
+```
+升级到 0.3.12 重启后，TUN 被自动恢复并触发 §6 新加的 off→on heal，应用**当场闪退**。
+
+**根因**：heal 的 graceful "off" 走 `stop_singbox(graceful)` → `send_ctrl_c`
+（`singbox.rs:40`），它 `AttachConsole(core_pid)` 后向**整个控制台进程组**广播
+`CTRL_C_EVENT`。这套进程级 console 操作从**启动后台 spawn 任务**里调用时会把 GUI 自身一起
+杀掉——正是当年 updater 放弃 graceful、改用强杀 `shutdown_core_forced` 的同一个自杀坑
+（updater.rs 注释有记录）。手动 off→on 不崩，是因为它跑在 webview 命令线程；heal 跑在启动
+后台任务，上下文与 updater 崩溃点相同。
+
+> 关键：§6 的 heal **在 `just_upgraded` 分支本来就会崩**。只是此前 P0 bug 让 restore 从不
+> 触发、heal 从没真正跑过；P0 修好后才把这个潜伏崩溃暴露出来。
+
+**修复**（lib.rs）：**移除启动路径的自动 off→on heal**，保留 restore + 重试。修复后：
+- 正常重启：干净退出时 `shutdown_core` 已做 graceful 路由清理 → 恢复的 TUN 直接可用，本不需 heal；
+- 升级重启（强杀退出留残留路由）：恢复的 TUN 可能黑洞 → 用户手动 off→on（命令线程，安全）即可。
+
+即从「崩溃」回到「已知安全行为」，严格改善。`heal_tun_after_upgrade` 函数保留（加
+`#[allow(dead_code)]` + 文档警告「只能从命令/UI 线程调用」），作为将来**前端触发的「重连/修复」
+按钮**的构件——那是唯一能安全自动化 off→on 的上下文。
+
+**后续（需 Windows 实测，未做）**：把 off→on 自愈做成前端触发的命令（与手动 off→on 同一安全
+上下文），既能一键修复升级后的 TUN 黑洞，又不碰 GUI 自杀坑。
