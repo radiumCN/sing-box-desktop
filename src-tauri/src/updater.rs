@@ -721,7 +721,7 @@ pub async fn fetch_app_release(channel: &str, force_refresh: bool) -> Result<App
 /// → teardown → launch installer → self-exit) is notoriously hard to debug because the app is
 /// gone by the time anything goes wrong, so we leave a breadcrumb trail on disk. Best-effort:
 /// a logging error must never abort the update.
-fn update_log(msg: &str) {
+pub(crate) fn update_log(msg: &str) {
     let dir = crate::config::app_data_dir().join("logs");
     let _ = std::fs::create_dir_all(&dir);
     let line = format!(
