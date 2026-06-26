@@ -201,9 +201,12 @@ pub async fn start_app_update_checker(app_handle: tauri::AppHandle) {
 
     match crate::updater::fetch_app_release(&channel, false).await {
         Ok(release) => {
-            let current = env!("CARGO_PKG_VERSION");
+            // Source the running version from the bundle metadata (tauri.conf.json →
+            // package.json) so package.json is the single version to bump per release,
+            // rather than also having to keep Cargo.toml's CARGO_PKG_VERSION in sync.
+            let current = app_handle.package_info().version.to_string();
             let latest = release.version.trim_start_matches('v');
-            if is_newer_version(latest, current) {
+            if is_newer_version(latest, &current) {
                 let _ = app_handle.emit("app-update-available", serde_json::json!({
                     "version": release.version,
                     "download_url": release.download_url,
