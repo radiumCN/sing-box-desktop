@@ -241,15 +241,14 @@ pub fn run() {
                         } else {
                             "system"
                         };
-                        // On a post-upgrade launch, record the restore decision to update.log
-                        // (the upgrade diagnostic sink) so a "didn't reconnect after updating"
-                        // report can be traced. Gated on just_upgraded → no noise on normal launches.
-                        if just_upgraded {
-                            crate::updater::update_log(&format!(
-                                "startup restore (post-upgrade): mode={}, last_system_proxy={}, tun_enabled={}",
-                                mode, cfg.last_system_proxy, cfg.tun_enabled
-                            ));
-                        }
+                        // Record the restore decision to update.log (our only restore-path
+                        // file log) so a "didn't reconnect after restart/upgrade" report can be
+                        // traced. Only fires when a restore actually happens, so normal
+                        // proxy-off launches stay quiet.
+                        crate::updater::update_log(&format!(
+                            "startup restore: mode={}, just_upgraded={}, last_system_proxy={}, tun_enabled={}",
+                            mode, just_upgraded, cfg.last_system_proxy, cfg.tun_enabled
+                        ));
                         // Restoring TUN right after an app upgrade is the one case where a
                         // previous, force-killed core may have left a stale TUN adapter and
                         // strict routes behind (a pre-fix old version won't have cleaned up
@@ -296,21 +295,25 @@ pub fn run() {
                             }
                         }
                         if !applied {
-                            if just_upgraded {
-                                crate::updater::update_log(&format!(
-                                    "startup restore (post-upgrade): mode={} FAILED after {} attempt(s), falling back to idle core",
-                                    mode, tun_attempts
-                                ));
-                            }
+                            crate::updater::update_log(&format!(
+                                "startup restore: mode={} FAILED after {} attempt(s), falling back to idle core",
+                                mode, tun_attempts
+                            ));
                             let _ = crate::commands::start_idle_core(&handle, state.inner()).await;
-                        } else if mode == "tun" && just_upgraded {
-                            // Restored TUN on a just-upgraded launch: auto-heal the
-                            // installer-induced "TUN on, no network" black hole by replaying
-                            // the manual off→on cycle once. Best-effort — on failure the user
-                            // can still toggle manually, exactly as before.
-                            crate::updater::update_log(
-                                "startup restore (post-upgrade): TUN restored, running heal_tun_after_upgrade",
-                            );
+                        } else if mode == "tun" {
+                            // A freshly restored TUN tunnel can layer onto stale routing state —
+                            // left by a force-killed core after an upgrade, OR by the previous
+                            // session / a prior TUN adapter on an ordinary restart — and
+                            // black-hole all traffic (TUN shows "on", 0 connections, 0 B) until a
+                            // manual off→on. This is NOT upgrade-specific, so after ANY startup
+                            // TUN restore we replay that off→on settle once, rebuilding the tunnel
+                            // on a converged routing table. It's a one-time startup cold path, so
+                            // it never touches manual-toggle latency. Best-effort — on failure the
+                            // user can still toggle manually, exactly as before.
+                            crate::updater::update_log(&format!(
+                                "startup restore: TUN restored (just_upgraded={}), running off→on heal",
+                                just_upgraded
+                            ));
                             let _ = crate::commands::heal_tun_after_upgrade(
                                 &handle,
                                 state.inner(),

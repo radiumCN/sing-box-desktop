@@ -222,3 +222,27 @@ fn merge_runtime_fields(incoming: AppConfig, current: &AppConfig) -> AppConfig {
   - `saveConfig` `:699`、`setConnectionMode` `:284`、`fetchConfig` `:679`、`applyGlobalShortcuts` `:313`、`AppConfig` 接口 `:67-97`
 - `src/views/Settings.vue`
   - `localConfig` 快照 `:113`、`scheduleSave` `:122`、「记住代理状态」绑定 `:775-782`
+
+---
+
+## 6. 补充修复（v0.3.11 实测中发现）
+
+**现象**：升级到 v0.3.11 后，重启应用，TUN 被自动恢复（Stage 1 修复生效），但
+仪表盘显示「TUN 模式 / 已连接」却 0 连接、0 流量；手动把 TUN 关掉再打开即恢复正常。
+
+**根因**：新建/恢复的 TUN 隧道可能叠在残留路由状态上而黑洞掉全部流量（TUN 显示 on，
+0 连接 0 B），唯一解药是 off→on settle。代码里 `heal_tun_after_upgrade` 就是自动化这个
+off→on，但它**只在 `just_upgraded` 那一次启动才跑**。普通重启 / 开机自启恢复 TUN 时
+`just_upgraded=false`，于是恢复成功却不 settle → 黑洞，需用户手动 off→on。
+即：Stage 1 把「恢复 TUN」修好了，却没把「恢复后必须 off→on settle」一并带出升级专属路径。
+
+> 这个黑洞**不是升级特有**的——它源于路由叠加，普通重启同样会触发。
+
+**修复**（lib.rs）：把启动恢复路径里的 off→on 自愈条件从 `mode == "tun" && just_upgraded`
+放宽为 `mode == "tun"`——**凡启动时恢复 TUN 都做一次 off→on settle**。这是一次性的启动
+冷路径（约 1–2 秒 settle），不影响手动切换延迟。重试次数仍保留升级 5 次 / 冷启动 3 次。
+`heal_tun_after_upgrade` 文档同步澄清其已用于所有恢复场景（函数名保留以减少改动面）。
+升级恢复诊断日志的「post-upgrade」措辞改为通用「startup restore」并附 `just_upgraded` 标志。
+
+**验证**：需在 Windows 重新构建（建议 bump 到 v0.3.12）后回归：开 TUN + 记住 → 重启应用
+→ 应自动恢复 TUN **且直接有流量**，无需手动 off→on。
