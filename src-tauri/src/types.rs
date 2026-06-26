@@ -223,7 +223,7 @@ impl Default for AppConfig {
             auto_update_notify: true,
             update_channel: "stable".to_string(),
             close_to_tray: true,
-            restore_proxy_on_startup: false,
+            restore_proxy_on_startup: true,
             last_proxy_running: false,
             last_system_proxy: false,
             auto_test_url: default_auto_test_url(),
