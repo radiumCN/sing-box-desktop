@@ -825,43 +825,43 @@ pub async fn download_and_install_app(
     }
 
     // Launch the installer.
-    // Windows: the NSIS installer handles closing and restarting the app.
+    // Windows: we close this app ourselves (see below) and the NSIS installer restarts it.
     //
-    // Launch via ShellExecuteW("open"), NOT `cmd /C start`. When the update runs while TUN
-    // is on, the graceful core teardown above (send_ctrl_c) calls FreeConsole() and leaves
-    // this GUI process without a console — after which spawning `cmd …/start` to launch the
-    // installer is unreliable and the installer silently fails to open ("下载完成但不弹安装器").
-    // ShellExecuteW is console-independent and is exactly what `start` calls internally, so
-    // it still honours the installer manifest's UAC elevation request.
+    // Launch THROUGH explorer.exe, not ShellExecuteW/`cmd start`. The real failure behind
+    // "下载完成但不弹安装器" is an integrity-level mismatch, not the console: TUN mode
+    // relaunches this whole GUI elevated (runas, see tun::relaunch_as_admin), and the update
+    // path that breaks is exactly the TUN-on one. Launching the installer from an elevated
+    // process — via ShellExecuteW or `start` — keeps that elevation, so our `currentUser`
+    // (RequestExecutionLevel user) NSIS installer ends up running under an admin token. It
+    // starts far enough to kill the running app (so the app "exits") but then misbehaves and
+    // never shows its UI. explorer.exe runs at the normal medium integrity level, so the
+    // child it spawns de-elevates back to the interactive user — the same context a manual
+    // double-click would use. It's also console- and COM-independent, so it subsumes the
+    // earlier FreeConsole concern. explorer returns immediately with an unreliable exit code,
+    // so we only check that the spawn itself succeeded.
     #[cfg(target_os = "windows")]
     {
-        use std::ffi::OsStr;
-        use std::os::windows::ffi::OsStrExt;
-        use winapi::um::shellapi::ShellExecuteW;
-        use winapi::um::winuser::SW_SHOWNORMAL;
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("explorer.exe")
+            .arg(&installer_path)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| anyhow!("无法启动安装程序: {}", e))?;
 
-        let file_wide: Vec<u16> = OsStr::new(&installer_path)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let verb: Vec<u16> = OsStr::new("open")
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect();
-        let result = unsafe {
-            ShellExecuteW(
-                std::ptr::null_mut(),
-                verb.as_ptr(),
-                file_wide.as_ptr(),
-                std::ptr::null(),
-                std::ptr::null(),
-                SW_SHOWNORMAL,
-            )
-        };
-        // ShellExecuteW returns a value > 32 on success.
-        if result as usize <= 32 {
-            return Err(anyhow!("无法启动安装程序（ShellExecute 错误码 {}）", result as usize));
-        }
+        // Exit ourselves so the installer can replace the locked binary. Previously the
+        // (elevated) installer force-closed the running app for us, but now that it runs at
+        // medium integrity it CANNOT terminate this process when TUN mode left us elevated
+        // (high IL) — UIPI and TerminateProcess both block a lower-IL process from killing a
+        // higher-IL one — so the install would stall on a locked exe. The core was already
+        // torn down and the system proxy cleared above (shutdown_core), so exiting now is the
+        // same clean teardown the quit handler performs. A short grace lets explorer hand off
+        // to the installer before we vanish; the installer is an independent process and
+        // survives our exit. The relaunched app restores proxy/TUN on next start as usual.
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+            std::process::exit(0);
+        });
     }
 
     // macOS: open the downloaded .dmg in Finder so the user can drag-install.
