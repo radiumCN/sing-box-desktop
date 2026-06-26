@@ -805,16 +805,42 @@ pub async fn download_and_install_app(
 
     // Launch the installer.
     // Windows: the NSIS installer handles closing and restarting the app.
-    // Use CREATE_NO_WINDOW so the helper `cmd` doesn't flash a black console window.
+    //
+    // Launch via ShellExecuteW("open"), NOT `cmd /C start`. When the update runs while TUN
+    // is on, the graceful core teardown above (send_ctrl_c) calls FreeConsole() and leaves
+    // this GUI process without a console — after which spawning `cmd …/start` to launch the
+    // installer is unreliable and the installer silently fails to open ("下载完成但不弹安装器").
+    // ShellExecuteW is console-independent and is exactly what `start` calls internally, so
+    // it still honours the installer manifest's UAC elevation request.
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", installer_path.to_str().unwrap_or("")])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| anyhow!("无法启动安装程序: {}", e))?;
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use winapi::um::shellapi::ShellExecuteW;
+        use winapi::um::winuser::SW_SHOWNORMAL;
+
+        let file_wide: Vec<u16> = OsStr::new(&installer_path)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let verb: Vec<u16> = OsStr::new("open")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file_wide.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // ShellExecuteW returns a value > 32 on success.
+        if result as usize <= 32 {
+            return Err(anyhow!("无法启动安装程序（ShellExecute 错误码 {}）", result as usize));
+        }
     }
 
     // macOS: open the downloaded .dmg in Finder so the user can drag-install.
