@@ -12,9 +12,25 @@ import { getVersion } from "@tauri-apps/api/app";
 import { useI18n } from "vue-i18n";
 import { useAppStore, type AppConfig } from "../stores/app";
 import { setLocale } from "../i18n";
+import { marked } from "marked";
+import DOMPurify from "dompurify";
 
 const store = useAppStore();
 const { t } = useI18n();
+
+// Render release notes (GitHub release bodies) as Markdown. The source is remote, so the
+// generated HTML is always run through DOMPurify before it reaches v-html — never trust the
+// payload. Parse synchronously and treat any failure as empty so a malformed note can't break
+// the settings page.
+function renderReleaseNotes(md: string | null | undefined): string {
+  if (!md) return "";
+  try {
+    const html = marked.parse(md, { async: false, breaks: true, gfm: true }) as string;
+    return DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+  } catch {
+    return "";
+  }
+}
 
 // Apply a language change to the UI immediately; the debounced config save then persists it.
 function onLanguageChange() {
@@ -526,9 +542,11 @@ onUnmounted(() => {
             <span v-if="hasAppUpdate" class="badge badge-yellow">{{ t('settings.hasNewVersion') }}</span>
             <span v-else class="badge badge-green">{{ t('settings.upToDate') }}</span>
           </div>
-          <div v-if="appLatestRelease.release_notes" class="release-notes">
-            {{ appLatestRelease.release_notes }}
-          </div>
+          <div
+            v-if="appLatestRelease.release_notes"
+            class="release-notes markdown-body"
+            v-html="renderReleaseNotes(appLatestRelease.release_notes)"
+          ></div>
         </div>
 
         <div class="setting-divider" />
@@ -628,9 +646,11 @@ onUnmounted(() => {
             <span v-if="hasUpdate" class="badge badge-yellow">{{ t('settings.hasUpdate') }}</span>
             <span v-else-if="kernelExists" class="badge badge-green">{{ t('settings.upToDate') }}</span>
           </div>
-          <div v-if="latestRelease.release_notes" class="release-notes">
-            {{ latestRelease.release_notes }}
-          </div>
+          <div
+            v-if="latestRelease.release_notes"
+            class="release-notes markdown-body"
+            v-html="renderReleaseNotes(latestRelease.release_notes)"
+          ></div>
         </div>
 
         <div class="setting-divider" />
@@ -1373,9 +1393,32 @@ onUnmounted(() => {
 .release-date { font-size: 11px; color: var(--color-text-muted); }
 .release-notes {
   font-size: 11px; color: var(--color-text-secondary);
-  white-space: pre-line; line-height: 1.5;
-  max-height: 80px; overflow-y: auto;
+  line-height: 1.5;
+  max-height: 160px; overflow-y: auto;
 }
+/* Compact Markdown rendering for release notes (v-html, sanitized). */
+.release-notes.markdown-body :where(h1, h2, h3, h4, h5, h6) {
+  font-size: 12px; font-weight: 600; color: var(--color-text-primary);
+  margin: 8px 0 4px; line-height: 1.4;
+}
+.release-notes.markdown-body :where(h1, h2, h3, h4, h5, h6):first-child { margin-top: 0; }
+.release-notes.markdown-body p { margin: 4px 0; }
+.release-notes.markdown-body :where(ul, ol) { margin: 4px 0; padding-left: 18px; }
+.release-notes.markdown-body li { margin: 2px 0; }
+.release-notes.markdown-body a { color: var(--color-primary); text-decoration: none; }
+.release-notes.markdown-body a:hover { text-decoration: underline; }
+.release-notes.markdown-body strong { color: var(--color-text-primary); font-weight: 600; }
+.release-notes.markdown-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px; padding: 1px 4px; border-radius: 4px;
+  background: var(--color-bg-tertiary, rgba(127, 127, 127, 0.15));
+}
+.release-notes.markdown-body pre {
+  margin: 6px 0; padding: 8px; border-radius: 6px; overflow-x: auto;
+  background: var(--color-bg-tertiary, rgba(127, 127, 127, 0.15));
+}
+.release-notes.markdown-body pre code { padding: 0; background: none; }
+.release-notes.markdown-body :where(h1, h2) { border: none; padding: 0; }
 
 .kernel-actions {
   display: flex; align-items: center; gap: 8px; padding: 12px 18px; flex-wrap: wrap;
