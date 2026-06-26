@@ -213,6 +213,25 @@ pub fn run() {
                     // Small delay to let the window/tray finish initializing.
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     let state = handle.state::<AppState>();
+                    // A just-upgraded launch is the one case where the installer force-killed
+                    // the previous core, possibly leaving stale TUN routes that black-hole the
+                    // restored tunnel. Detect it by comparing the version that wrote the config
+                    // with the running binary, then persist the current version so the heal
+                    // runs at most once per upgrade.
+                    let just_upgraded =
+                        cfg.last_app_version != env!("CARGO_PKG_VERSION");
+                    if just_upgraded {
+                        // Stamp the running version into the IN-MEMORY config (not a fresh
+                        // disk copy): apply_connection_mode below persists state.app_config, so
+                        // updating it here is what makes the new version actually stick and
+                        // keeps the heal a once-per-upgrade event.
+                        let cfg_clone = {
+                            let mut c = state.app_config.lock().unwrap();
+                            c.last_app_version = env!("CARGO_PKG_VERSION").to_string();
+                            c.clone()
+                        };
+                        let _ = crate::config::save_app_config(&cfg_clone);
+                    }
                     let restore = cfg.restore_proxy_on_startup && cfg.last_proxy_running;
                     if restore {
                         let mode = if cfg.last_system_proxy {
@@ -240,6 +259,16 @@ pub fn run() {
                             .is_err()
                         {
                             let _ = crate::commands::start_idle_core(&handle, state.inner()).await;
+                        } else if mode == "tun" && just_upgraded {
+                            // Restored TUN on a just-upgraded launch: auto-heal the
+                            // installer-induced "TUN on, no network" black hole by replaying
+                            // the manual off→on cycle once. Best-effort — on failure the user
+                            // can still toggle manually, exactly as before.
+                            let _ = crate::commands::heal_tun_after_upgrade(
+                                &handle,
+                                state.inner(),
+                            )
+                            .await;
                         }
                     } else {
                         let _ = crate::commands::start_idle_core(&handle, state.inner()).await;

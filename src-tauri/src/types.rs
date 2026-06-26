@@ -157,6 +157,13 @@ pub struct AppConfig {
     /// app never silently grabs system-wide key combos until the user opts in.
     #[serde(default)]
     pub enable_global_shortcuts: bool,
+    /// App version that last wrote this config. Used on startup to detect a just-upgraded
+    /// launch (`last_app_version != CARGO_PKG_VERSION`), which is the one case where the
+    /// installer force-killed the previous core and may have left stale TUN routes behind —
+    /// the restored tunnel then black-holes until a manual off→on. See the post-upgrade
+    /// TUN self-heal in `lib.rs`. Empty on a fresh install / pre-upgrade config.
+    #[serde(default)]
+    pub last_app_version: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -224,6 +231,7 @@ impl Default for AppConfig {
             log_to_file: false,
             subscription_user_agent: default_subscription_user_agent(),
             enable_global_shortcuts: false,
+            last_app_version: String::new(),
         }
     }
 }
