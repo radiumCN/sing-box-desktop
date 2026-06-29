@@ -20,48 +20,55 @@ fn open_daily_log_file() -> Option<std::fs::File> {
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Ask sing-box to shut down **gracefully** by delivering a console Ctrl+C, which Go maps
-/// to `os.Interrupt`/SIGINT — triggering sing-box's own shutdown path, including TUN
-/// teardown (`WintunDeleteAdapter`) and `strict_route` route cleanup. A hard `taskkill /F`
-/// skips all of that and orphans the TUN adapter + routes, which later surfaces as
-/// "TUN on, but no network" after a restart.
+/// Windows CREATE_NEW_PROCESS_GROUP flag: makes the core the root of its own console
+/// process group (group id == its pid), so we can target a console control event at JUST
+/// that group instead of broadcasting to the whole console (which includes this GUI).
+#[cfg(windows)]
+const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+
+/// Ask sing-box to shut down **gracefully** by delivering a console CTRL+BREAK, which Go
+/// maps to `os.Interrupt` — triggering sing-box's own shutdown path, including TUN teardown
+/// (`WintunDeleteAdapter`) and `strict_route` route cleanup. A hard `taskkill /F` skips all
+/// of that and orphans the TUN adapter + routes, which later surfaces as "TUN on, but no
+/// network" after a restart.
 ///
-/// How it works: the core is spawned with `CREATE_NO_WINDOW`, so it owns a hidden console
-/// we can attach to. Because we attach to that console, the broadcast Ctrl+C would also hit
-/// this GUI process — so we first install a NULL "ignore" handler on ourselves, fire
-/// `CTRL_C_EVENT` to the whole attached console group, then detach and restore our handler.
+/// How it works: the core is spawned with `CREATE_NEW_PROCESS_GROUP` (group id == its pid),
+/// so we deliver the event to THAT GROUP specifically —
+/// `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)` reaches only the core, never this GUI.
+/// We must briefly `AttachConsole` to the core's hidden console (so the caller shares it and
+/// is allowed to signal its group), but because the event is *targeted* at the core's group
+/// — not a group-0 broadcast — the GUI, which lives in a different process group, is
+/// unaffected. This is what fixes the "app exits when turning TUN off" self-kill that the
+/// previous group-0 `CTRL_C_EVENT` broadcast caused regardless of caller context.
 ///
-/// IMPORTANT: the core must NOT be started with `CREATE_NEW_PROCESS_GROUP`, since new
-/// process groups have Ctrl+C disabled by default — it is intentionally absent at spawn.
+/// CTRL+BREAK (not CTRL+C) is required: a process started with `CREATE_NEW_PROCESS_GROUP`
+/// has CTRL+C disabled by default, whereas CTRL+BREAK is always delivered. Go's runtime
+/// reports both as `os.Interrupt`, so sing-box's graceful shutdown still runs.
 ///
 /// Returns `false` if attaching/sending failed (process already gone, or no console), in
 /// which case the caller should fall back to a force kill.
 #[cfg(target_os = "windows")]
-fn send_ctrl_c(pid: u32) -> bool {
-    use winapi::um::consoleapi::SetConsoleCtrlHandler;
-    use winapi::um::wincon::{AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, CTRL_C_EVENT};
+fn send_graceful_break(pid: u32) -> bool {
+    use winapi::um::wincon::{AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
 
     unsafe {
-        // Detach from any console we might already own; a GUI build normally has none, and
-        // AttachConsole fails with ERROR_ACCESS_DENIED if we are already attached elsewhere.
+        // Detach from any console we might already own (a GUI build normally has none), then
+        // attach to the core's so we're permitted to signal its process group.
         FreeConsole();
         if AttachConsole(pid) == 0 {
             return false;
         }
-        // Disable Ctrl+C handling for OURSELVES so the broadcast below doesn't terminate the
-        // GUI process along with the core.
-        SetConsoleCtrlHandler(None, 1);
-        let sent = GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0) != 0;
-        // Leave the core's console and re-enable normal Ctrl handling for ourselves.
+        // Target ONLY the core's process group (id == pid) — not a group-0 broadcast — so the
+        // GUI (a different group) can never be hit. No self-protection handler needed.
+        let sent = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) != 0;
         FreeConsole();
-        SetConsoleCtrlHandler(None, 0);
         sent
     }
 }
 
-/// Durable console control handler: swallow Ctrl+C / Ctrl+Break for THIS (GUI) process so
-/// the broadcast in [`send_ctrl_c`] can never terminate us. Returning TRUE marks the event
-/// handled; other control types (close/logoff/shutdown) fall through to default handling.
+/// Durable console control handler: swallow Ctrl+C / Ctrl+Break for THIS (GUI) process so a
+/// console control event can never terminate us. Returning TRUE marks the event handled;
+/// other control types (close/logoff/shutdown) fall through to default handling.
 #[cfg(target_os = "windows")]
 unsafe extern "system" fn ignore_console_ctrl(ctrl_type: u32) -> i32 {
     use winapi::um::wincon::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
@@ -73,14 +80,11 @@ unsafe extern "system" fn ignore_console_ctrl(ctrl_type: u32) -> i32 {
 
 /// Permanently make this process ignore console Ctrl+C / Ctrl+Break. Call ONCE at startup.
 ///
-/// To shut a TUN core down gracefully, [`send_ctrl_c`] momentarily attaches the GUI to the
-/// core's console and broadcasts `CTRL_C_EVENT` to the whole group — which includes us. Its
-/// own temporary self-protection (set NULL-ignore handler → broadcast → restore) has a
-/// restore-window race: from some calling contexts (notably the tray menu's spawned task)
-/// the broadcast still reaches the GUI after the guard was restored and terminates it — the
-/// "app exits when turning TUN off from the tray" crash. A handler that is installed once
-/// and never removed closes that race in every context, while the child core still receives
-/// its own Ctrl+C and tears the tunnel down cleanly. No-op off Windows.
+/// Defense-in-depth: graceful TUN teardown sends a CTRL+BREAK *targeted* at the core's own
+/// process group (see [`send_graceful_break`]), so it should never reach the GUI in the
+/// first place. This handler is a belt-and-suspenders guard — should a console control event
+/// ever land on the GUI (e.g. via an inherited console), it is swallowed instead of
+/// terminating the app. No-op off Windows.
 #[cfg(target_os = "windows")]
 pub fn install_console_ctrl_guard() {
     use winapi::um::consoleapi::SetConsoleCtrlHandler;
@@ -280,8 +284,11 @@ pub async fn start_singbox(
         cmd.current_dir(crate::config::app_data_dir())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        // CREATE_NEW_PROCESS_GROUP puts the core in its own console process group so a
+        // graceful CTRL+BREAK can be targeted at JUST the core (see send_graceful_break),
+        // never reaching this GUI. CREATE_NO_WINDOW keeps its console hidden.
         #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
         let mut child = match cmd.spawn()
         {
             Ok(c) => c,
@@ -386,12 +393,12 @@ pub async fn stop_singbox(state: SharedState, graceful: bool) -> Result<()> {
             let mut exited = false;
 
             if graceful {
-                // Graceful shutdown: deliver a real Ctrl+C (→ SIGINT) so sing-box runs its
-                // own TUN teardown (WintunDeleteAdapter) and strict_route cleanup before
-                // exiting — the previous `taskkill` (no /F) sent WM_CLOSE, which a windowless
-                // console process never receives, so it always fell through to a force kill
-                // and orphaned the TUN adapter/routes.
-                if send_ctrl_c(pid) {
+                // Graceful shutdown: deliver a targeted CTRL+BREAK (→ os.Interrupt) so sing-box
+                // runs its own TUN teardown (WintunDeleteAdapter) and strict_route cleanup
+                // before exiting — a hard `taskkill /F` skips that and orphans the TUN
+                // adapter/routes. The event targets the core's own process group only, so it
+                // never takes the GUI down with it (see send_graceful_break).
+                if send_graceful_break(pid) {
                     // TUN driver teardown can take a beat; poll the shared state (no process
                     // spawn) up to ~3s, returning as soon as the core has actually exited.
                     for _ in 0..60 {
