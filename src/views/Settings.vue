@@ -625,6 +625,7 @@ onUnmounted(() => {
             <div class="setting-label">{{ t('settings.currentKernelVersion') }}</div>
             <div class="setting-desc">
               <template v-if="installedVersion">{{ installedVersion }}</template>
+              <span v-else-if="kernelExists" class="version-unknown">{{ t('settings.kernelVersionUnknown') }}</span>
               <span v-else class="not-installed">{{ t('settings.kernelNotInstalledDesc') }}</span>
             </div>
           </div>
@@ -1263,7 +1264,7 @@ onUnmounted(() => {
       <div>
         <div class="about-name">Skylark</div>
         <div class="about-desc">{{ t('settings.aboutDesc') }}</div>
-        <div class="about-version">v{{ appVersion }} · {{ installedVersion ?? t('settings.singboxNotInstalled') }}</div>
+        <div class="about-version">v{{ appVersion }} · {{ installedVersion ?? (kernelExists ? t('settings.kernelVersionUnknown') : t('settings.singboxNotInstalled')) }}</div>
       </div>
     </div>
 
@@ -1349,6 +1350,7 @@ onUnmounted(() => {
 .setting-label { font-size: 13px; font-weight: 500; margin-bottom: 2px; }
 .setting-desc { font-size: 11px; color: var(--color-text-muted); }
 .not-installed { color: var(--color-error); }
+.version-unknown { color: var(--color-text-muted, #888); font-style: italic; }
 .setting-divider { height: 1px; background: var(--color-border); margin: 0 18px; }
 
 /* Toggle Switch */

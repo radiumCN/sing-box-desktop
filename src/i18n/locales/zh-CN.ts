@@ -337,6 +337,7 @@ export default {
     kernelManagement: "sing-box 内核管理",
     currentKernelVersion: "当前内核版本",
     kernelNotInstalledDesc: "未安装 — 需要下载才能使用代理功能",
+    kernelVersionUnknown: "已安装（版本信息获取失败）",
     installed: "已安装",
     notInstalled: "未安装",
     hasUpdate: "有更新",

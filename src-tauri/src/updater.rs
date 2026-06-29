@@ -511,23 +511,51 @@ pub fn singbox_exists() -> bool {
     resolved_singbox_path().exists()
 }
 
-/// Get current installed version by running sing-box version
+/// Get current installed version by running `sing-box version`.
+/// Returns `None` only when the binary does not exist; when the binary exists
+/// but version detection fails (spawn error, non-zero exit, empty output) this
+/// returns `Some("<path>: version unknown")` so the caller can distinguish
+/// "not installed" from "installed but version unreadable".
 pub async fn get_installed_version() -> Option<String> {
     let path = resolved_singbox_path();
     if !path.exists() {
         return None;
     }
+
     let mut cmd = tokio::process::Command::new(&path);
     cmd.arg("version");
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000);
-    let output = cmd
-        .output()
-        .await
-        .ok()?;
+
+    let output = match cmd.output().await {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("sing-box version spawn error ({:?}): {}", path, e);
+            // Binary exists but can't be executed — report "version unknown"
+            // instead of returning None (which would wrongly say "not installed").
+            return Some(format!("（版本未知，无法执行: {}）", e));
+        }
+    };
+
+    // Try stdout first, then stderr (some platforms print there).
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Typical output: "sing-box version 1.10.0"
-    stdout.lines().next().map(|s| s.to_string())
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Find the first non-empty line from stdout; fall back to stderr.
+    // Typical stdout: "sing-box version 1.13.14"
+    if let Some(line) = stdout.lines().find(|l| !l.trim().is_empty()) {
+        return Some(line.to_string());
+    }
+    if let Some(line) = stderr.lines().find(|l| !l.trim().is_empty()) {
+        return Some(line.to_string());
+    }
+
+    log::warn!(
+        "sing-box version produced no output (exit {}): {:?}",
+        output.status, path
+    );
+    // Binary exists but returned nothing — still report "installed, version unknown".
+    Some(String::from("（版本未知）"))
 }
 
 // ─── App Self-Updater ────────────────────────────────────────────────
