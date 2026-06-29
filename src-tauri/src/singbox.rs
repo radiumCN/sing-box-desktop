@@ -59,6 +59,40 @@ fn send_ctrl_c(pid: u32) -> bool {
     }
 }
 
+/// Durable console control handler: swallow Ctrl+C / Ctrl+Break for THIS (GUI) process so
+/// the broadcast in [`send_ctrl_c`] can never terminate us. Returning TRUE marks the event
+/// handled; other control types (close/logoff/shutdown) fall through to default handling.
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn ignore_console_ctrl(ctrl_type: u32) -> i32 {
+    use winapi::um::wincon::{CTRL_BREAK_EVENT, CTRL_C_EVENT};
+    match ctrl_type {
+        CTRL_C_EVENT | CTRL_BREAK_EVENT => 1, // TRUE — handled, so the GUI is not killed
+        _ => 0,                               // FALSE — defer to the default handler
+    }
+}
+
+/// Permanently make this process ignore console Ctrl+C / Ctrl+Break. Call ONCE at startup.
+///
+/// To shut a TUN core down gracefully, [`send_ctrl_c`] momentarily attaches the GUI to the
+/// core's console and broadcasts `CTRL_C_EVENT` to the whole group — which includes us. Its
+/// own temporary self-protection (set NULL-ignore handler → broadcast → restore) has a
+/// restore-window race: from some calling contexts (notably the tray menu's spawned task)
+/// the broadcast still reaches the GUI after the guard was restored and terminates it — the
+/// "app exits when turning TUN off from the tray" crash. A handler that is installed once
+/// and never removed closes that race in every context, while the child core still receives
+/// its own Ctrl+C and tears the tunnel down cleanly. No-op off Windows.
+#[cfg(target_os = "windows")]
+pub fn install_console_ctrl_guard() {
+    use winapi::um::consoleapi::SetConsoleCtrlHandler;
+    // SAFETY: registers a process-wide control handler with a 'static fn pointer.
+    unsafe {
+        SetConsoleCtrlHandler(Some(ignore_console_ctrl), 1);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn install_console_ctrl_guard() {}
+
 #[derive(Debug, Clone)]
 pub struct SingboxState {
     pub running: bool,
