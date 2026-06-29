@@ -1147,17 +1147,73 @@ pub async fn cmd_set_active_node(
     Ok(())
 }
 
+/// Rebuild the sing-box config from current app state and restart the running core so the
+/// change takes effect. Unlike [`ensure_core`], this ALWAYS rebuilds — for changes that
+/// alter config *content* while the TUN mode stays the same (e.g. switching the active
+/// auto group, which materialises a different urltest group). Preserves the current TUN
+/// mode; the system proxy keeps pointing at the unchanged mixed port, so it needs no
+/// retouch. When the core is not running it only rewrites the file for the next start.
+async fn rebuild_and_restart_core(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    let (config, outbounds, nodes) = {
+        let config = state.app_config.lock().unwrap().clone();
+        let outbounds = state.outbounds.lock().unwrap().clone();
+        let nodes = state.nodes.lock().unwrap().clone();
+        (config, outbounds, nodes)
+    };
+    let active_tag = config.active_nodes.get("proxy").cloned();
+    let singbox_cfg = subscription::build_singbox_config(
+        &outbounds,
+        &config,
+        active_tag.as_deref(),
+        &nodes,
+    );
+    let config_path = config::singbox_config_path();
+    config::ensure_dirs().map_err(|e| e.to_string())?;
+    std::fs::write(&config_path, serde_json::to_string_pretty(&singbox_cfg).unwrap())
+        .map_err(|e| e.to_string())?;
+
+    let (running, current_tun) = {
+        let s = state.singbox_state.lock().unwrap();
+        (s.running, s.tun_mode)
+    };
+    if running {
+        let _ = stop_singbox(state.singbox_state.clone(), current_tun).await;
+        start_singbox(
+            app_handle,
+            &config_path,
+            state.singbox_state.clone(),
+            config.api_port,
+            current_tun,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        if let Some(m) = clash_mode_str(&config.proxy_mode) {
+            let _ = clash_set_mode(config.api_port, m).await;
+        }
+    }
+    Ok(())
+}
+
 /// Switch the proxy group to a dynamic urltest selection. `group` defaults to the
 /// global "auto" group; pass "auto-<sub.id>" to use a per-subscription group. The
 /// core then continuously health-checks that group's nodes and routes via the
 /// fastest one.
+///
+/// Only the active auto group is materialised in the config (so startup probes just that
+/// group's nodes), which means the target group may not exist in the running config — a
+/// live Clash `select` cannot reach it. So switching auto groups rebuilds the config and
+/// restarts the core. (Concrete-node switches stay live; see `cmd_set_active_node`.)
 #[tauri::command]
 pub async fn cmd_set_auto_node(
+    app_handle: tauri::AppHandle,
     group: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let group = group.unwrap_or_else(|| "auto".to_string());
-    let (api_port, running) = {
+    {
         let mut nodes = state.nodes.lock().unwrap();
         for node in nodes.iter_mut() {
             node.is_active = false;
@@ -1167,15 +1223,9 @@ pub async fn cmd_set_auto_node(
         let mut config = state.app_config.lock().unwrap();
         config.active_nodes.insert("proxy".to_string(), group.clone());
         config::save_app_config(&config).map_err(|e| e.to_string())?;
-        let api_port = config.api_port;
-        let running = state.singbox_state.lock().unwrap().running;
-        (api_port, running)
-    };
-
-    if running {
-        let _ = clash_select_proxy(api_port, "proxy", &group).await;
     }
-    Ok(())
+
+    rebuild_and_restart_core(&app_handle, state.inner()).await
 }
 
 /// Resolve the concrete node the "proxy" group is currently routing through by

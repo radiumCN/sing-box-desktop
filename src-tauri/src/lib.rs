@@ -70,6 +70,11 @@ fn emit_tray_mode_result(app: &tauri::AppHandle, res: Result<(), String>) {
 pub fn run() {
     config::ensure_dirs().expect("无法创建数据目录");
 
+    // Make the GUI permanently ignore console Ctrl+C/Break BEFORE any core start/stop, so
+    // the graceful-shutdown broadcast in singbox::send_ctrl_c (used when tearing a TUN core
+    // down) can never self-kill the app — e.g. turning TUN off from the tray menu.
+    singbox::install_console_ctrl_guard();
+
     let app_config = config::load_app_config();
     let subscriptions = config::load_subscriptions();
     let mut nodes = config::load_nodes();
