@@ -336,6 +336,7 @@ export default {
     kernelManagement: "sing-box Kernel Management",
     currentKernelVersion: "Current Kernel Version",
     kernelNotInstalledDesc: "Not installed — download is required to use proxy features",
+    kernelVersionUnknown: "Installed (version info unavailable)",
     installed: "Installed",
     notInstalled: "Not Installed",
     hasUpdate: "Update Available",
