@@ -166,6 +166,12 @@ export const useAppStore = defineStore("app", () => {
     return status.value.running && (config.value.tun_enabled || systemProxyEnabled.value);
   });
 
+  // Wall-clock ms at which the current proxy session began (off → on), or null while not
+  // proxying. Owned by the app-scoped traffic poller so it survives page navigation — the
+  // dashboard derives "运行时长" from it instead of from a component-local timer that would
+  // reset on every remount.
+  const proxySessionStartMs = ref<number | null>(null);
+
   async function refreshSystemProxy() {
     try {
       systemProxyEnabled.value = await invoke<boolean>("cmd_get_system_proxy_status");
@@ -589,6 +595,8 @@ export const useAppStore = defineStore("app", () => {
         lastDownTotal = 0;
         trafficWasRunning = false;
       }
+      // Freeze the session timer whenever not proxying (independent of the traffic flag).
+      proxySessionStartMs.value = null;
       return;
     }
 
@@ -598,6 +606,11 @@ export const useAppStore = defineStore("app", () => {
       lastDownTotal = 0;
       clearTrafficHistory();
       trafficWasRunning = true;
+    }
+    // Start the session clock on the first proxying poll and keep it across core restarts
+    // (e.g. an auto-group switch) — only a real off → on transition clears it above.
+    if (proxySessionStartMs.value === null) {
+      proxySessionStartMs.value = Date.now();
     }
 
     let up = 0;
@@ -796,6 +809,7 @@ export const useAppStore = defineStore("app", () => {
     connecting,
     systemProxyEnabled,
     proxying,
+    proxySessionStartMs,
     refreshSystemProxy,
     activeNode,
     nodesByGroup,
