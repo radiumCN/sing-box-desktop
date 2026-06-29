@@ -101,12 +101,71 @@ pub fn parse_subscription(
     sub_id: &str,
 ) -> Result<(Vec<ProxyNode>, Vec<Value>)> {
     let sub_type = detect_sub_type(content, "");
-    match sub_type {
+    let (nodes, outbounds) = match sub_type {
         SubType::Clash => parse_clash(content, sub_id),
         SubType::V2ray => parse_v2ray(content, sub_id),
         SubType::Sip008 => parse_sip008(content, sub_id),
         SubType::Unknown => Err(anyhow!("无法识别的订阅格式")),
+    }?;
+    Ok(strip_info_placeholder_nodes(nodes, outbounds))
+}
+
+/// Airport (机场) subscriptions routinely inject non-server "info" entries as fake nodes
+/// — remaining traffic, plan expiry, reset countdown, the official site, "unavailable"
+/// notices, client-download hints, etc. They carry no usable proxy server, yet each one
+/// still becomes a URLTest member and blocks a startup probe until it times out (~5s a
+/// piece in the field), which is a large part of the "takes forever to start" symptom.
+///
+/// Drop them — and their paired outbounds — at the single parse chokepoint so every
+/// import / refresh / restore path benefits. The match list is deliberately high-signal
+/// (full marker phrases, not bare single chars like "流量") so a genuine node is never
+/// removed by accident.
+fn is_info_placeholder_node(name: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "剩余流量",
+        "剩余：",
+        "距离下次重置",
+        "重置剩余",
+        "套餐到期",
+        "到期：",
+        "官网",
+        "性价比机场",
+        "不可用",
+        "请更换",
+        "不支持本机场",
+        "更新订阅",
+        "问题排查",
+        "客户端：",
+        "🪧",
+    ];
+    MARKERS.iter().any(|m| name.contains(m))
+}
+
+/// Remove info-placeholder fake nodes (see [`is_info_placeholder_node`]) from a parsed
+/// subscription, keeping nodes and their outbounds in lock-step by name. Pure in its
+/// inputs. A subscription made up entirely of markers yields an empty result rather than
+/// erroring — the caller surfaces "0 nodes", which is the truthful outcome.
+fn strip_info_placeholder_nodes(
+    nodes: Vec<ProxyNode>,
+    outbounds: Vec<Value>,
+) -> (Vec<ProxyNode>, Vec<Value>) {
+    let dropped: std::collections::HashSet<String> = nodes
+        .iter()
+        .filter(|n| is_info_placeholder_node(&n.name))
+        .map(|n| n.name.clone())
+        .collect();
+    if dropped.is_empty() {
+        return (nodes, outbounds);
     }
+    let nodes = nodes
+        .into_iter()
+        .filter(|n| !dropped.contains(&n.name))
+        .collect();
+    let outbounds = outbounds
+        .into_iter()
+        .filter(|ob| ob["tag"].as_str().map(|t| !dropped.contains(t)).unwrap_or(true))
+        .collect();
+    (nodes, outbounds)
 }
 
 /// Region keyword → group label table. Each entry lists name substrings (lowercased for
@@ -1402,13 +1461,61 @@ fn build_proxy_outbounds(
         })
         .collect();
 
-    /* Selector options order: global "auto" → per-subscription autos → every node. */
-    let mut selector_outbounds: Vec<Value> = Vec::new();
+    /* Every tag the "proxy" selector could legitimately default to: global "auto",
+       per-subscription autos, custom groups, and concrete nodes. Used only to validate
+       a persisted active_tag — it is NOT the materialised option list (see below). */
+    let sub_group_tag_set: std::collections::HashSet<&str> =
+        sub_groups.iter().map(|(t, _)| t.as_str()).collect();
+    let mut all_valid_tags: std::collections::HashSet<String> = std::collections::HashSet::new();
     if has_nodes {
-        selector_outbounds.push(Value::String(AUTO_TAG.to_string()));
+        all_valid_tags.insert(AUTO_TAG.to_string());
     }
-    for (tag, _) in &sub_groups {
-        selector_outbounds.push(Value::String(tag.clone()));
+    all_valid_tags.extend(sub_group_tag_set.iter().map(|t| t.to_string()));
+    all_valid_tags.extend(custom_groups.iter().map(|(t, _, _)| t.clone()));
+    all_valid_tags.extend(node_tags.iter().filter_map(|v| v.as_str().map(String::from)));
+
+    /* Default selection priority:
+         1. caller-supplied active_tag (a concrete node tag, "auto", or "auto-<sid>")
+         2. "auto" when nodes exist (best zero-config experience)
+         3. "direct" when there is nothing to proxy through yet */
+    let mut selected: String = match active_tag {
+        Some(t) if !t.is_empty() => t.to_string(),
+        _ if has_nodes => AUTO_TAG.to_string(),
+        _ => "direct".to_string(),
+    };
+    /* Guard against a stale active_tag (e.g. the node/sub was removed after it was last
+       selected): fall back to a valid option so sing-box never sees an unknown default,
+       which would abort startup. */
+    if !all_valid_tags.contains(&selected) {
+        selected = if has_nodes { AUTO_TAG.to_string() } else { "direct".to_string() };
+    }
+
+    /* Only the ACTIVE dynamic auto group is materialised, so the core health-checks just
+       that group's nodes at startup — not every node across a global "auto" plus a
+       per-subscription urltest group for each airport (which probed each node several
+       times over and stalled startup on dead "info" placeholder nodes). Concrete-node
+       and custom-group switches stay live via the Clash API (their tags remain selector
+       options); switching between auto groups rebuilds the config (see cmd_set_auto_node). */
+    enum ActiveAuto {
+        Global,
+        Sub(String),
+        None,
+    }
+    let active_auto = if selected == AUTO_TAG {
+        ActiveAuto::Global
+    } else if sub_group_tag_set.contains(selected.as_str()) {
+        ActiveAuto::Sub(selected.clone())
+    } else {
+        ActiveAuto::None
+    };
+
+    /* Materialised selector options: the active auto group (if any) → custom groups →
+       every node. Non-active per-subscription autos are intentionally absent. */
+    let mut selector_outbounds: Vec<Value> = Vec::new();
+    match &active_auto {
+        ActiveAuto::Global => selector_outbounds.push(Value::String(AUTO_TAG.to_string())),
+        ActiveAuto::Sub(tag) => selector_outbounds.push(Value::String(tag.clone())),
+        ActiveAuto::None => {}
     }
     for (tag, _, _) in &custom_groups {
         selector_outbounds.push(Value::String(tag.clone()));
@@ -1419,22 +1526,6 @@ fn build_proxy_outbounds(
        still start (and "proxy" simply means direct until the user adds nodes). */
     if selector_outbounds.is_empty() {
         selector_outbounds.push(Value::String("direct".to_string()));
-    }
-
-    /* Default selection priority:
-         1. caller-supplied active_tag (a concrete node tag or "auto")
-         2. "auto" when nodes exist (best zero-config experience)
-         3. first available option */
-    let mut selected: String = match active_tag {
-        Some(t) if !t.is_empty() => t.to_string(),
-        _ if has_nodes => AUTO_TAG.to_string(),
-        _ => selector_outbounds.first().and_then(|v| v.as_str()).unwrap_or("").to_string(),
-    };
-    /* Guard against a stale active_tag (e.g. the node was removed after it was last
-       selected): fall back to a valid option so sing-box never sees an unknown
-       default, which would abort startup. */
-    if !selector_outbounds.iter().any(|v| v.as_str() == Some(selected.as_str())) {
-        selected = if has_nodes { AUTO_TAG.to_string() } else { "direct".to_string() };
     }
 
     // Sanitize proxy outbounds: remove any transport field whose type is "tcp"
@@ -1471,7 +1562,9 @@ fn build_proxy_outbounds(
        Clash.Meta-style "Auto" behaviour and fixes the "locked to a slow node"
        problem. Probe URL / interval / tolerance are user-configurable.
          • global "auto"      → all nodes
-         • "auto-<sub.id>"    → only that subscription's nodes (multi-airport setups) */
+         • "auto-<sub.id>"    → only that subscription's nodes (multi-airport setups)
+       Only the active one is emitted (see `active_auto`); the others are rebuilt on
+       demand when the user switches to them. */
     let test_url = if config.auto_test_url.trim().is_empty() {
         "https://www.gstatic.com/generate_204".to_string()
     } else {
@@ -1490,11 +1583,16 @@ fn build_proxy_outbounds(
             "idle_timeout": "30m"
         })
     };
-    if has_nodes {
-        all_outbounds.push(urltest_group(AUTO_TAG, &node_tags));
-    }
-    for (tag, members) in &sub_groups {
-        all_outbounds.push(urltest_group(tag, members));
+    match &active_auto {
+        ActiveAuto::Global if has_nodes => {
+            all_outbounds.push(urltest_group(AUTO_TAG, &node_tags));
+        }
+        ActiveAuto::Sub(tag) => {
+            if let Some((_, members)) = sub_groups.iter().find(|(t, _)| t == tag) {
+                all_outbounds.push(urltest_group(tag, members));
+            }
+        }
+        _ => {}
     }
     /* User-defined custom groups: urltest (auto by latency) or selector (manual pick,
        defaulting to its first member). */
@@ -2485,6 +2583,130 @@ mod tests {
         let (n, _) = apply_node_filters(nodes, obs, None, None, true);
         assert_eq!(n[0].group, "香港");
         assert_eq!(n[1].group, "其他");
+    }
+
+    fn mk_node_sub(name: &str, sub: &str) -> ProxyNode {
+        ProxyNode { subscription_id: Some(sub.to_string()), ..mk_node(name) }
+    }
+
+    /** urltest group tags present in a built outbound list. */
+    fn urltest_tags(obs: &[Value]) -> Vec<String> {
+        obs.iter()
+            .filter(|o| o["type"] == "urltest")
+            .filter_map(|o| o["tag"].as_str().map(String::from))
+            .collect()
+    }
+
+    #[test]
+    fn is_info_placeholder_targets_airport_markers_only() {
+        // Real-world airport "info" entries (from production logs) → dropped.
+        for marker in [
+            "剩余流量：1000 GB",
+            "距离下次重置剩余：27 天",
+            "套餐到期：2026-12-22",
+            "🪧 不可用请软件内更新订阅或官网看问题排查",
+            "🪧 官网 : 性价比机场.com",
+            "当前Clash客户端不支持本机场协议",
+            "Win客户端：V2rayN,ClashVerge",
+        ] {
+            assert!(is_info_placeholder_node(marker), "should drop: {marker}");
+        }
+        // Genuine nodes must never match.
+        for real in [
+            "🇭🇰香港高速05|BGP|CMCU",
+            "US-Reality-dept1",
+            "🇯🇵日本高速09|BGP|CTCU",
+            "⚡️🇭🇰 香港专线1丨6x",
+        ] {
+            assert!(!is_info_placeholder_node(real), "should keep: {real}");
+        }
+    }
+
+    #[test]
+    fn strip_info_placeholder_drops_nodes_and_paired_outbounds() {
+        let nodes = vec![
+            mk_node("🇭🇰HK1"),
+            mk_node("剩余流量：1000 GB"),
+            mk_node("🪧 官网 : 性价比机场.com"),
+            mk_node("US-Reality-dept1"),
+        ];
+        let obs: Vec<Value> = nodes
+            .iter()
+            .map(|n| json!({"tag": n.name.clone(), "type": "vmess"}))
+            .collect();
+        let (n, o) = strip_info_placeholder_nodes(nodes, obs);
+        assert_eq!(n.len(), 2, "only the two real nodes survive");
+        assert!(n.iter().all(|nd| !is_info_placeholder_node(&nd.name)));
+        // Outbounds stay in lock-step: the dropped tags are gone, the real ones remain.
+        assert_eq!(o.len(), 2);
+        assert!(o.iter().any(|ob| ob["tag"] == "🇭🇰HK1"));
+        assert!(o.iter().any(|ob| ob["tag"] == "US-Reality-dept1"));
+    }
+
+    #[test]
+    fn proxy_outbounds_global_auto_materialises_only_global() {
+        let cfg = crate::types::AppConfig::default();
+        let nodes = vec![
+            mk_node_sub("A1", "s1"), mk_node_sub("A2", "s1"),
+            mk_node_sub("B1", "s2"), mk_node_sub("B2", "s2"),
+        ];
+        let obs: Vec<Value> = nodes
+            .iter()
+            .map(|n| json!({"tag": n.name.clone(), "type": "vmess"}))
+            .collect();
+        // active_tag None ⇒ defaults to global "auto".
+        let out = build_proxy_outbounds(&obs, &cfg, None, &nodes);
+        let urltests = urltest_tags(&out);
+        assert!(urltests.contains(&"auto".to_string()), "global auto must exist");
+        assert!(
+            !urltests.iter().any(|t| t == "auto-s1" || t == "auto-s2"),
+            "non-active per-sub groups must NOT be materialised"
+        );
+        // Global auto covers every node.
+        let auto = out.iter().find(|o| o["tag"] == "auto").unwrap();
+        assert_eq!(auto["outbounds"].as_array().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn proxy_outbounds_sub_active_materialises_only_that_sub() {
+        let cfg = crate::types::AppConfig::default();
+        let nodes = vec![
+            mk_node_sub("A1", "s1"), mk_node_sub("A2", "s1"),
+            mk_node_sub("B1", "s2"), mk_node_sub("B2", "s2"),
+        ];
+        let obs: Vec<Value> = nodes
+            .iter()
+            .map(|n| json!({"tag": n.name.clone(), "type": "vmess"}))
+            .collect();
+        let out = build_proxy_outbounds(&obs, &cfg, Some("auto-s2"), &nodes);
+        let urltests = urltest_tags(&out);
+        assert!(urltests.contains(&"auto-s2".to_string()));
+        assert!(
+            !urltests.iter().any(|t| t == "auto" || t == "auto-s1"),
+            "only the active sub group is materialised"
+        );
+        let proxy = out.iter().find(|o| o["tag"] == "proxy").unwrap();
+        assert_eq!(proxy["default"], "auto-s2");
+        let opts = proxy["outbounds"].as_array().unwrap();
+        assert!(opts.iter().any(|v| v == "auto-s2"), "active sub group is a selector option");
+        assert!(!opts.iter().any(|v| v == "auto"), "global auto absent from options");
+    }
+
+    #[test]
+    fn proxy_outbounds_concrete_node_emits_no_urltest() {
+        let cfg = crate::types::AppConfig::default();
+        let nodes = vec![mk_node_sub("A1", "s1"), mk_node_sub("A2", "s1")];
+        let obs: Vec<Value> = nodes
+            .iter()
+            .map(|n| json!({"tag": n.name.clone(), "type": "vmess"}))
+            .collect();
+        let out = build_proxy_outbounds(&obs, &cfg, Some("A1"), &nodes);
+        assert!(
+            !urltest_tags(&out).iter().any(|t| t == "auto" || t == "auto-s1"),
+            "picking a concrete node materialises no auto-test group"
+        );
+        let proxy = out.iter().find(|o| o["tag"] == "proxy").unwrap();
+        assert_eq!(proxy["default"], "A1");
     }
 
     // ─── N3: WireGuard ─────────────────────────────────────────────────
