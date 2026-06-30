@@ -491,8 +491,8 @@ const autoNowName = computed(() => store.activeNodeNow);
 }
 .sub-tab:hover { background: rgba(128,128,128,0.1); color: var(--color-text); }
 .sub-tab.active {
-  background: rgba(0,120,212,0.1);
-  border-color: rgba(0,120,212,0.35);
+  background: rgba(79, 110, 247,0.1);
+  border-color: rgba(79, 110, 247,0.35);
   color: var(--color-primary);
 }
 .sub-count {
@@ -501,7 +501,7 @@ const autoNowName = computed(() => store.activeNodeNow);
   border-radius: 100px; padding: 0 5px; min-width: 18px; text-align: center;
 }
 .sub-tab.active .sub-count {
-  background: rgba(0,120,212,0.15);
+  background: rgba(79, 110, 247,0.15);
 }
 
 .empty-state {
@@ -521,19 +521,19 @@ const autoNowName = computed(() => store.activeNodeNow);
 }
 .node-item:hover { box-shadow: var(--shadow-md); background: var(--color-surface-strong); }
 .node-item.active {
-  border-color: rgba(0,120,212,0.4);
-  background: rgba(0,120,212,0.04);
+  border-color: rgba(79, 110, 247,0.4);
+  background: rgba(79, 110, 247,0.04);
 }
 .auto-item.active {
-  border-color: rgba(240,192,64,0.6);
-  background: rgba(240,192,64,0.08);
+  border-color: rgba(193, 128, 30,0.6);
+  background: rgba(193, 128, 30,0.08);
 }
-.auto-item .auto-icon { color: #f0c040; }
-.auto-item .auto-now { color: #f0c040; font-weight: 500; }
+.auto-item .auto-icon { color: #b9770e; }
+.auto-item .auto-now { color: #b9770e; font-weight: 500; }
 .node-left { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
 .active-indicator { flex-shrink: 0; }
 .check-icon { color: var(--color-primary); }
-.auto-icon { color: #f0c040; }
+.auto-icon { color: #b9770e; }
 .check-placeholder { width: 16px; height: 16px; }
 .node-info { flex: 1; min-width: 0; }
 .node-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -591,12 +591,12 @@ const autoNowName = computed(() => store.activeNodeNow);
   padding: 8px 12px; border: 1px solid var(--color-border);
   border-radius: var(--radius-md); background: rgba(128,128,128,0.03);
 }
-.group-item.active { border-color: var(--color-primary); background: rgba(0,120,212,0.06); }
+.group-item.active { border-color: var(--color-primary); background: rgba(79, 110, 247,0.06); }
 .group-info { min-width: 0; }
 .group-name { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
 .group-badge {
   font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 100px;
-  background: rgba(240,192,64,0.14); color: #b8860b;
+  background: rgba(193, 128, 30,0.14); color: #b9770e;
 }
 .group-members { font-size: 11px; color: var(--color-text-muted); margin-top: 2px; }
 .group-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
@@ -627,7 +627,7 @@ const autoNowName = computed(() => store.activeNodeNow);
   border-radius: 100px; font-size: 12px; cursor: pointer;
   transition: all 0.15s; user-select: none;
 }
-.member-chip.on { border-color: var(--color-primary); background: rgba(0,120,212,0.08); color: var(--color-primary); }
+.member-chip.on { border-color: var(--color-primary); background: rgba(79, 110, 247,0.08); color: var(--color-primary); }
 .member-chip input { margin: 0; }
 .editor-actions { display: flex; gap: 8px; justify-content: flex-end; }
 </style>

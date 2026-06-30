@@ -630,7 +630,7 @@ onMounted(() => {
   font-size: 10px; font-weight: 700; padding: 1px 5px;
   border-radius: 3px; margin-right: 2px;
 }
-.preset-proxy .preset-action { background: rgba(0,120,212,.12); color: #0078d4; }
+.preset-proxy .preset-action { background: rgba(79, 110, 247,.12); color: #4f6ef7; }
 .preset-direct .preset-action { background: rgba(16,124,16,.12); color: #107c10; }
 .preset-block .preset-action { background: rgba(209,52,56,.12); color: #d13438; }
 
@@ -750,7 +750,7 @@ onMounted(() => {
 .provider-badge {
   font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 100px;
 }
-.provider-badge.preset-proxy { background: rgba(0,120,212,.12); color: #0078d4; }
+.provider-badge.preset-proxy { background: rgba(79, 110, 247,.12); color: #4f6ef7; }
 .provider-badge.preset-direct { background: rgba(16,124,16,.12); color: #107c10; }
 .provider-badge.preset-block { background: rgba(209,52,56,.12); color: #d13438; }
 .provider-fmt {

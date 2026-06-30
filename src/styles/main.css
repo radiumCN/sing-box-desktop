@@ -1,12 +1,15 @@
 @import "tailwindcss";
 
 @theme {
-  --color-primary: #0078d4;
-  --color-primary-hover: #006cbd;
-  --color-primary-active: #005ba1;
+  --color-primary: #4f6ef7;
+  --color-primary-hover: #3f5ce6;
+  --color-primary-active: #3349c9;
   --color-success: #107c10;
   --color-warning: #ffb900;
   --color-error: #d13438;
+
+  /* Brand gradient — sky-indigo, used on primary actions & accents */
+  --gradient-primary: linear-gradient(135deg, #5b8bff 0%, #4f6ef7 55%, #5a5cf0 100%);
 
   --color-bg: #f3f3f3;
   --color-surface: rgba(255, 255, 255, 0.7);
@@ -31,25 +34,25 @@
 /* System dark preference (only when no explicit theme is set) */
 @media (prefers-color-scheme: dark) {
   html:not([data-theme]) {
-    --color-bg: #202020;
-    --color-surface: rgba(40, 40, 40, 0.75);
-    --color-surface-strong: rgba(50, 50, 50, 0.90);
-    --color-border: rgba(255, 255, 255, 0.08);
-    --color-text: #f3f3f3;
-    --color-text-secondary: #ababab;
-    --color-text-muted: #757575;
+    --color-bg: #1a1c22;
+    --color-surface: rgba(34, 37, 46, 0.72);
+    --color-surface-strong: rgba(42, 46, 57, 0.90);
+    --color-border: rgba(255, 255, 255, 0.09);
+    --color-text: #f1f2f5;
+    --color-text-secondary: #adb1bd;
+    --color-text-muted: #767a86;
   }
 }
 
 /* Explicit dark theme */
 html[data-theme="dark"] {
-  --color-bg: #202020;
-  --color-surface: rgba(40, 40, 40, 0.75);
-  --color-surface-strong: rgba(50, 50, 50, 0.90);
-  --color-border: rgba(255, 255, 255, 0.08);
-  --color-text: #f3f3f3;
-  --color-text-secondary: #ababab;
-  --color-text-muted: #757575;
+  --color-bg: #1a1c22;
+  --color-surface: rgba(34, 37, 46, 0.72);
+  --color-surface-strong: rgba(42, 46, 57, 0.90);
+  --color-border: rgba(255, 255, 255, 0.09);
+  --color-text: #f1f2f5;
+  --color-text-secondary: #adb1bd;
+  --color-text-muted: #767a86;
 }
 
 /* Explicit light theme */
@@ -76,7 +79,33 @@ html, body, #app {
   font-size: 14px;
   color: var(--color-text);
   background: var(--color-bg);
+  /* Tabular figures so live metrics (speed/traffic/uptime) don't jitter */
+  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
+}
+
+/* Subtle layered backdrop — gives the acrylic cards something to refract.
+   Anchored to #app (the opaque window) rather than scrolling content. */
+#app {
+  background:
+    radial-gradient(900px 520px at 100% -5%, rgba(91, 139, 255, 0.10), transparent 60%),
+    radial-gradient(760px 480px at -5% 105%, rgba(90, 200, 220, 0.07), transparent 55%),
+    var(--color-bg);
+}
+html[data-theme="dark"] #app {
+  background:
+    radial-gradient(900px 520px at 100% -5%, rgba(91, 139, 255, 0.14), transparent 60%),
+    radial-gradient(760px 480px at -5% 105%, rgba(60, 150, 180, 0.10), transparent 55%),
+    var(--color-bg);
+}
+/* System dark preference (only when no explicit theme is set) */
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme]) #app {
+    background:
+      radial-gradient(900px 520px at 100% -5%, rgba(91, 139, 255, 0.14), transparent 60%),
+      radial-gradient(760px 480px at -5% 105%, rgba(60, 150, 180, 0.10), transparent 55%),
+      var(--color-bg);
+  }
 }
 
 /* Scrollbar */
@@ -130,12 +159,13 @@ html, body, #app {
   white-space: nowrap;
 }
 .btn-primary {
-  background: var(--color-primary);
+  background: var(--gradient-primary);
   color: white;
   border-color: transparent;
+  box-shadow: 0 2px 8px rgba(79, 110, 247, 0.25);
 }
-.btn-primary:hover { background: var(--color-primary-hover); }
-.btn-primary:active { background: var(--color-primary-active); }
+.btn-primary:hover { background: var(--color-primary-hover); box-shadow: 0 3px 10px rgba(79, 110, 247, 0.32); }
+.btn-primary:active { background: var(--color-primary-active); box-shadow: 0 1px 4px rgba(79, 110, 247, 0.3); }
 .btn-ghost {
   background: transparent;
   color: var(--color-text);
@@ -162,7 +192,7 @@ html, body, #app {
 }
 .input:focus {
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.15);
+  box-shadow: 0 0 0 2px rgba(79, 110, 247, 0.15);
 }
 
 /* Status badge */
@@ -178,8 +208,44 @@ html, body, #app {
 .badge-green { background: rgba(16, 124, 16, 0.12); color: #107c10; }
 .badge-red { background: rgba(209, 52, 56, 0.12); color: #d13438; }
 .badge-yellow { background: rgba(255, 185, 0, 0.15); color: #8a6b00; }
-.badge-blue { background: rgba(0, 120, 212, 0.12); color: #0078d4; }
+.badge-blue { background: rgba(79, 110, 247, 0.12); color: #4f6ef7; }
 .badge-gray { background: rgba(128,128,128,0.12); color: var(--color-text-secondary); }
+
+/* Skeleton shimmer — reusable loading placeholder */
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: rgba(128, 128, 128, 0.12);
+  border-radius: var(--radius-sm);
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.22), transparent);
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+}
+@keyframes skeleton-shimmer { 100% { transform: translateX(100%); } }
+
+/* Respect users who prefer reduced motion (a11y) */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Keyboard focus visibility (a11y) — only shows on keyboard nav, not mouse */
+.btn:focus-visible,
+.nav-item:focus-visible,
+.mode-pill:focus-visible,
+.mode-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
 
 /* Transition animations */
 .page-enter-active,

@@ -676,8 +676,8 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
   font-size: 11px; color: var(--color-text-secondary);
 }
 .meta-item.auto-hit {
-  color: #f0c040; font-weight: 500;
-  background: rgba(240,192,64,0.12); padding: 1px 7px; border-radius: 10px;
+  color: #b9770e; font-weight: 500;
+  background: rgba(193, 128, 30,0.12); padding: 1px 7px; border-radius: 10px;
 }
 .sub-url {
   font-size: 11px; color: var(--color-text-muted);

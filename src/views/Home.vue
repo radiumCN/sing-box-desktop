@@ -2,7 +2,7 @@
 import { ref, nextTick, onMounted, onUnmounted, computed } from "vue";
 import {
   Wifi, WifiOff, ArrowUp, ArrowDown,
-  Filter, Zap, Server, Clock, Globe, Shield
+  Filter, Zap, Server, Clock, Globe, Shield, AlertTriangle
 } from "@lucide/vue";
 import { Line } from "vue-chartjs";
 import {
@@ -93,8 +93,8 @@ const chartData = computed(() => ({
     {
       label: t("home.upload"),
       data: store.trafficHistory.map((p) => p.upload / 1024),
-      borderColor: "#0078d4",
-      backgroundColor: "rgba(0,120,212,0.08)",
+      borderColor: "#4f6ef7",
+      backgroundColor: "rgba(79, 110, 247,0.08)",
       borderWidth: 1.5,
       fill: true,
       tension: 0.4,
@@ -218,83 +218,21 @@ onUnmounted(() => {
 
     <!-- Error Banner (top, prominent) -->
     <div v-if="store.error" class="error-banner">
-      <span>⚠️ {{ store.error }}</span>
+      <span class="error-msg"><AlertTriangle :size="15" /> {{ store.error }}</span>
       <button class="btn btn-ghost" @click="store.error = null">{{ t('home.close') }}</button>
     </div>
 
-    <!-- Quick Controls -->
-    <div class="quick-grid">
-      <!-- Proxy Status Card (driven by the two switches below) -->
-      <div class="card control-card" :class="{ active: store.proxying }">
-        <div class="control-info">
-          <div class="control-icon" :class="store.proxying ? 'icon-green' : 'icon-gray'">
-            <component :is="store.proxying ? Wifi : WifiOff" :size="22" />
-          </div>
-          <div>
-            <div class="control-label">{{ t('home.proxyStatus') }}</div>
-            <div class="control-value">{{ connectionLabel }}</div>
-          </div>
-        </div>
+    <!-- Connection Hero — promoted status, driven by the switches below -->
+    <div class="card hero-card" :class="{ active: store.proxying }">
+      <div class="hero-icon" :class="store.proxying ? 'on' : 'off'">
+        <component :is="store.proxying ? Wifi : WifiOff" :size="26" />
       </div>
-
-      <!-- Active Node -->
-      <div class="card stat-card">
-        <div class="stat-icon icon-blue">
-          <Server :size="18" />
-        </div>
-        <div class="stat-content">
-          <div class="stat-label">{{ t('home.currentNode') }}</div>
-          <div class="stat-value text-sm">
-            {{ store.isAutoGroup ? t('home.autoSelect') : (store.activeNode?.name ?? t('home.noneSelected')) }}
-          </div>
-          <div class="stat-sub">
-            <template v-if="store.isAutoGroup">
-              {{ store.activeNodeNow ? `→ ${store.activeNodeNow}` : t('home.dynamicSelecting') }}
-            </template>
-            <template v-else>{{ store.activeNode?.server ?? "--" }}</template>
-          </div>
-        </div>
+      <div class="hero-main">
+        <div class="hero-label">{{ t('home.proxyStatus') }}</div>
+        <div class="hero-status">{{ connectionLabel }}</div>
       </div>
-
-      <!-- Proxy Mode -->
-      <div class="card stat-card">
-        <div class="stat-icon icon-purple">
-          <Filter :size="18" />
-        </div>
-        <div class="stat-content">
-          <div class="stat-label">{{ t('home.proxyMode') }}</div>
-          <div class="stat-value">{{ proxyModeLabel }}</div>
-          <div class="mode-btns">
-            <button
-              v-for="mode in ['rule', 'global', 'direct']"
-              :key="mode"
-              class="mode-btn"
-              :class="{ active: store.config.proxy_mode === mode }"
-              @click="store.setProxyMode(mode)"
-            >
-              {{ mode === 'rule' ? t('home.rule') : mode === 'global' ? t('home.global') : t('home.direct') }}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Uptime -->
-      <div class="card stat-card">
-        <div class="stat-icon icon-orange">
-          <Clock :size="18" />
-        </div>
-        <div class="stat-content">
-          <div class="stat-label">{{ t('home.uptime') }}</div>
-          <div class="stat-value">{{ displayUptime }}</div>
-          <div class="stat-sub">
-            <template v-if="memoryUsage !== null">
-              {{ t('home.memory', { value: formatBytes(memoryUsage) }) }} · {{ store.status.version ?? "sing-box" }}
-            </template>
-            <template v-else>
-              {{ store.status.version ?? "sing-box" }}
-            </template>
-          </div>
-        </div>
+      <div v-if="store.proxying" class="hero-meta">
+        <span class="hero-pill">{{ proxyModeLabel }}</span>
       </div>
     </div>
 
@@ -335,7 +273,7 @@ onUnmounted(() => {
         <!-- Proxy mode selector -->
         <div class="net-row">
           <div class="net-row-left">
-            <div class="net-row-icon icon-purple"><Filter :size="15" /></div>
+            <div class="net-row-icon icon-violet"><Filter :size="15" /></div>
             <div>
               <div class="net-row-label">{{ t('home.proxyMode') }}</div>
               <div class="net-row-sub">{{ proxyModeLabel }}</div>
@@ -357,7 +295,7 @@ onUnmounted(() => {
         <!-- TUN Mode toggle — starts/stops the proxy; mutually exclusive with system proxy -->
         <div class="net-row">
           <div class="net-row-left">
-            <div class="net-row-icon icon-orange"><Shield :size="15" /></div>
+            <div class="net-row-icon icon-teal"><Shield :size="15" /></div>
             <div>
               <div class="net-row-label">{{ t('home.tunMode') }}</div>
               <div class="net-row-sub">
@@ -375,6 +313,47 @@ onUnmounted(() => {
           >
             <span class="toggle-knob" />
           </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Detail stats -->
+    <div class="stat-grid">
+      <!-- Active Node -->
+      <div class="card stat-card">
+        <div class="stat-icon icon-node">
+          <Server :size="18" />
+        </div>
+        <div class="stat-content">
+          <div class="stat-label">{{ t('home.currentNode') }}</div>
+          <div class="stat-value text-sm">
+            {{ store.isAutoGroup ? t('home.autoSelect') : (store.activeNode?.name ?? t('home.noneSelected')) }}
+          </div>
+          <div class="stat-sub">
+            <template v-if="store.isAutoGroup">
+              {{ store.activeNodeNow ? `→ ${store.activeNodeNow}` : t('home.dynamicSelecting') }}
+            </template>
+            <template v-else>{{ store.activeNode?.server ?? "--" }}</template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Uptime -->
+      <div class="card stat-card">
+        <div class="stat-icon icon-uptime">
+          <Clock :size="18" />
+        </div>
+        <div class="stat-content">
+          <div class="stat-label">{{ t('home.uptime') }}</div>
+          <div class="stat-value">{{ displayUptime }}</div>
+          <div class="stat-sub">
+            <template v-if="memoryUsage !== null">
+              {{ t('home.memory', { value: formatBytes(memoryUsage) }) }} · {{ store.status.version ?? "sing-box" }}
+            </template>
+            <template v-else>
+              {{ store.status.version ?? "sing-box" }}
+            </template>
+          </div>
         </div>
       </div>
     </div>
@@ -401,8 +380,8 @@ onUnmounted(() => {
         <Zap :size="15" />
         <span>{{ t('home.realtimeTraffic') }}</span>
         <div class="chart-legend">
-          <span class="legend-item upload-color">▲ {{ t('home.upload') }}</span>
-          <span class="legend-item download-color">▼ {{ t('home.download') }}</span>
+          <span class="legend-item upload-color"><i class="legend-dot" /> {{ t('home.upload') }}</span>
+          <span class="legend-item download-color"><i class="legend-dot" /> {{ t('home.download') }}</span>
         </div>
       </div>
       <div class="chart-body">
@@ -434,28 +413,73 @@ onUnmounted(() => {
   50% { opacity: 0.4; }
 }
 
-.quick-grid {
+/* Connection Hero */
+.hero-card {
+  padding: 18px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  position: relative;
+  overflow: hidden;
+  transition: border-color 0.25s ease;
+}
+.hero-card.active {
+  border-color: rgba(16, 124, 16, 0.28);
+  background:
+    linear-gradient(120deg, rgba(16,124,16,0.06), transparent 55%),
+    var(--color-surface);
+}
+.hero-icon {
+  width: 52px; height: 52px;
+  border-radius: var(--radius-lg);
+  display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0;
+  position: relative;
+  transition: all 0.25s ease;
+}
+.hero-icon.off { background: rgba(128,128,128,0.1); color: var(--color-text-muted); }
+.hero-icon.on {
+  background: linear-gradient(135deg, #16a34a 0%, #107c10 100%);
+  color: white;
+  box-shadow: 0 4px 14px rgba(16, 124, 16, 0.35);
+  animation: hero-pop 0.42s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+/* Soft breathing ring while connected */
+.hero-icon.on::after {
+  content: "";
+  position: absolute;
+  inset: -6px;
+  border-radius: inherit;
+  border: 2px solid rgba(16, 124, 16, 0.35);
+  animation: hero-ring 2.6s ease-out infinite;
+}
+@keyframes hero-pop {
+  0% { transform: scale(0.82); }
+  60% { transform: scale(1.07); }
+  100% { transform: scale(1); }
+}
+@keyframes hero-ring {
+  0% { opacity: 0.6; transform: scale(0.92); }
+  70%, 100% { opacity: 0; transform: scale(1.15); }
+}
+.hero-main { flex: 1; min-width: 0; }
+.hero-label {
+  font-size: 11px; color: var(--color-text-secondary);
+  text-transform: uppercase; letter-spacing: 0.6px; margin-bottom: 3px;
+}
+.hero-status { font-size: 20px; font-weight: 700; color: var(--color-text); }
+.hero-meta { flex-shrink: 0; }
+.hero-pill {
+  font-size: 12px; font-weight: 600;
+  padding: 4px 12px; border-radius: 100px;
+  background: rgba(79, 110, 247, 0.12); color: var(--color-primary);
+}
+
+.stat-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   gap: 12px;
 }
-.control-card {
-  padding: 16px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-.control-card.active { border-color: rgba(16, 124, 16, 0.3); }
-.control-info { display: flex; align-items: center; gap: 12px; }
-.control-icon {
-  width: 44px; height: 44px;
-  border-radius: var(--radius-lg);
-  display: flex; align-items: center; justify-content: center;
-}
-.control-label { font-size: 12px; color: var(--color-text-secondary); margin-bottom: 2px; }
-.control-value { font-size: 14px; font-weight: 600; }
-
 .stat-card { padding: 16px; display: flex; align-items: flex-start; gap: 12px; }
 .stat-icon {
   width: 40px; height: 40px; border-radius: var(--radius-lg);
@@ -468,11 +492,15 @@ onUnmounted(() => {
 .text-sm { font-size: 13px !important; }
 .stat-sub { font-size: 11px; color: var(--color-text-muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* Harmonized icon palette — indigo-led cool set + green for status */
 .icon-green { background: rgba(16,124,16,0.12); color: #107c10; }
 .icon-gray { background: rgba(128,128,128,0.1); color: var(--color-text-muted); }
-.icon-blue { background: rgba(0,120,212,0.12); color: #0078d4; }
-.icon-purple { background: rgba(136,23,152,0.1); color: #881798; }
-.icon-orange { background: rgba(202,80,16,0.1); color: #ca5010; }
+.icon-blue,
+.icon-node { background: rgba(79, 110, 247, 0.12); color: #4f6ef7; }
+.icon-violet { background: rgba(124, 92, 236, 0.13); color: #7c5cec; }
+.icon-teal { background: rgba(14, 155, 142, 0.14); color: #0e9b8e; }
+.icon-amber,
+.icon-uptime { background: rgba(193, 128, 30, 0.14); color: #b9770e; }
 
 .mode-btns { display: flex; gap: 4px; margin-top: 6px; }
 .mode-btn {
@@ -496,7 +524,7 @@ onUnmounted(() => {
   gap: 10px;
   flex-wrap: wrap;
 }
-.traffic-stat.upload { color: #0078d4; }
+.traffic-stat.upload { color: #4f6ef7; }
 .traffic-stat.download { color: #107c10; }
 .traffic-label { font-size: 12px; color: var(--color-text-secondary); }
 .traffic-value { font-size: 16px; font-weight: 700; margin-left: auto; }
@@ -513,8 +541,9 @@ onUnmounted(() => {
   margin-bottom: 12px;
 }
 .chart-legend { margin-left: auto; display: flex; gap: 12px; }
-.legend-item { font-size: 11px; font-weight: 500; }
-.upload-color { color: #0078d4; }
+.legend-item { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 500; }
+.legend-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; display: inline-block; }
+.upload-color { color: #4f6ef7; }
 .download-color { color: #107c10; }
 .chart-body { height: 160px; }
 .chart-empty {
@@ -552,7 +581,14 @@ onUnmounted(() => {
   position: relative; transition: background 0.2s; flex-shrink: 0;
   padding: 0;
 }
-.toggle-btn.on { background: var(--color-primary); }
+.toggle-btn.on {
+  background: var(--gradient-primary);
+  box-shadow: 0 1px 6px rgba(79, 110, 247, 0.45);
+}
+.toggle-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
 .toggle-knob {
   position: absolute; top: 3px; left: 3px;
   width: 18px; height: 18px; border-radius: 50%;
@@ -589,6 +625,7 @@ onUnmounted(() => {
   color: var(--color-error);
   font-size: 13px;
 }
+.error-msg { display: inline-flex; align-items: center; gap: 7px; }
 
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin { animation: spin 0.8s linear infinite; }

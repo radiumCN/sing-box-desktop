@@ -18,7 +18,7 @@ let unlistenLog: UnlistenFn | null = null;
 const levelColors: Record<string, string> = {
   error: "#d13438",
   warn: "#ca5010",
-  info: "#0078d4",
+  info: "#4f6ef7",
   debug: "#616161",
 };
 

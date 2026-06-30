@@ -10,6 +10,7 @@ import {
   ScrollText,
   Filter,
   Settings,
+  Bird,
 } from "@lucide/vue";
 import { listen } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
@@ -45,6 +46,14 @@ onMounted(() => {
 
 <template>
   <nav class="sidebar">
+    <div class="brand">
+      <div class="brand-mark"><Bird :size="18" /></div>
+      <div class="brand-text">
+        <span class="brand-name">Skylark</span>
+        <span class="brand-sub">云雀</span>
+      </div>
+    </div>
+
     <div class="sidebar-nav">
       <button
         v-for="item in navItems"
@@ -99,6 +108,25 @@ onMounted(() => {
   flex-shrink: 0;
   padding: 8px 8px 12px;
 }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 12px;
+  margin-bottom: 4px;
+}
+.brand-mark {
+  width: 32px; height: 32px;
+  border-radius: var(--radius-md);
+  display: flex; align-items: center; justify-content: center;
+  background: var(--gradient-primary);
+  color: white;
+  box-shadow: 0 2px 8px rgba(79, 110, 247, 0.35);
+  flex-shrink: 0;
+}
+.brand-text { display: flex; flex-direction: column; line-height: 1.15; }
+.brand-name { font-size: 14px; font-weight: 700; color: var(--color-text); letter-spacing: 0.2px; }
+.brand-sub { font-size: 11px; color: var(--color-text-muted); }
 .sidebar-nav {
   flex: 1;
   display: flex;
@@ -126,7 +154,7 @@ onMounted(() => {
   color: var(--color-text);
 }
 .nav-item.active {
-  background: rgba(0, 120, 212, 0.12);
+  background: rgba(79, 110, 247, 0.12);
   color: var(--color-primary);
 }
 .sidebar-footer {
