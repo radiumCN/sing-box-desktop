@@ -115,6 +115,7 @@ pub fn run() {
         outbounds: Mutex::new(outbounds),
         app_config: Mutex::new(app_config),
         core_lock: tokio::sync::Mutex::new(()),
+        switching: std::sync::atomic::AtomicBool::new(false),
     };
 
     tauri::Builder::default()
@@ -205,6 +206,18 @@ pub fn run() {
                 if let Some(w) = app.get_webview_window("main") {
                     let _ = w.hide();
                 }
+            }
+
+            // Force the main window's icon to the bundled image at runtime. The taskbar /
+            // title-bar otherwise render the icon embedded in the exe resource, which only
+            // re-embeds on a CLEAN rebuild and is cached by Windows — so after an icon change
+            // the tray (set at runtime) looks new while the window/taskbar stay old. Setting
+            // it explicitly here keeps the window icon in sync with the tray. (The Explorer
+            // file icon still comes from the embedded resource + OS icon cache.)
+            if let (Some(w), Some(icon)) =
+                (app.get_webview_window("main"), app.default_window_icon().cloned())
+            {
+                let _ = w.set_icon(icon);
             }
 
             // Persistent core: start sing-box on launch so toggling the proxy later is
@@ -432,8 +445,15 @@ pub fn run() {
                             let tun_it = tun_item_c.clone();
                             tauri::async_runtime::spawn(async move {
                                 let state = app_c.state::<AppState>();
+                                // Throttle: ignore the click if a switch is already running,
+                                // and revert the just-toggled checkmark to the real state.
+                                if state.switching.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                    sync_tray_checks(&app_c, &sys_item, &tun_it);
+                                    return;
+                                }
                                 let mode = if enabled { "system" } else { "off" };
                                 let res = crate::commands::apply_connection_mode(&app_c, &state, mode).await;
+                                state.switching.store(false, std::sync::atomic::Ordering::SeqCst);
                                 sync_tray_checks(&app_c, &sys_item, &tun_it);
                                 emit_tray_mode_result(&app_c, res);
                             });
@@ -446,8 +466,15 @@ pub fn run() {
                             let tun_it = tun_item_c.clone();
                             tauri::async_runtime::spawn(async move {
                                 let state = app_c.state::<AppState>();
+                                // Throttle: ignore the click if a switch is already running,
+                                // and revert the just-toggled checkmark to the real state.
+                                if state.switching.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                    sync_tray_checks(&app_c, &sys_item, &tun_it);
+                                    return;
+                                }
                                 let mode = if enabled { "tun" } else { "off" };
                                 let res = crate::commands::apply_connection_mode(&app_c, &state, mode).await;
+                                state.switching.store(false, std::sync::atomic::Ordering::SeqCst);
                                 sync_tray_checks(&app_c, &sys_item, &tun_it);
                                 emit_tray_mode_result(&app_c, res);
                             });

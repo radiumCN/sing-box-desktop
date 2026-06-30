@@ -23,6 +23,11 @@ pub struct AppState {
     /// port and the TUN adapter and the second fails its readiness check ("控制端口未就绪").
     /// An async (tokio) mutex is required because the critical section awaits.
     pub core_lock: tokio::sync::Mutex<()>,
+    /// True while a tray-initiated connection-mode switch is in flight. The tray menu has
+    /// no "disabled while applying" state like the dashboard, so without this a burst of
+    /// rapid on/off clicks queues a stack of real toggles that flap the TUN adapter. The
+    /// tray handler test-and-sets this and drops clicks that arrive mid-switch.
+    pub switching: std::sync::atomic::AtomicBool,
 }
 
 /// Holds cloned handles to tray check-menu items so commands can update them.
