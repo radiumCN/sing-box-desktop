@@ -73,8 +73,8 @@ const chartData = computed(() => ({
     {
       label: t("stats.upload"),
       data: shown.value.map((d) => d.upload),
-      borderColor: "rgba(0, 120, 212, 1)",
-      backgroundColor: "rgba(0, 120, 212, 0.12)",
+      borderColor: "rgba(79, 110, 247, 1)",
+      backgroundColor: "rgba(79, 110, 247, 0.12)",
       borderWidth: 2,
       tension: 0.35,
       fill: true,
@@ -218,9 +218,9 @@ onMounted(load);
   width: 36px; height: 36px; border-radius: 9px; display: flex; align-items: center;
   justify-content: center; color: #fff; flex-shrink: 0;
 }
-.summary-icon.today { background: #5c2e91; }
+.summary-icon.today { background: #7c5cec; }
 .summary-icon.down { background: #10893e; }
-.summary-icon.up { background: #0078d4; }
+.summary-icon.up { background: #4f6ef7; }
 .summary-icon.total { background: #6b6b6b; }
 .summary-label { font-size: 11.5px; color: var(--color-text-secondary); margin-bottom: 2px; }
 .summary-value { font-size: 16px; font-weight: 600; }

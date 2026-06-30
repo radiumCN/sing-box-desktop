@@ -1380,7 +1380,7 @@ onUnmounted(() => {
 
 .release-info {
   padding: 10px 18px 12px;
-  background: rgba(0, 120, 212, 0.04);
+  background: rgba(79, 110, 247, 0.04);
   border-top: 1px solid var(--color-border);
   border-bottom: 1px solid var(--color-border);
 }
@@ -1469,7 +1469,7 @@ onUnmounted(() => {
   display: inline-flex; align-items: center; gap: 4px;
   font-size: 11px; font-weight: 500; padding: 2px 8px;
   border-radius: 100px;
-  background: rgba(100, 65, 165, 0.12); color: #6441a5;
+  background: rgba(124, 92, 236, 0.12); color: #7c5cec;
 }
 
 .channel-select-wrap {

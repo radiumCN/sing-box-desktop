@@ -14,6 +14,7 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
 import { useAppStore } from "../stores/app";
+import logoUrl from "../assets/logo.png";
 
 const route = useRoute();
 const router = useRouter();
@@ -45,6 +46,13 @@ onMounted(() => {
 
 <template>
   <nav class="sidebar">
+    <div class="brand">
+      <img class="brand-mark" :src="logoUrl" alt="Skylark" />
+      <div class="brand-text">
+        <span class="brand-name">Skylark</span>
+      </div>
+    </div>
+
     <div class="sidebar-nav">
       <button
         v-for="item in navItems"
@@ -99,6 +107,21 @@ onMounted(() => {
   flex-shrink: 0;
   padding: 8px 8px 12px;
 }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px 12px;
+  margin-bottom: 4px;
+}
+.brand-mark {
+  width: 32px; height: 32px;
+  border-radius: var(--radius-md);
+  object-fit: cover;
+  flex-shrink: 0;
+}
+.brand-text { display: flex; align-items: center; }
+.brand-name { font-size: 15px; font-weight: 700; color: var(--color-text); letter-spacing: 0.2px; }
 .sidebar-nav {
   flex: 1;
   display: flex;
@@ -126,7 +149,7 @@ onMounted(() => {
   color: var(--color-text);
 }
 .nav-item.active {
-  background: rgba(0, 120, 212, 0.12);
+  background: rgba(79, 110, 247, 0.12);
   color: var(--color-primary);
 }
 .sidebar-footer {

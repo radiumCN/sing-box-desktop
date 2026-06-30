@@ -386,7 +386,7 @@ onUnmounted(() => {
 .conn-table tr:hover td { background: rgba(128,128,128,0.05); }
 
 /* Row tinting */
-.row-proxy td:first-child { border-left: 2px solid rgba(0,120,212,0.35); }
+.row-proxy td:first-child { border-left: 2px solid rgba(79, 110, 247,0.35); }
 .row-direct td:first-child { border-left: 2px solid rgba(16,124,16,0.25); }
 
 /* Columns */
@@ -418,7 +418,7 @@ onUnmounted(() => {
   font-size: 10px; font-weight: 600; max-width: 150px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.tag-proxy { background: rgba(0,120,212,0.1); color: #0078d4; }
+.tag-proxy { background: rgba(79, 110, 247,0.1); color: #4f6ef7; }
 .tag-direct { background: rgba(16,124,16,0.1); color: #107c10; }
 
 .chain-label {
@@ -426,7 +426,7 @@ onUnmounted(() => {
   max-width: 115px; font-size: 11px;
 }
 
-.upload-val { color: #0078d4; font-weight: 500; }
+.upload-val { color: #4f6ef7; font-weight: 500; }
 .download-val { color: #107c10; font-weight: 500; }
 
 .proto-tag {

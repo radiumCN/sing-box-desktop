@@ -1,9 +1,9 @@
 @import "tailwindcss";
 
 @theme {
-  --color-primary: #0078d4;
-  --color-primary-hover: #006cbd;
-  --color-primary-active: #005ba1;
+  --color-primary: #4f6ef7;
+  --color-primary-hover: #3f5ce6;
+  --color-primary-active: #3349c9;
   --color-success: #107c10;
   --color-warning: #ffb900;
   --color-error: #d13438;
@@ -31,25 +31,25 @@
 /* System dark preference (only when no explicit theme is set) */
 @media (prefers-color-scheme: dark) {
   html:not([data-theme]) {
-    --color-bg: #202020;
-    --color-surface: rgba(40, 40, 40, 0.75);
-    --color-surface-strong: rgba(50, 50, 50, 0.90);
-    --color-border: rgba(255, 255, 255, 0.08);
-    --color-text: #f3f3f3;
-    --color-text-secondary: #ababab;
-    --color-text-muted: #757575;
+    --color-bg: #1a1c22;
+    --color-surface: rgba(34, 37, 46, 0.72);
+    --color-surface-strong: rgba(42, 46, 57, 0.90);
+    --color-border: rgba(255, 255, 255, 0.09);
+    --color-text: #f1f2f5;
+    --color-text-secondary: #adb1bd;
+    --color-text-muted: #767a86;
   }
 }
 
 /* Explicit dark theme */
 html[data-theme="dark"] {
-  --color-bg: #202020;
-  --color-surface: rgba(40, 40, 40, 0.75);
-  --color-surface-strong: rgba(50, 50, 50, 0.90);
-  --color-border: rgba(255, 255, 255, 0.08);
-  --color-text: #f3f3f3;
-  --color-text-secondary: #ababab;
-  --color-text-muted: #757575;
+  --color-bg: #1a1c22;
+  --color-surface: rgba(34, 37, 46, 0.72);
+  --color-surface-strong: rgba(42, 46, 57, 0.90);
+  --color-border: rgba(255, 255, 255, 0.09);
+  --color-text: #f1f2f5;
+  --color-text-secondary: #adb1bd;
+  --color-text-muted: #767a86;
 }
 
 /* Explicit light theme */
@@ -76,8 +76,11 @@ html, body, #app {
   font-size: 14px;
   color: var(--color-text);
   background: var(--color-bg);
+  /* Tabular figures so live metrics (speed/traffic/uptime) don't jitter */
+  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
 }
+
 
 /* Scrollbar */
 ::-webkit-scrollbar {
@@ -162,7 +165,7 @@ html, body, #app {
 }
 .input:focus {
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.15);
+  box-shadow: 0 0 0 2px rgba(79, 110, 247, 0.15);
 }
 
 /* Status badge */
@@ -178,8 +181,27 @@ html, body, #app {
 .badge-green { background: rgba(16, 124, 16, 0.12); color: #107c10; }
 .badge-red { background: rgba(209, 52, 56, 0.12); color: #d13438; }
 .badge-yellow { background: rgba(255, 185, 0, 0.15); color: #8a6b00; }
-.badge-blue { background: rgba(0, 120, 212, 0.12); color: #0078d4; }
+.badge-blue { background: rgba(79, 110, 247, 0.12); color: #4f6ef7; }
 .badge-gray { background: rgba(128,128,128,0.12); color: var(--color-text-secondary); }
+
+/* Respect users who prefer reduced motion (a11y) */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Keyboard focus visibility (a11y) — only shows on keyboard nav, not mouse */
+.btn:focus-visible,
+.nav-item:focus-visible,
+.mode-pill:focus-visible,
+.mode-btn:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
 
 /* Transition animations */
 .page-enter-active,
