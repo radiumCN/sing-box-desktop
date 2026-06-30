@@ -5,6 +5,8 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { Trash2, ArrowDown, Copy, Download } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
+import { useTemporaryFlag } from "../composables/useTemporaryFlag";
+import { copyToClipboard } from "../utils/clipboard";
 
 const { t } = useI18n();
 
@@ -46,7 +48,7 @@ async function fetchLogs() {
   }
 }
 
-const copySuccess = ref(false);
+const { flag: copySuccess, trigger: triggerCopySuccess } = useTemporaryFlag(1500);
 
 async function scrollToBottom() {
   await nextTick();
@@ -57,21 +59,8 @@ async function scrollToBottom() {
 
 async function copyAllLogs() {
   const text = logs.value.join("\n");
-  try {
-    await navigator.clipboard.writeText(text);
-    copySuccess.value = true;
-    setTimeout(() => (copySuccess.value = false), 1500);
-  } catch {
-    // fallback: create a temporary textarea
-    const el = document.createElement("textarea");
-    el.value = text;
-    document.body.appendChild(el);
-    el.select();
-    document.execCommand("copy");
-    document.body.removeChild(el);
-    copySuccess.value = true;
-    setTimeout(() => (copySuccess.value = false), 1500);
-  }
+  const ok = await copyToClipboard(text);
+  if (ok) triggerCopySuccess();
 }
 
 const exporting = ref(false);
@@ -131,7 +120,7 @@ onUnmounted(() => {
           {{ t('logs.autoScroll') }}
         </button>
         <button class="btn btn-ghost" @click="copyAllLogs" :title="copySuccess ? t('logs.copied') + '!' : t('logs.copyAll')">
-          <Copy :size="14" :style="{ color: copySuccess ? '#107c10' : undefined }" />
+          <Copy :size="14" :style="{ color: copySuccess ? 'var(--color-success)' : undefined }" />
           {{ copySuccess ? t('logs.copied') : t('logs.copy') }}
         </button>
         <button class="btn btn-ghost" @click="exportLogs" :disabled="exporting" :title="t('logs.exportToFile')">
@@ -173,7 +162,7 @@ onUnmounted(() => {
   background: transparent; color: var(--color-text-secondary);
   font-size: 11px; font-weight: 500; cursor: pointer; transition: all 0.15s;
 }
-.level-tab:hover { background: rgba(128,128,128,0.1); }
+.level-tab:hover { background: var(--color-neutral); }
 .level-tab.active { background: var(--color-primary); color: white; border-color: transparent; }
 
 .log-container {

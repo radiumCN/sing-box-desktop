@@ -3,12 +3,14 @@ import { ref, computed, watch, onMounted } from "vue";
 import { Gauge, RefreshCw, CheckCircle, Signal, Zap, ArrowUpDown, Plus, Trash2, Pencil, Layers } from "@lucide/vue";
 import { useAppStore } from "../stores/app";
 import { useI18n } from "vue-i18n";
+import { useDelayedRefresh } from "../composables/useDelayedRefresh";
+import EmptyState from "../components/EmptyState.vue";
 
 const { t } = useI18n();
 const store = useAppStore();
+const { refreshing, refresh } = useDelayedRefresh();
 const testingAll = ref(false);
 const testingGroup = ref(false);
-const refreshing = ref(false);
 const testingIds = ref<string[]>([]);
 const filterSubId = ref<string>(localStorage.getItem("nodes_filter_sub") ?? "all");
 const sortBy = ref<"none" | "latency" | "speed">(
@@ -37,14 +39,8 @@ onMounted(() => {
 });
 
 // Keep the refresh spin visible for at least 600ms — the fetch is near-instant.
-async function manualRefresh() {
-  if (refreshing.value) return;
-  refreshing.value = true;
-  try {
-    await Promise.all([store.fetchNodes(), new Promise((r) => setTimeout(r, 600))]);
-  } finally {
-    refreshing.value = false;
-  }
+function manualRefresh() {
+  refresh(() => store.fetchNodes());
 }
 
 // ─── Custom proxy groups ─────────────────────────────────────────────
@@ -360,11 +356,12 @@ const autoNowName = computed(() => store.activeNodeNow);
     </div>
 
     <!-- Empty -->
-    <div v-if="store.nodes.length === 0" class="empty-state">
-      <Signal :size="36" class="empty-icon" />
-      <div class="empty-title">{{ t("nodes.emptyTitle") }}</div>
-      <div class="empty-desc">{{ t("nodes.emptyDesc") }}</div>
-    </div>
+    <EmptyState
+      v-if="store.nodes.length === 0"
+      :icon="Signal"
+      :title="t('nodes.emptyTitle')"
+      :desc="t('nodes.emptyDesc')"
+    />
 
     <!-- Node List -->
     <div class="node-list">
@@ -489,7 +486,7 @@ const autoNowName = computed(() => store.activeNodeNow);
   background: transparent; color: var(--color-text-secondary);
   font-size: 12px; font-weight: 500; cursor: pointer; transition: all 0.15s;
 }
-.sub-tab:hover { background: rgba(128,128,128,0.1); color: var(--color-text); }
+.sub-tab:hover { background: var(--color-neutral); color: var(--color-text); }
 .sub-tab.active {
   background: rgba(79, 110, 247,0.1);
   border-color: rgba(79, 110, 247,0.35);
@@ -497,20 +494,12 @@ const autoNowName = computed(() => store.activeNodeNow);
 }
 .sub-count {
   font-size: 10px; font-weight: 700;
-  background: rgba(128,128,128,0.15);
+  background: var(--color-neutral-strong);
   border-radius: 100px; padding: 0 5px; min-width: 18px; text-align: center;
 }
 .sub-tab.active .sub-count {
   background: rgba(79, 110, 247,0.15);
 }
-
-.empty-state {
-  display: flex; flex-direction: column; align-items: center; gap: 10px;
-  padding: 48px 24px; color: var(--color-text-muted);
-}
-.empty-icon { opacity: 0.35; }
-.empty-title { font-size: 15px; font-weight: 600; color: var(--color-text-secondary); }
-.empty-desc { font-size: 13px; }
 
 .node-list { display: flex; flex-direction: column; gap: 6px; }
 .node-item {
@@ -561,9 +550,6 @@ const autoNowName = computed(() => store.activeNodeNow);
 }
 .speed-notice strong { color: var(--color-text); }
 
-@keyframes spin { to { transform: rotate(360deg); } }
-.spin { animation: spin 0.8s linear infinite; }
-
 .sort-group {
   display: flex; align-items: center; gap: 3px;
   padding: 3px 6px 3px 8px; border-radius: var(--radius-md);
@@ -576,7 +562,7 @@ const autoNowName = computed(() => store.activeNodeNow);
   color: var(--color-text-secondary);
   font-size: 11px; cursor: pointer; transition: all 0.15s;
 }
-.sort-btn:hover { background: rgba(128,128,128,0.1); }
+.sort-btn:hover { background: var(--color-neutral); }
 .sort-btn.active { background: var(--color-primary); color: white; border-radius: var(--radius-sm); }
 
 /* ─── Custom proxy groups ─── */
@@ -607,7 +593,7 @@ const autoNowName = computed(() => store.activeNodeNow);
   background: transparent; color: var(--color-text-secondary); cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
-.icon-btn:hover { background: rgba(128,128,128,0.1); color: var(--color-text); }
+.icon-btn:hover { background: var(--color-neutral); color: var(--color-text); }
 .icon-btn.danger:hover { background: rgba(209,52,56,0.1); color: var(--color-error); }
 
 .group-editor {

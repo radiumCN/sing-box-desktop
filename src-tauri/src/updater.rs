@@ -524,6 +524,9 @@ pub async fn get_installed_version() -> Option<String> {
 
     let mut cmd = tokio::process::Command::new(&path);
     cmd.arg("version");
+    // Null stdin so we never inherit a (possibly invalid) GUI std handle — inheriting one
+    // makes spawn fail with ERROR_INVALID_HANDLE (os error 6) → "版本未知：句柄无效".
+    cmd.stdin(std::process::Stdio::null());
     #[cfg(windows)]
     cmd.creation_flags(0x0800_0000);
 

@@ -50,6 +50,8 @@ const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 #[cfg(target_os = "windows")]
 fn send_graceful_break(pid: u32) -> bool {
     use winapi::um::wincon::{AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
+    use winapi::um::processenv::SetStdHandle;
+    use winapi::um::winbase::{STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
 
     unsafe {
         // Detach from any console we might already own (a GUI build normally has none), then
@@ -62,6 +64,16 @@ fn send_graceful_break(pid: u32) -> bool {
         // GUI (a different group) can never be hit. No self-protection handler needed.
         let sent = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) != 0;
         FreeConsole();
+        // CRITICAL: AttachConsole repointed our STD_INPUT/OUTPUT/ERROR slots at the core's
+        // console; the FreeConsole above closed that console but leaves those slots holding
+        // now-invalid handles. Any later child spawn that inherits stdin (the next core,
+        // `sing-box version`, `taskkill` …) would then fail with ERROR_INVALID_HANDLE
+        // (os error 6) — surfacing as a permanent "控制端口未就绪" / "版本未知：句柄无效"
+        // until the app is restarted. Reset the slots to NULL, the no-console state the GUI
+        // launched in, so subsequent spawns inherit cleanly.
+        SetStdHandle(STD_INPUT_HANDLE, std::ptr::null_mut());
+        SetStdHandle(STD_OUTPUT_HANDLE, std::ptr::null_mut());
+        SetStdHandle(STD_ERROR_HANDLE, std::ptr::null_mut());
         sent
     }
 }
@@ -166,24 +178,24 @@ pub async fn get_version(binary_path: &std::path::Path) -> Result<String> {
 /// Only sleeps to let the OS release the bound ports when an orphan was actually found
 /// and killed — the common case (no orphan) returns immediately, saving ~400ms on every start.
 #[cfg(target_os = "windows")]
-async fn kill_orphan_singbox() {
+async fn kill_orphan_singbox() -> bool {
     // taskkill /F /IM sing-box.exe exits 0 when it killed at least one process,
-    // and non-zero (128) when no matching process exists.
-    let killed = TokioCommand::new("taskkill")
+    // and non-zero (128) when no matching process exists. The caller waits for the bound
+    // port to actually free up (see wait_until_port_free) rather than a fixed sleep — a
+    // force-killed TUN core can hold the Clash API port for seconds while Windows tears
+    // down the Wintun driver, which a short fixed delay would race.
+    TokioCommand::new("taskkill")
         .args(["/F", "/IM", "sing-box.exe"])
+        .stdin(std::process::Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .await
         .map(|o| o.status.success())
-        .unwrap_or(false);
-    if killed {
-        // Give the OS a moment to fully release the bound ports before we rebind.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
+        .unwrap_or(false)
 }
 
 #[cfg(not(target_os = "windows"))]
-async fn kill_orphan_singbox() {
+async fn kill_orphan_singbox() -> bool {
     // Match the core's invocation signature ("…/sing-box run -c …") rather than the bare
     // name. The core is the only process ever launched with `run -c`, so this pattern
     // targets exactly the orphaned core and never the GUI app itself.
@@ -203,8 +215,28 @@ async fn kill_orphan_singbox() {
             .output()
             .await;
     }
-    if killed {
-        tokio::time::sleep(Duration::from_millis(300)).await;
+    killed
+}
+
+/// After an orphan was killed, wait until the Clash API control port is actually released
+/// before the new core tries to bind it — otherwise the new core hits "address already in
+/// use" and exits, which the caller then misreads as "控制端口未就绪". A force-killed TUN
+/// core can hold the port for a few seconds (Wintun teardown). Caps at ~3s so a port held
+/// by an unrelated process can't hang startup indefinitely.
+async fn wait_until_port_free(api_port: u16) {
+    let addr = format!("127.0.0.1:{}", api_port);
+    for _ in 0..60 {
+        let in_use = tokio::time::timeout(
+            Duration::from_millis(150),
+            tokio::net::TcpStream::connect(&addr),
+        )
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false);
+        if !in_use {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -212,8 +244,13 @@ async fn kill_orphan_singbox() {
 /// sing-box has finished starting up. Returns as soon as the port is reachable (typically
 /// ~100-200ms) instead of blocking on a fixed delay. Caps out after ~2s so a config that
 /// never binds the port doesn't hang the caller indefinitely.
-async fn wait_until_ready(api_port: u16) -> bool {
+async fn wait_until_ready(api_port: u16, state: &SharedState) -> bool {
     let addr = format!("127.0.0.1:{}", api_port);
+    // The spawn task sets `running = true` right after a successful spawn and flips it back
+    // to false the moment `child.wait()` returns. We only treat a false flag as "the core
+    // died" AFTER having observed it true — otherwise a slow spawn (flag not set yet) would
+    // be misread as an early exit and abort a perfectly good start.
+    let mut saw_running = false;
     for _ in 0..40 {
         if tokio::time::timeout(
             Duration::from_millis(200),
@@ -224,6 +261,15 @@ async fn wait_until_ready(api_port: u16) -> bool {
         .unwrap_or(false)
         {
             return true;
+        }
+        let running = state.lock().unwrap().running;
+        if running {
+            saw_running = true;
+        } else if saw_running {
+            // Core was up, then exited before binding the port — a failed config / TUN
+            // create / port bind. Stop now so the caller can report the real stderr instead
+            // of burning the whole timeout.
+            return false;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -245,9 +291,13 @@ pub async fn start_singbox(
         }
     }
 
-    // Kill any leftover sing-box processes (e.g. from app update / crash).
-    // This prevents "address already in use" errors on the mixed/http/socks ports.
-    kill_orphan_singbox().await;
+    // Kill any leftover sing-box processes (e.g. from app update / crash). This prevents
+    // "address already in use" on the mixed/http/socks/API ports. When an orphan was
+    // actually killed, wait for the control port to be released before rebinding — a
+    // force-killed TUN core can hold it for seconds while the Wintun driver tears down.
+    if kill_orphan_singbox().await {
+        wait_until_port_free(api_port).await;
+    }
 
     let binary = singbox_binary_path()?;
     let config_path = config_path.to_path_buf();
@@ -282,6 +332,7 @@ pub async fn start_singbox(
         // fail there. The config already passes absolute paths, but setting cwd makes the
         // core robust against any relative default sing-box might use.
         cmd.current_dir(crate::config::app_data_dir())
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         // CREATE_NEW_PROCESS_GROUP puts the core in its own console process group so a
@@ -354,8 +405,14 @@ pub async fn start_singbox(
     // effectively failed even though `spawn()` succeeded. Returning Err here is critical:
     // otherwise the caller (apply_connection_mode) would enable the system proxy / treat
     // TUN as active on top of a DEAD core, which presents as "proxy on, but no network".
-    if !wait_until_ready(api_port).await {
-        kill_orphan_singbox().await;
+    if !wait_until_ready(api_port, &state).await {
+        // Capture the core's own last log lines — the real reason (bad config, "address
+        // already in use", TUN adapter create failure) is here, not in our generic guess.
+        let tail = {
+            let s = state.lock().unwrap();
+            s.logs.iter().rev().take(8).rev().cloned().collect::<Vec<_>>().join("\n")
+        };
+        let _ = kill_orphan_singbox().await;
         {
             let mut s = state.lock().unwrap();
             s.running = false;
@@ -363,9 +420,12 @@ pub async fn start_singbox(
             s.start_time = None;
             s.tun_mode = false;
         }
-        return Err(anyhow!(
-            "sing-box 启动失败：控制端口未就绪（配置无效 / 端口被占用 / TUN 需要管理员权限）"
-        ));
+        let base = "sing-box 启动失败：控制端口未就绪（配置无效 / 端口被占用 / TUN 需要管理员权限）";
+        return Err(if tail.trim().is_empty() {
+            anyhow!("{}", base)
+        } else {
+            anyhow!("{}\n\n内核最后日志：\n{}", base, tail)
+        });
     }
 
     Ok(())
@@ -415,6 +475,7 @@ pub async fn stop_singbox(state: SharedState, graceful: bool) -> Result<()> {
             if !exited {
                 let _ = TokioCommand::new("taskkill")
                     .args(["/PID", &pid.to_string(), "/F"])
+                    .stdin(std::process::Stdio::null())
                     .creation_flags(CREATE_NO_WINDOW)
                     .output()
                     .await;

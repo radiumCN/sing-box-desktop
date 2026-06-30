@@ -14,6 +14,8 @@ import { useAppStore, type AppConfig } from "../stores/app";
 import { setLocale } from "../i18n";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
+import { formatBytes } from "../utils/format";
+import { useTemporaryFlag } from "../composables/useTemporaryFlag";
 
 const store = useAppStore();
 const { t } = useI18n();
@@ -108,7 +110,7 @@ async function removeProfile(name: string) {
   await store.deleteProfile(name);
   await refreshProfiles();
 }
-const saved = ref(false);
+const { flag: saved, trigger: triggerSaved } = useTemporaryFlag(1500);
 const appVersion = ref("");
 const localConfig = ref<AppConfig>({ ...store.config });
 
@@ -123,8 +125,7 @@ function scheduleSave() {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     await store.saveConfig({ ...localConfig.value });
-    saved.value = true;
-    setTimeout(() => (saved.value = false), 1500);
+    triggerSaved();
   }, 600);
 }
 
@@ -274,11 +275,6 @@ const hasUpdate = computed(() => {
   const latest = latestRelease.value.version.replace(/^v/, "");
   return installed !== latest && installed !== "";
 });
-
-const formatBytes = (b: number) => {
-  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
-  return `${(b / 1024 / 1024).toFixed(1)} MB`;
-};
 
 const formatDate = (iso: string) => {
   if (!iso) return "";
@@ -1293,7 +1289,7 @@ onUnmounted(() => {
 
 <style scoped>
 /* Network diagnostics (N5) */
-.diag-error { display: flex; align-items: center; gap: 6px; color: #d13438; font-size: 12.5px; padding: 4px 18px; }
+.diag-error { display: flex; align-items: center; gap: 6px; color: var(--color-error); font-size: 12.5px; padding: 4px 18px; }
 .diag-results { display: flex; flex-direction: column; gap: 8px; padding: 4px 18px 14px; }
 .diag-line { display: flex; gap: 10px; font-size: 13px; }
 .diag-key { color: var(--color-text-secondary); min-width: 70px; }
@@ -1301,8 +1297,8 @@ onUnmounted(() => {
 .diag-probes { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 4px; }
 .diag-probe { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .diag-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-.diag-dot.ok { background: #107c10; }
-.diag-dot.fail { background: #d13438; }
+.diag-dot.ok { background: var(--color-success); }
+.diag-dot.fail { background: var(--color-error); }
 .diag-probe-name { font-weight: 500; }
 .diag-probe-status { color: var(--color-text-secondary); }
 
@@ -1319,7 +1315,7 @@ onUnmounted(() => {
 .profile-name { font-size: 13px; font-weight: 500; }
 .profile-actions { display: flex; gap: 6px; }
 .btn-sm { padding: 3px 10px; font-size: 12px; }
-.btn-sm.danger { color: #d13438; }
+.btn-sm.danger { color: var(--color-error); }
 
 .page { display: flex; flex-direction: column; gap: 20px; max-width: 700px; }
 .page-header { display: flex; align-items: center; justify-content: space-between; }
@@ -1328,7 +1324,7 @@ onUnmounted(() => {
 .autosave-badge {
   display: inline-flex; align-items: center; gap: 5px;
   font-size: 12px; font-weight: 500;
-  color: #107c10; padding: 4px 10px;
+  color: var(--color-success); padding: 4px 10px;
   background: rgba(16,124,16,0.08);
   border-radius: 100px;
 }
@@ -1436,7 +1432,7 @@ onUnmounted(() => {
 }
 .progress-bytes { font-family: 'Cascadia Code', monospace; font-size: 11px; }
 .progress-bar-track {
-  height: 6px; background: rgba(128,128,128,0.15);
+  height: 6px; background: var(--color-neutral-strong);
   border-radius: 3px; overflow: hidden;
 }
 .progress-bar-fill {
@@ -1461,7 +1457,7 @@ onUnmounted(() => {
 }
 .kernel-hint code {
   font-family: 'Cascadia Code', monospace;
-  background: rgba(128,128,128,0.12);
+  background: var(--color-neutral);
   padding: 1px 4px; border-radius: 3px;
 }
 
@@ -1489,13 +1485,13 @@ onUnmounted(() => {
 }
 .tun-divider { height: 1px; background: var(--color-border); margin: 2px 0; }
 .check-status { flex-shrink: 0; }
-.check-ok { color: #107c10; }
-.check-bad { color: #d13438; }
+.check-ok { color: var(--color-success); }
+.check-bad { color: var(--color-error); }
 .check-info { flex: 1; }
 .check-label { font-size: 13px; font-weight: 500; margin-bottom: 1px; }
 .check-desc { font-size: 11px; }
-.text-ok { color: #107c10; }
-.text-bad { color: #d13438; }
+.text-ok { color: var(--color-success); }
+.text-bad { color: var(--color-error); }
 .btn-sm { padding: 4px 10px !important; font-size: 12px !important; flex-shrink: 0; }
 .tun-error {
   font-size: 11px; color: var(--color-error);
@@ -1507,9 +1503,6 @@ onUnmounted(() => {
 .about-name { font-size: 15px; font-weight: 600; margin-bottom: 3px; }
 .about-desc { font-size: 12px; color: var(--color-text-secondary); margin-bottom: 3px; }
 .about-version { font-size: 11px; color: var(--color-text-muted); }
-
-@keyframes spin { to { transform: rotate(360deg); } }
-.spin { animation: spin 0.8s linear infinite; }
 
 /* Import config dialog */
 .dialog-overlay {

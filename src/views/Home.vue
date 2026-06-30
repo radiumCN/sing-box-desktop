@@ -17,6 +17,7 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { useI18n } from "vue-i18n";
 import { useAppStore } from "../stores/app";
+import { formatBytes } from "../utils/format";
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Filler, Tooltip);
 
@@ -130,13 +131,6 @@ const chartOptions = {
     },
   },
   plugins: { legend: { display: false }, tooltip: { mode: "index" as const, intersect: false } },
-};
-
-const formatBytes = (bytes: number) => {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
 };
 
 // Proxy session timer — tracks how long the proxy has been actively proxying in the
@@ -404,10 +398,6 @@ onUnmounted(() => {
   font-weight: 600;
   color: var(--color-text);
 }
-.dot {
-  width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: inline-block;
-}
-.dot-green { animation: pulse 2s infinite; }
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
@@ -435,7 +425,7 @@ onUnmounted(() => {
   position: relative;
   transition: all 0.25s ease;
 }
-.hero-icon.off { background: rgba(128,128,128,0.1); color: var(--color-text-muted); }
+.hero-icon.off { background: var(--color-neutral); color: var(--color-text-muted); }
 .hero-icon.on {
   background: var(--color-success);
   color: white;
@@ -470,7 +460,7 @@ onUnmounted(() => {
 .hero-pill {
   font-size: 12px; font-weight: 600;
   padding: 4px 12px; border-radius: 100px;
-  background: rgba(79, 110, 247, 0.12); color: var(--color-primary);
+  background: var(--color-primary-soft); color: var(--color-primary);
 }
 
 .stat-grid {
@@ -491,24 +481,13 @@ onUnmounted(() => {
 .stat-sub { font-size: 11px; color: var(--color-text-muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Harmonized icon palette — indigo-led cool set + green for status */
-.icon-green { background: rgba(16,124,16,0.12); color: #107c10; }
-.icon-gray { background: rgba(128,128,128,0.1); color: var(--color-text-muted); }
+.icon-green { background: var(--color-success-soft); color: var(--color-success); }
 .icon-blue,
-.icon-node { background: rgba(79, 110, 247, 0.12); color: #4f6ef7; }
+.icon-node { background: var(--color-primary-soft); color: var(--color-primary); }
 .icon-violet { background: rgba(124, 92, 236, 0.13); color: #7c5cec; }
 .icon-teal { background: rgba(14, 155, 142, 0.14); color: #0e9b8e; }
 .icon-amber,
 .icon-uptime { background: rgba(193, 128, 30, 0.14); color: #b9770e; }
-
-.mode-btns { display: flex; gap: 4px; margin-top: 6px; }
-.mode-btn {
-  padding: 2px 8px; border-radius: var(--radius-sm);
-  border: 1px solid var(--color-border);
-  background: transparent; color: var(--color-text-secondary);
-  font-size: 11px; cursor: pointer; transition: all 0.15s;
-}
-.mode-btn:hover { background: rgba(128,128,128,0.1); }
-.mode-btn.active { background: var(--color-primary); color: white; border-color: transparent; }
 
 .traffic-row {
   display: grid;
@@ -522,8 +501,8 @@ onUnmounted(() => {
   gap: 10px;
   flex-wrap: wrap;
 }
-.traffic-stat.upload { color: #4f6ef7; }
-.traffic-stat.download { color: #107c10; }
+.traffic-stat.upload { color: var(--color-primary); }
+.traffic-stat.download { color: var(--color-success); }
 .traffic-label { font-size: 12px; color: var(--color-text-secondary); }
 .traffic-value { font-size: 16px; font-weight: 700; margin-left: auto; }
 .traffic-total { font-size: 11px; color: var(--color-text-muted); width: 100%; text-align: right; }
@@ -541,8 +520,8 @@ onUnmounted(() => {
 .chart-legend { margin-left: auto; display: flex; gap: 12px; }
 .legend-item { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 500; }
 .legend-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; display: inline-block; }
-.upload-color { color: #4f6ef7; }
-.download-color { color: #107c10; }
+.upload-color { color: var(--color-primary); }
+.download-color { color: var(--color-success); }
 .chart-body { height: 160px; }
 .chart-empty {
   height: 100%; display: flex; align-items: center; justify-content: center;
@@ -610,7 +589,7 @@ onUnmounted(() => {
   background: transparent; color: var(--color-text-secondary);
   font-size: 11px; cursor: pointer; transition: all 0.15s;
 }
-.mode-pill:hover { background: rgba(128,128,128,0.1); }
+.mode-pill:hover { background: var(--color-neutral); }
 .mode-pill.active { background: var(--color-primary); color: white; border-color: transparent; }
 
 .error-banner {
@@ -623,7 +602,4 @@ onUnmounted(() => {
   font-size: 13px;
 }
 .error-msg { display: inline-flex; align-items: center; gap: 7px; }
-
-@keyframes spin { to { transform: rotate(360deg); } }
-.spin { animation: spin 0.8s linear infinite; }
 </style>

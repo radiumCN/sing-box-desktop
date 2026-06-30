@@ -8,6 +8,7 @@ import {
   Plus, Trash2, ToggleLeft, ToggleRight, ChevronDown, ChevronUp,
   Filter, Globe, Layers, BookMarked, Info, RotateCcw, GripVertical
 } from "@lucide/vue";
+import EmptyState from "../components/EmptyState.vue";
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -402,11 +403,12 @@ onMounted(() => {
     </div>
 
     <!-- Rules List -->
-    <div v-if="rules.length === 0 && !loading" class="empty-state">
-      <Filter :size="36" class="empty-icon" />
-      <div class="empty-title">{{ t("rules.emptyTitle") }}</div>
-      <div class="empty-desc">{{ t("rules.emptyDesc") }}</div>
-    </div>
+    <EmptyState
+      v-if="rules.length === 0 && !loading"
+      :icon="Filter"
+      :title="t('rules.emptyTitle')"
+      :desc="t('rules.emptyDesc')"
+    />
 
     <div class="rules-list">
       <div
@@ -630,15 +632,9 @@ onMounted(() => {
   font-size: 10px; font-weight: 700; padding: 1px 5px;
   border-radius: 3px; margin-right: 2px;
 }
-.preset-proxy .preset-action { background: rgba(79, 110, 247,.12); color: #4f6ef7; }
-.preset-direct .preset-action { background: rgba(16,124,16,.12); color: #107c10; }
-.preset-block .preset-action { background: rgba(209,52,56,.12); color: #d13438; }
-
-/* Empty */
-.empty-state { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 40px; color: var(--color-text-muted); }
-.empty-icon { opacity: 0.3; }
-.empty-title { font-size: 15px; font-weight: 600; color: var(--color-text-secondary); }
-.empty-desc { font-size: 13px; }
+.preset-proxy .preset-action { background: var(--color-primary-soft); color: var(--color-primary); }
+.preset-direct .preset-action { background: var(--color-success-soft); color: var(--color-success); }
+.preset-block .preset-action { background: var(--color-error-soft); color: var(--color-error); }
 
 /* Rules List */
 .rules-list { display: flex; flex-direction: column; gap: 6px; }
@@ -678,7 +674,7 @@ onMounted(() => {
   display: flex; align-items: center; justify-content: center;
   color: var(--color-text-muted); transition: all 0.1s;
 }
-.icon-btn:hover { background: rgba(128,128,128,0.1); color: var(--color-text); }
+.icon-btn:hover { background: var(--color-neutral); color: var(--color-text); }
 .icon-btn.danger:hover { background: rgba(209,52,56,0.1); color: var(--color-error); }
 
 /* Expanded detail */
@@ -750,9 +746,9 @@ onMounted(() => {
 .provider-badge {
   font-size: 10px; font-weight: 600; padding: 1px 7px; border-radius: 100px;
 }
-.provider-badge.preset-proxy { background: rgba(79, 110, 247,.12); color: #4f6ef7; }
-.provider-badge.preset-direct { background: rgba(16,124,16,.12); color: #107c10; }
-.provider-badge.preset-block { background: rgba(209,52,56,.12); color: #d13438; }
+.provider-badge.preset-proxy { background: var(--color-primary-soft); color: var(--color-primary); }
+.provider-badge.preset-direct { background: var(--color-success-soft); color: var(--color-success); }
+.provider-badge.preset-block { background: var(--color-error-soft); color: var(--color-error); }
 .provider-fmt {
   font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 4px;
   background: rgba(128,128,128,0.12); color: var(--color-text-secondary);

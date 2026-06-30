@@ -6,6 +6,10 @@ import {
 import QRCode from "qrcode";
 import { useI18n } from "vue-i18n";
 import { useAppStore } from "../stores/app";
+import { formatBytes } from "../utils/format";
+import { copyToClipboard, readFromClipboard } from "../utils/clipboard";
+import { useTemporaryFlag } from "../composables/useTemporaryFlag";
+import EmptyState from "../components/EmptyState.vue";
 
 const { t } = useI18n();
 const store = useAppStore();
@@ -44,14 +48,6 @@ const subTypeLabel = (type: string) => {
 };
 
 // ─── Airport usage / quota (from Subscription-Userinfo header) ──────────────
-function formatBytes(bytes?: number): string {
-  if (bytes == null) return "--";
-  if (bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 2)} ${units[i]}`;
-}
-
 interface SubLike {
   upload?: number;
   download?: number;
@@ -79,7 +75,7 @@ function usagePercent(sub: SubLike): number | null {
 
 function usageColor(pct: number | null): string {
   if (pct == null) return "var(--color-primary)";
-  if (pct >= 90) return "#d13438";
+  if (pct >= 90) return "var(--color-error)";
   if (pct >= 70) return "#ca5010";
   return "var(--color-primary)";
 }
@@ -128,11 +124,11 @@ async function addSub() {
 }
 
 async function pasteContent() {
-  try {
-    newSubContent.value = await navigator.clipboard.readText();
-  } catch {
-    // Clipboard read may be blocked — user can paste manually.
+  const text = await readFromClipboard();
+  if (text != null) {
+    newSubContent.value = text;
   }
+  // Clipboard read may be blocked — user can paste manually.
 }
 
 async function updateSub(id: string) {
@@ -223,7 +219,7 @@ const qrVisible = ref(false);
 const qrSubName = ref("");
 const qrSubUrl = ref("");
 const qrDataUrl = ref("");
-const qrCopied = ref(false);
+const { flag: qrCopied, trigger: triggerQrCopied } = useTemporaryFlag(1800);
 
 async function showQr(name: string, url: string) {
   qrSubName.value = name;
@@ -249,13 +245,11 @@ function closeQr() {
 }
 
 async function copyUrl() {
-  try {
-    await navigator.clipboard.writeText(qrSubUrl.value);
-    qrCopied.value = true;
-    setTimeout(() => (qrCopied.value = false), 1800);
-  } catch {
-    // Fallback: show the URL selected
+  const ok = await copyToClipboard(qrSubUrl.value);
+  if (ok) {
+    triggerQrCopied();
   }
+  // else: fallback — show the URL selected
 }
 
 const INTERVAL_OPTIONS = [
@@ -308,17 +302,17 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
     </div>
 
     <!-- Empty State -->
-    <div v-if="store.subscriptions.length === 0 && !showAddDialog" class="empty-state">
-      <div class="empty-icon">
-        <Server :size="36" />
-      </div>
-      <div class="empty-title">{{ t("subscriptions.empty") }}</div>
-      <div class="empty-desc">{{ t("subscriptions.emptyDesc") }}</div>
+    <EmptyState
+      v-if="store.subscriptions.length === 0 && !showAddDialog"
+      :icon="Server"
+      :title="t('subscriptions.empty')"
+      :desc="t('subscriptions.emptyDesc')"
+    >
       <button class="btn btn-primary" @click="showAddDialog = true">
         <Plus :size="14" />
         {{ t("subscriptions.addFirst") }}
       </button>
-    </div>
+    </EmptyState>
 
     <!-- Add Dialog (inline) -->
     <div v-if="showAddDialog" class="card add-dialog">
@@ -618,15 +612,6 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
 .page-header { display: flex; align-items: center; justify-content: space-between; }
 .page-title { font-size: 20px; font-weight: 600; }
 
-.empty-state {
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 12px; padding: 60px 24px; text-align: center;
-  color: var(--color-text-muted);
-}
-.empty-icon { opacity: 0.4; }
-.empty-title { font-size: 16px; font-weight: 600; color: var(--color-text-secondary); }
-.empty-desc { font-size: 13px; }
-
 .add-dialog { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
 .dialog-title { font-size: 15px; font-weight: 600; }
 .form-group { display: flex; flex-direction: column; gap: 6px; }
@@ -700,9 +685,9 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
 .quota-text { font-weight: 500; }
 .quota-expire {
   font-size: 11px; color: var(--color-text-muted);
-  background: rgba(128,128,128,0.1); padding: 1px 7px; border-radius: 10px;
+  background: var(--color-neutral); padding: 1px 7px; border-radius: 10px;
 }
-.quota-expire.expired { color: #d13438; background: rgba(209,52,56,0.12); font-weight: 600; }
+.quota-expire.expired { color: var(--color-error); background: var(--color-error-soft); font-weight: 600; }
 .quota-bar {
   height: 5px; border-radius: 3px; overflow: hidden;
   background: rgba(128,128,128,0.18);
@@ -724,7 +709,7 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
 .autoupdate-label { font-weight: 500; }
 .autoupdate-next {
   font-size: 11px; color: var(--color-text-muted);
-  background: rgba(128,128,128,0.1); padding: 1px 7px; border-radius: 10px;
+  background: var(--color-neutral); padding: 1px 7px; border-radius: 10px;
 }
 .autoupdate-right { display: flex; align-items: center; gap: 8px; }
 
@@ -753,9 +738,6 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
 .hint-title { font-size: 12px; font-weight: 600; color: var(--color-text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
 .hint-list { display: flex; flex-direction: column; gap: 8px; }
 .hint-item { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--color-text-secondary); }
-
-@keyframes spin { to { transform: rotate(360deg); } }
-.spin { animation: spin 0.8s linear infinite; }
 
 /* ─── QR Code dialog ─── */
 .qr-overlay {
@@ -821,7 +803,7 @@ async function changeInterval(id: string, autoUpdate: boolean, interval: number)
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .qr-copy-btn { padding: 4px 6px !important; flex-shrink: 0; }
-.copy-ok { color: #107c10; }
+.copy-ok { color: var(--color-success); }
 
 /* QR dialog enter/leave transition */
 .qr-fade-enter-active, .qr-fade-leave-active { transition: opacity 0.18s, transform 0.18s; }
