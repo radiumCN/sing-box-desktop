@@ -188,9 +188,6 @@ export const useAppStore = defineStore("app", () => {
   const isAutoGroup = computed(
     () => activeProxyTag.value === "auto" || activeProxyTag.value.startsWith("auto-")
   );
-  // True only for the global "auto" group (kept for existing call sites).
-  const isAutoActive = computed(() => activeProxyTag.value === "auto");
-
   const activeNode = computed(() => {
     // Prefer the node flagged as active; fall back to matching by saved tag name.
     const byFlag = nodes.value.find((n) => n.is_active);
@@ -198,15 +195,6 @@ export const useAppStore = defineStore("app", () => {
     const activeTag = activeProxyTag.value;
     if (!activeTag || isAutoGroup.value) return undefined;
     return nodes.value.find((n) => n.name === activeTag);
-  });
-
-  const nodesByGroup = computed(() => {
-    const groups: Record<string, ProxyNode[]> = {};
-    for (const node of nodes.value) {
-      if (!groups[node.group]) groups[node.group] = [];
-      groups[node.group].push(node);
-    }
-    return groups;
   });
 
   async function fetchStatus() {
@@ -231,50 +219,6 @@ export const useAppStore = defineStore("app", () => {
   function syncTrayMenu(sysProxyEnabled: boolean, tunEnabled?: boolean) {
     const tun = tunEnabled ?? config.value.tun_enabled ?? false;
     invoke("cmd_sync_tray_menu", { sysProxyEnabled, tunEnabled: tun }).catch(() => {});
-  }
-
-  async function startProxy() {
-    loading.value = true;
-    error.value = null;
-    try {
-      await invoke("cmd_start_singbox");
-      await fetchStatus();
-      resetTrafficStats();
-      updateTrayTooltip();
-      // Only enable Windows system proxy when TUN is NOT active.
-      // TUN mode captures traffic at the network layer — system proxy is redundant and
-      // would cause double-proxying confusion.
-      const sysProxyOn = !config.value.tun_enabled;
-      if (sysProxyOn) {
-        await invoke("cmd_set_system_proxy", { enabled: true }).catch(() => {});
-      } else {
-        // TUN is on: ensure system proxy is cleared to avoid mixing two proxy methods
-        await invoke("cmd_set_system_proxy", { enabled: false }).catch(() => {});
-      }
-      syncTrayMenu(sysProxyOn);
-    } catch (e) {
-      error.value = String(e);
-    } finally {
-      loading.value = false;
-    }
-  }
-
-  async function stopProxy() {
-    loading.value = true;
-    error.value = null;
-    try {
-      await invoke("cmd_stop_singbox");
-      await fetchStatus();
-      activeNodeNow.value = null;
-      updateTrayTooltip();
-      // Always clear system proxy when stopping sing-box
-      await invoke("cmd_set_system_proxy", { enabled: false }).catch(() => {});
-      syncTrayMenu(false);
-    } catch (e) {
-      error.value = String(e);
-    } finally {
-      loading.value = false;
-    }
   }
 
   /** Unified connection control. The dashboard exposes only two mutually-exclusive
@@ -812,10 +756,7 @@ export const useAppStore = defineStore("app", () => {
     proxySessionStartMs,
     refreshSystemProxy,
     activeNode,
-    nodesByGroup,
     fetchStatus,
-    startProxy,
-    stopProxy,
     setConnectionMode,
     fetchSubscriptions,
     addSubscription,
@@ -833,7 +774,6 @@ export const useAppStore = defineStore("app", () => {
     fetchNodes,
     setActiveNode,
     setAutoNode,
-    isAutoActive,
     isAutoGroup,
     activeProxyTag,
     activeNodeNow,

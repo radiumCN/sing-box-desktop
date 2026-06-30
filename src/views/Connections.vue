@@ -5,6 +5,9 @@ import { invoke } from "@tauri-apps/api/core";
 
 const { t } = useI18n();
 import { RefreshCw, Activity, X, Ban } from "@lucide/vue";
+import { formatBytes } from "../utils/format";
+import { useDelayedRefresh } from "../composables/useDelayedRefresh";
+import EmptyState from "../components/EmptyState.vue";
 
 interface ConnectionInfo {
   id: string;
@@ -23,7 +26,7 @@ interface ConnectionInfo {
 
 const connections = ref<ConnectionInfo[]>([]);
 const loading = ref(false);
-const refreshing = ref(false);
+const { refreshing, refresh } = useDelayedRefresh();
 const search = ref("");
 const grouped = ref(false);
 type SortKey = "default" | "host" | "upload" | "download" | "proto";
@@ -121,12 +124,6 @@ async function closeHostGroup(g: HostGroup) {
   connections.value = connections.value.filter((c) => !g.ids.includes(c.id));
 }
 
-const formatBytes = (b: number) => {
-  if (b < 1024) return `${b}B`;
-  if (b < 1048576) return `${(b / 1024).toFixed(1)}KB`;
-  return `${(b / 1048576).toFixed(1)}MB`;
-};
-
 // Build a compact rule label from rule + rule_payload
 function ruleLabel(conn: ConnectionInfo): string {
   if (conn.rule_payload) return conn.rule_payload;
@@ -158,18 +155,6 @@ async function fetchConnections() {
     connections.value = [];
   } finally {
     loading.value = false;
-  }
-}
-
-// Manual refresh keeps the spin visible for at least 600ms — the 2s poll
-// otherwise toggles `loading` too briefly for the animation to register.
-async function manualRefresh() {
-  if (refreshing.value) return;
-  refreshing.value = true;
-  try {
-    await Promise.all([fetchConnections(), new Promise((r) => setTimeout(r, 600))]);
-  } finally {
-    refreshing.value = false;
   }
 }
 
@@ -223,7 +208,7 @@ onUnmounted(() => {
           <Ban :size="14" />
           {{ t('connections.closeAll') }}
         </button>
-        <button class="btn btn-ghost" @click="manualRefresh" :disabled="refreshing">
+        <button class="btn btn-ghost" @click="refresh(() => fetchConnections())" :disabled="refreshing">
           <RefreshCw :size="14" :class="{ spin: refreshing }" />
           {{ t('connections.refresh') }}
         </button>
@@ -232,15 +217,17 @@ onUnmounted(() => {
 
     <input class="input" v-model="search" :placeholder="t('connections.searchPlaceholder')" style="max-width: 400px" />
 
-    <div v-if="connections.length === 0 && !loading" class="empty-state">
-      <Activity :size="36" class="empty-icon" />
-      <div class="empty-title">{{ t('connections.emptyTitle') }}</div>
-      <div class="empty-desc">{{ t('connections.emptyDesc') }}</div>
-    </div>
-    <div v-else-if="filtered.length === 0 && search" class="empty-state">
-      <Activity :size="36" class="empty-icon" />
-      <div class="empty-title">{{ t('connections.noResult', { q: search }) }}</div>
-    </div>
+    <EmptyState
+      v-if="connections.length === 0 && !loading"
+      :icon="Activity"
+      :title="t('connections.emptyTitle')"
+      :desc="t('connections.emptyDesc')"
+    />
+    <EmptyState
+      v-else-if="filtered.length === 0 && search"
+      :icon="Activity"
+      :title="t('connections.noResult', { q: search })"
+    />
 
     <!-- Grouped-by-host view -->
     <div v-else-if="grouped" class="conn-table-wrapper">
@@ -348,7 +335,7 @@ onUnmounted(() => {
 .conn-count { font-size: 12px; color: var(--color-text-secondary); }
 .conn-total { font-size: 12px; color: var(--color-text-secondary); display: inline-flex; gap: 6px; align-items: center; }
 
-.view-tabs { display: flex; gap: 2px; background: var(--color-bg-secondary, rgba(128,128,128,0.1)); border-radius: 8px; padding: 2px; }
+.view-tabs { display: flex; gap: 2px; background: var(--color-bg-secondary, var(--color-neutral)); border-radius: 8px; padding: 2px; }
 .view-tab {
   border: none; background: transparent; cursor: pointer; font-size: 12px;
   padding: 4px 10px; border-radius: 6px; color: var(--color-text-secondary);
@@ -358,14 +345,6 @@ onUnmounted(() => {
 .sortable { cursor: pointer; user-select: none; }
 .sortable:hover { color: var(--color-text); }
 .sort-arrow { margin-left: 3px; font-size: 9px; }
-
-.empty-state {
-  display: flex; flex-direction: column; align-items: center; gap: 10px;
-  padding: 48px 24px; color: var(--color-text-muted); text-align: center;
-}
-.empty-icon { opacity: 0.35; }
-.empty-title { font-size: 15px; font-weight: 600; color: var(--color-text-secondary); }
-.empty-desc { font-size: 13px; }
 
 .conn-table-wrapper { overflow: auto; flex: 1; }
 .conn-table {
@@ -383,7 +362,7 @@ onUnmounted(() => {
   border-bottom: 1px solid var(--color-border);
   vertical-align: middle;
 }
-.conn-table tr:hover td { background: rgba(128,128,128,0.05); }
+.conn-table tr:hover td { background: var(--color-neutral-soft); }
 
 /* Row tinting */
 .row-proxy td:first-child { border-left: 2px solid rgba(79, 110, 247,0.35); }
@@ -409,7 +388,7 @@ onUnmounted(() => {
   opacity: 0; transition: opacity 0.12s, background 0.12s, color 0.12s;
 }
 .conn-table tr:hover .close-btn { opacity: 1; }
-.close-btn:hover { background: rgba(232,17,35,0.12); color: #e81123; }
+.close-btn:hover { background: var(--color-error-soft); color: var(--color-error); }
 
 .text-muted { color: var(--color-text-muted); }
 
@@ -418,23 +397,20 @@ onUnmounted(() => {
   font-size: 10px; font-weight: 600; max-width: 150px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.tag-proxy { background: rgba(79, 110, 247,0.1); color: #4f6ef7; }
-.tag-direct { background: rgba(16,124,16,0.1); color: #107c10; }
+.tag-proxy { background: rgba(79, 110, 247,0.1); color: var(--color-primary); }
+.tag-direct { background: rgba(16,124,16,0.1); color: var(--color-success); }
 
 .chain-label {
   display: block; overflow: hidden; text-overflow: ellipsis;
   max-width: 115px; font-size: 11px;
 }
 
-.upload-val { color: #4f6ef7; font-weight: 500; }
-.download-val { color: #107c10; font-weight: 500; }
+.upload-val { color: var(--color-primary); font-weight: 500; }
+.download-val { color: var(--color-success); font-weight: 500; }
 
 .proto-tag {
   display: inline-block; padding: 1px 5px; border-radius: 3px;
-  background: rgba(128,128,128,0.1); color: var(--color-text-secondary);
+  background: var(--color-neutral); color: var(--color-text-secondary);
   font-size: 10px; font-weight: 600;
 }
-
-@keyframes spin { to { transform: rotate(360deg); } }
-.spin { animation: spin 0.8s linear infinite; }
 </style>

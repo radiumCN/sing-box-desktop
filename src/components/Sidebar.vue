@@ -145,11 +145,11 @@ onMounted(() => {
   transition: all 0.15s ease;
 }
 .nav-item:hover {
-  background: rgba(128, 128, 128, 0.1);
+  background: var(--color-neutral);
   color: var(--color-text);
 }
 .nav-item.active {
-  background: rgba(79, 110, 247, 0.12);
+  background: var(--color-primary-soft);
   color: var(--color-primary);
 }
 .sidebar-footer {
@@ -170,7 +170,7 @@ onMounted(() => {
   font-weight: 500;
   width: 100%;
 }
-.proxy-status.running { color: #107c10; }
+.proxy-status.running { color: var(--color-success); }
 .status-dot {
   width: 7px;
   height: 7px;
@@ -180,7 +180,7 @@ onMounted(() => {
   transition: background 0.3s;
 }
 .status-dot.running {
-  background: #107c10;
+  background: var(--color-success);
   animation: status-pulse 2s infinite;
 }
 @keyframes status-pulse {
@@ -191,7 +191,7 @@ onMounted(() => {
 .update-dot {
   position: absolute; top: -3px; right: -3px;
   width: 7px; height: 7px; border-radius: 50%;
-  background: #d13438;
+  background: var(--color-error);
   border: 1.5px solid var(--color-surface);
   animation: pulse-dot 2s infinite;
 }
@@ -199,7 +199,7 @@ onMounted(() => {
   margin-left: auto;
   font-size: 10px; font-weight: 700;
   padding: 1px 6px; border-radius: 100px;
-  background: rgba(209,52,56,0.12); color: #d13438;
+  background: var(--color-error-soft); color: var(--color-error);
 }
 @keyframes pulse-dot {
   0%, 100% { transform: scale(1); }

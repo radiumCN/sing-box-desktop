@@ -16,6 +16,8 @@ import {
 import { ArrowUp, ArrowDown, Database, RefreshCw } from "@lucide/vue";
 import { useAppStore, type TrafficDay } from "../stores/app";
 import { useI18n } from "vue-i18n";
+import { formatBytes } from "../utils/format";
+import { useDelayedRefresh } from "../composables/useDelayedRefresh";
 
 const { t } = useI18n();
 
@@ -24,15 +26,8 @@ ChartJS.register(Title, Tooltip, Legend, LineElement, PointElement, Filler, Cate
 const store = useAppStore();
 const history = ref<TrafficDay[]>([]);
 const loading = ref(false);
-const refreshing = ref(false);
 const rangeDays = ref(30);
-
-function formatBytes(bytes: number): string {
-  if (bytes <= 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 2)} ${units[i]}`;
-}
+const { refreshing, refresh } = useDelayedRefresh();
 
 // Short MM-DD label for the x-axis.
 function shortDate(date: string): string {
@@ -62,8 +57,8 @@ const chartData = computed(() => ({
     {
       label: t("stats.download"),
       data: shown.value.map((d) => d.download),
-      borderColor: "rgba(16, 137, 62, 1)",
-      backgroundColor: "rgba(16, 137, 62, 0.12)",
+      borderColor: "rgba(16, 124, 16, 1)",
+      backgroundColor: "rgba(16, 124, 16, 0.12)",
       borderWidth: 2,
       tension: 0.35,
       fill: true,
@@ -118,17 +113,6 @@ async function load() {
   }
 }
 
-// Keep the refresh spin visible for at least 600ms — the fetch is near-instant.
-async function manualRefresh() {
-  if (refreshing.value) return;
-  refreshing.value = true;
-  try {
-    await Promise.all([load(), new Promise((r) => setTimeout(r, 600))]);
-  } finally {
-    refreshing.value = false;
-  }
-}
-
 onMounted(load);
 </script>
 
@@ -148,7 +132,7 @@ onMounted(load);
             {{ t('stats.daysN', { n: d }) }}
           </button>
         </div>
-        <button class="btn btn-ghost" :disabled="refreshing" @click="manualRefresh">
+        <button class="btn btn-ghost" :disabled="refreshing" @click="refresh(() => load())">
           <RefreshCw :size="13" :class="{ spin: refreshing }" />
           {{ t('stats.refresh') }}
         </button>
@@ -203,8 +187,6 @@ onMounted(load);
 </template>
 
 <style scoped>
-@keyframes spin { to { transform: rotate(360deg); } }
-.spin { animation: spin 0.8s linear infinite; }
 .range-tabs { display: flex; gap: 2px; background: var(--color-bg-secondary); border-radius: 8px; padding: 2px; }
 .range-tab {
   border: none; background: transparent; cursor: pointer; font-size: 12px;
@@ -219,8 +201,8 @@ onMounted(load);
   justify-content: center; color: #fff; flex-shrink: 0;
 }
 .summary-icon.today { background: #7c5cec; }
-.summary-icon.down { background: #10893e; }
-.summary-icon.up { background: #4f6ef7; }
+.summary-icon.down { background: var(--color-success); }
+.summary-icon.up { background: var(--color-primary); }
 .summary-icon.total { background: #6b6b6b; }
 .summary-label { font-size: 11.5px; color: var(--color-text-secondary); margin-bottom: 2px; }
 .summary-value { font-size: 16px; font-weight: 600; }
