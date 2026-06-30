@@ -50,7 +50,6 @@ onMounted(() => {
       <img class="brand-mark" :src="logoUrl" alt="Skylark" />
       <div class="brand-text">
         <span class="brand-name">Skylark</span>
-        <span class="brand-sub">云雀</span>
       </div>
     </div>
 
@@ -121,9 +120,8 @@ onMounted(() => {
   object-fit: cover;
   flex-shrink: 0;
 }
-.brand-text { display: flex; flex-direction: column; line-height: 1.15; }
-.brand-name { font-size: 14px; font-weight: 700; color: var(--color-text); letter-spacing: 0.2px; }
-.brand-sub { font-size: 11px; color: var(--color-text-muted); }
+.brand-text { display: flex; align-items: center; }
+.brand-name { font-size: 15px; font-weight: 700; color: var(--color-text); letter-spacing: 0.2px; }
 .sidebar-nav {
   flex: 1;
   display: flex;
