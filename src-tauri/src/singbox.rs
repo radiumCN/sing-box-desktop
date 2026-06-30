@@ -50,6 +50,8 @@ const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 #[cfg(target_os = "windows")]
 fn send_graceful_break(pid: u32) -> bool {
     use winapi::um::wincon::{AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
+    use winapi::um::processenv::SetStdHandle;
+    use winapi::um::winbase::{STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE};
 
     unsafe {
         // Detach from any console we might already own (a GUI build normally has none), then
@@ -62,6 +64,16 @@ fn send_graceful_break(pid: u32) -> bool {
         // GUI (a different group) can never be hit. No self-protection handler needed.
         let sent = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) != 0;
         FreeConsole();
+        // CRITICAL: AttachConsole repointed our STD_INPUT/OUTPUT/ERROR slots at the core's
+        // console; the FreeConsole above closed that console but leaves those slots holding
+        // now-invalid handles. Any later child spawn that inherits stdin (the next core,
+        // `sing-box version`, `taskkill` …) would then fail with ERROR_INVALID_HANDLE
+        // (os error 6) — surfacing as a permanent "控制端口未就绪" / "版本未知：句柄无效"
+        // until the app is restarted. Reset the slots to NULL, the no-console state the GUI
+        // launched in, so subsequent spawns inherit cleanly.
+        SetStdHandle(STD_INPUT_HANDLE, std::ptr::null_mut());
+        SetStdHandle(STD_OUTPUT_HANDLE, std::ptr::null_mut());
+        SetStdHandle(STD_ERROR_HANDLE, std::ptr::null_mut());
         sent
     }
 }
@@ -174,6 +186,7 @@ async fn kill_orphan_singbox() -> bool {
     // down the Wintun driver, which a short fixed delay would race.
     TokioCommand::new("taskkill")
         .args(["/F", "/IM", "sing-box.exe"])
+        .stdin(std::process::Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .await
@@ -319,6 +332,7 @@ pub async fn start_singbox(
         // fail there. The config already passes absolute paths, but setting cwd makes the
         // core robust against any relative default sing-box might use.
         cmd.current_dir(crate::config::app_data_dir())
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         // CREATE_NEW_PROCESS_GROUP puts the core in its own console process group so a
@@ -461,6 +475,7 @@ pub async fn stop_singbox(state: SharedState, graceful: bool) -> Result<()> {
             if !exited {
                 let _ = TokioCommand::new("taskkill")
                     .args(["/PID", &pid.to_string(), "/F"])
+                    .stdin(std::process::Stdio::null())
                     .creation_flags(CREATE_NO_WINDOW)
                     .output()
                     .await;
