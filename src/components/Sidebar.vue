@@ -10,11 +10,11 @@ import {
   ScrollText,
   Filter,
   Settings,
-  Bird,
 } from "@lucide/vue";
 import { listen } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
 import { useAppStore } from "../stores/app";
+import logoUrl from "../assets/logo.png";
 
 const route = useRoute();
 const router = useRouter();
@@ -47,7 +47,7 @@ onMounted(() => {
 <template>
   <nav class="sidebar">
     <div class="brand">
-      <div class="brand-mark"><Bird :size="18" /></div>
+      <img class="brand-mark" :src="logoUrl" alt="Skylark" />
       <div class="brand-text">
         <span class="brand-name">Skylark</span>
         <span class="brand-sub">云雀</span>
@@ -118,10 +118,7 @@ onMounted(() => {
 .brand-mark {
   width: 32px; height: 32px;
   border-radius: var(--radius-md);
-  display: flex; align-items: center; justify-content: center;
-  background: var(--gradient-primary);
-  color: white;
-  box-shadow: 0 2px 8px rgba(79, 110, 247, 0.35);
+  object-fit: cover;
   flex-shrink: 0;
 }
 .brand-text { display: flex; flex-direction: column; line-height: 1.15; }

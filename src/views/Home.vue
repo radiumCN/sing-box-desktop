@@ -425,9 +425,7 @@ onUnmounted(() => {
 }
 .hero-card.active {
   border-color: rgba(16, 124, 16, 0.28);
-  background:
-    linear-gradient(120deg, rgba(16,124,16,0.06), transparent 55%),
-    var(--color-surface);
+  background: var(--color-surface);
 }
 .hero-icon {
   width: 52px; height: 52px;
@@ -439,7 +437,7 @@ onUnmounted(() => {
 }
 .hero-icon.off { background: rgba(128,128,128,0.1); color: var(--color-text-muted); }
 .hero-icon.on {
-  background: linear-gradient(135deg, #16a34a 0%, #107c10 100%);
+  background: var(--color-success);
   color: white;
   box-shadow: 0 4px 14px rgba(16, 124, 16, 0.35);
   animation: hero-pop 0.42s cubic-bezier(0.34, 1.56, 0.64, 1);
@@ -582,8 +580,7 @@ onUnmounted(() => {
   padding: 0;
 }
 .toggle-btn.on {
-  background: var(--gradient-primary);
-  box-shadow: 0 1px 6px rgba(79, 110, 247, 0.45);
+  background: var(--color-primary);
 }
 .toggle-btn:focus-visible {
   outline: 2px solid var(--color-primary);
