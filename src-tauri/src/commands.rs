@@ -15,6 +15,14 @@ pub struct AppState {
     pub nodes: Mutex<Vec<ProxyNode>>,
     pub outbounds: Mutex<Vec<Value>>,
     pub app_config: Mutex<AppConfig>,
+    /// Serializes the whole core lifecycle (stop + adapter cleanup + start). Every entry
+    /// point that (re)starts the core — dashboard, tray menu, startup restore, global
+    /// shortcuts — goes through `apply_connection_mode`/`ensure_core`, which hold this lock
+    /// for their full body. Without it, a tray toggle racing a dashboard toggle (or a fast
+    /// off→on) interleaves two stop/start sequences, so two cores fight over the Clash API
+    /// port and the TUN adapter and the second fails its readiness check ("控制端口未就绪").
+    /// An async (tokio) mutex is required because the critical section awaits.
+    pub core_lock: tokio::sync::Mutex<()>,
 }
 
 /// Holds cloned handles to tray check-menu items so commands can update them.
@@ -42,6 +50,19 @@ pub struct TrayState {
 /// instance was started in a different TUN mode. Does NOT touch the system proxy.
 /// Returns once the core is up (or immediately if it was already in the right mode).
 pub async fn ensure_core(
+    app_handle: &tauri::AppHandle,
+    state: &AppState,
+    want_tun: bool,
+) -> Result<(), String> {
+    // Serialize against any other core (re)start — see AppState::core_lock.
+    let _guard = state.core_lock.lock().await;
+    ensure_core_inner(app_handle, state, want_tun).await
+}
+
+/// Inner body of [`ensure_core`]. Assumes the caller ALREADY holds `core_lock`; call this
+/// (never `ensure_core`) from inside the lock — e.g. `apply_connection_mode` — so the
+/// non-reentrant async mutex doesn't deadlock.
+async fn ensure_core_inner(
     app_handle: &tauri::AppHandle,
     state: &AppState,
     want_tun: bool,
@@ -83,10 +104,6 @@ pub async fn ensure_core(
         let _ = config::save_app_config(&cfg_clone);
     }
 
-    if want_tun {
-        crate::tun::cleanup_stale_tun_adapter().await;
-    }
-
     let config = state.app_config.lock().unwrap().clone();
     let outbounds = state.outbounds.lock().unwrap().clone();
     let nodes = state.nodes.lock().unwrap().clone();
@@ -107,6 +124,13 @@ pub async fn ensure_core(
     // (adapter-cleanup) shutdown is only needed when it was previously in TUN mode.
     if running {
         let _ = stop_singbox(state.singbox_state.clone(), current_tun).await;
+    }
+
+    // Remove any leftover TUN adapter now that the previous core is stopped (so it is not
+    // in use). Running this BEFORE the stop would no-op against an adapter the old core
+    // still holds, leaving a conflicting adapter for the new core. Cold-path, TUN-only.
+    if want_tun {
+        crate::tun::cleanup_stale_tun_adapter().await;
     }
 
     start_singbox(app_handle, &config_path, state.singbox_state.clone(), config.api_port, want_tun)
@@ -184,6 +208,12 @@ pub async fn apply_connection_mode(
     state: &AppState,
     mode: &str,
 ) -> Result<(), String> {
+    // Hold the core lifecycle lock for the WHOLE switch so a concurrent tray/dashboard/
+    // startup mode change can't interleave its own stop/start with ours (see core_lock).
+    // Inside this guard we must call `ensure_core_inner` (already-locked variant), never
+    // `ensure_core`, or the non-reentrant mutex would deadlock.
+    let _guard = state.core_lock.lock().await;
+
     if mode == "off" {
         let _ = proxy::set_system_proxy(false, 0, false);
         // If TUN is active, return the core to the idle mixed-only state.
@@ -193,7 +223,7 @@ pub async fn apply_connection_mode(
         };
         if in_tun {
             // Best-effort: failing to rebuild idle still leaves us with proxy cleared.
-            let _ = ensure_core(app_handle, state, false).await;
+            let _ = ensure_core_inner(app_handle, state, false).await;
         }
         let mut cfg = state.app_config.lock().unwrap();
         cfg.last_proxy_running = false;
@@ -208,7 +238,7 @@ pub async fn apply_connection_mode(
     let prev_tun = state.app_config.lock().unwrap().tun_enabled;
 
     // Ensure the core is up in the right mode (instant when only the system proxy changes).
-    if let Err(e) = ensure_core(app_handle, state, want_tun).await {
+    if let Err(e) = ensure_core_inner(app_handle, state, want_tun).await {
         // Roll back the TUN flag if ensure_core changed it but couldn't start.
         if state.app_config.lock().unwrap().tun_enabled != prev_tun {
             let mut cfg = state.app_config.lock().unwrap();

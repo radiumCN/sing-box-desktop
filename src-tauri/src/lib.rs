@@ -114,6 +114,7 @@ pub fn run() {
         nodes: Mutex::new(nodes),
         outbounds: Mutex::new(outbounds),
         app_config: Mutex::new(app_config),
+        core_lock: tokio::sync::Mutex::new(()),
     };
 
     tauri::Builder::default()
